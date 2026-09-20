@@ -1,0 +1,68 @@
+# 開発計画と進捗
+
+## 現在地
+
+Phase 0の調査・設計と独立レビューは完了。実装・Androidビルド・実機検証は未実行。今回のbranchは`docs/phase0-design`。成果物のmergeは未決の提案の採用や実測完了を意味しない。
+
+| 作業 | 状態 | 成果物・証拠 |
+|---|---|---|
+| 要求整理と前提確認 | done | Android 11暫定下限・必要なら引上げ可、INTERNETなし、製品のニューラルエンジン一つをユーザーが指定 |
+| Android API調査 | done | docs/research/android-platform.md |
+| エンジン・ライセンス調査 | done | docs/research/conversion-engines.md |
+| UX・評価調査 | done | docs/research/ux-and-evaluation.md |
+| 状態設計とMVP・段階計画 | done | docs/phase0-proposal.md、docs/live-conversion-design.md、本書 |
+| 独立レビューと文書検証 | done | 2026-09-20、7文書の要求/API保証/license区分/状態/MVP整合を確認し合格。Android 17メモリ制限の指摘を修正して再確認。相対リンク・表列数・fence・git diff --cached --checkも合格 |
+| Phase 1以降 | pending | 本文の実装着手条件を満たしてから開始 |
+
+## 二つの到達点
+
+**基盤MVP（Phase 1）**：12-key、英語QWERTY、数字・記号、composing、常時候補バー、基本変換、確定、削除、カーソル、editor actionが互換試験を通る。明示変換を使い、入力基盤の正しさを確認する。
+
+**ライブ変換MVP（Phase 2）**：基盤MVPに非同期変換、segmentの安定化と選択保護、IME内からの過去segment訂正、境界処理、ON/OFF、composition内Undo/Redo、最小ユーザー辞書を加える。正しい文で確定操作を省けることを測定する。自分が常用できるかの評価を開始する段階であり、完成した一般公開版ではない。
+
+ユーザー辞書は必須要件のため、Phase 1で登録・検索・編集・削除の最小形、Phase 2終了までにimport/exportを用意する案とする。Phase 4では大量編集・形式互換・管理UIを充実する。
+
+## 段階と検証
+
+| Phase / 作業単位 | 依存・担当範囲 | 完了条件・検証 | 次へ進めない条件 |
+|---|---|---|---|
+| 0 調査・設計 | API、変換器、UXを独立調査し統合 | 一次資料、license区分、状態遷移、要求対応、未決事項の独立レビュー | APIの保証や未実測値を事実として記載している |
+| 1a 接続・状態 | IME基盤担当。開発環境とSDK導入範囲を先に決める | EditText/Compose/WebView試験、inputType/action、selection、接続切替、再作成 | 文字の欠落・二重入力・別接続書込み |
+| 1b キー入力 | UI担当。1aの入力イベント契約を共有 | flick、濁点/半濁点、小文字、long press、repeat、QWERTY、数字記号、haptics、TalkBack | ジェスチャーの誤判定や押下が推論待ちになる |
+| 1c 基本変換・辞書 | 変換担当。ライセンスとAndroidビルドの試作後に採用 | offline候補、読み・範囲の整合、辞書CRUD、数値・固有名詞、modelなし起動 | 配布許諾不明、戻り値とalignmentが不整合 |
+| 2a ライブ状態 | 編集状態担当。1a/1c完了後 | 決定的なイベント列で安定化、chosen保護、古い応答拒否、境界、ON/OFF | 過去の正しい保護segmentを書き換える |
+| 2b 訂正とUndo | UI担当と状態担当、所有範囲を分ける | 過去segment訂正・末尾復帰、「よい→良い」、候補誤選択の一回Undo/Redo、辞書入出力 | 文全体の再入力を要する、Undoが外部編集を壊す |
+| 2c 常用試験 | 評価担当。機種と条件を固定 | 同じ文課題でライブON/OFF、既存IMEと操作数・時間・誤書換え比較 | 安全性の未解決不具合、訂正コストの悪化 |
+| 3a 単一neural選定 | 変換担当。候補を開発時だけ入替え評価 | 品質・latency・RSS・cold start・battery・OSメモリ制限下の終了有無と訂正率を同じ条件で測定 | 品質向上が入力遅延や過去書換えを悪化させる、メモリ制限で終了する |
+| 3b 品質改善 | 3aとデータ条件の合意後 | 文脈・reranking・学習・辞書、held-outで比較、個人学習削除確認 | test混入、条件不明、秘密情報利用、改善の再現不能 |
+| 4a Autofill | Android連携担当。provider含む実機環境 | username/password/address、利用可能ならpasskey、認証/取消、候補共存、秘密がIMEへ露出しない | 独自credential取得、すべてのproviderで動くと誤認 |
+| 4b 日常パネル | 保存方針確定後にUI/保存担当を分離 | Clipboard pin/削除/全削除/検索/期限/重複、emoji/顔文字/記号の分類・最近・検索・お気に入り、定型文、辞書互換 | sensitive保存や期限超過保持、import破損で既存データ消失 |
+| 5 外観設定 | 入力設定と分離したデータ形式担当、描画担当 | 背景画像、サイズ、片手、色・文字・透過・明度、テーマ保存/複製/入出力、回転/大文字設定 | タップ領域の破壊、読めない初期値、テーマimportの安全性不足 |
+
+各作業単位を検証後にcommitし、目的が一つにまとまったPRを作成・確認・mergeする。依存先をmergeしてから次の固定した開始点を選び、並列担当の所有範囲を重ねない。レビュー担当は作成担当と分ける。今回の調査PR以降も、無関係な設定変更・公開release・ライセンス決定を包括的に許可されたものと解釈しない。
+
+## 共通の互換試験
+
+最小OS/API 30、中間API 33/35、調査時の最新安定版を対象に、arm64実機の性能とemulatorのAPI互換性を分ける。previewは補助試験にする。常用機種・RAMが不明なので実機性能の合格はまだ判定できない。
+
+View EditText、Compose TextField、WebView、Chrome、単一行/複数行、Search/Send/Done/Next、URL/email/number、password/PIN、no-personalized-learning、選択範囲の置換を含む。アプリ・OS・WebView/providerのversionと試験日を記録する。
+
+回転、split screen、insets/ジェスチャーナビ、hardware keyboard、IME切替、バックキー、フォーカス喪失、低メモリ・プロセス再作成、入力中モデル切断/失敗を追加する。未実行のセルを合格扱いにしない。
+
+Android 17の実機では`adb shell am memory-limiter status`で制限状態を記録し、モデル・辞書・UIの同時使用を評価する。`ApplicationExitInfo`の`REASON_OTHER`かつdescriptionに`MemoryLimiter:AnonSwap`を含む終了は採用試験の失敗とする。制限を無効化した計測で合格させない。詳細は[Android調査](../docs/research/android-platform.md)を参照する。
+
+## 常用機能の設計方針
+
+- Clipboardは履歴、定型文は意図して保存した再利用文としてデータ上は分け、共通パネルからアクセスできるようにする。pinは自動削除の例外として明示する。保持数・期限・backupは採用前に決める。
+- Emoji/顔文字/記号はオフライン検索可能な許諾済みデータを用いる。検索語とカテゴリ・最近使用・お気に入りを共通化し、入力内容に応じた混在候補は後から評価する。
+- Themeはversionを持つデータとし、外観と入力挙動の設定を分離する。背景画像はファイル選択を使い、bitmapサイズ制限と縮小を行う。fontやblur等は効果と描画コストを確認して段階導入する。
+- 常時toolbar一行は初期既定にしない案とする。候補行の入口からパネルを開き、Inline Suggestions表示時は高さと訂正への戻りやすさを測る。発見可能性を実機で検証して確定する。
+
+## 実装着手前の判断と次の一手
+
+1. Phase 0レビュー結果を確認し、MVPの採用範囲と暫定構成を合意する。
+2. 常用端末・評価端末を特定する。なければ性能選定を保留してAPI互換試作から始める。
+3. JDK/SDK/NDK等の既存環境を確認し、必要な導入だけ範囲を示して承認を得る。
+4. 変換器のlicense固定とAndroid組込み試作を行い、Phase 1cの採用を決める。学習/重い外部実行は別途条件を合意する。
+
+本計画の検証基準・性能値は提案であり、まだ測定を実施した研究条件ではない。実験開始前に課題集合、比較条件、測定方法と合格基準を固定し、実行後に都合よく変えない。
