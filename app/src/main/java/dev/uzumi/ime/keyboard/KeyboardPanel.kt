@@ -1,0 +1,448 @@
+package dev.uzumi.ime.keyboard
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+
+/**
+ * 日本語12キーフリック・英語QWERTY・数字記号キーボードを提供するメインUIパネル。
+ *
+ * @param context コンテキスト
+ * @param onAction キーボード操作イベントを通知するコールバック
+ */
+// 必須コールバックを伴うプログラム生成専用Viewであり、XMLからは生成しない。
+@SuppressLint("ViewConstructor")
+class KeyboardPanel(
+    context: Context,
+    private val onAction: (KeyboardAction) -> Unit,
+) : LinearLayout(context) {
+
+    private val density = context.resources.displayMetrics.density
+    private var currentMode = KeyboardMode.KANA
+    private var lastNormalMode = KeyboardMode.KANA
+
+    private var isShifted = false
+    private var isCapsLock = false
+    private var lastShiftPressTime = 0L
+
+    private var actionLabel = "確定"
+    private var isNumericField = false
+    private var isPasswordField = false
+
+    private val allKeyViews = mutableListOf<KeyView>()
+    private val enterKeyViews = mutableListOf<KeyView>()
+    private val qwertyKeyViews = mutableListOf<KeyView>()
+    private val shiftKeyViews = mutableListOf<KeyView>()
+
+    private var qwertySwitchKey: KeyView? = null
+    private var numericSwitchKey: KeyView? = null
+
+    private lateinit var kanaContainer: LinearLayout
+    private lateinit var qwertyContainer: LinearLayout
+    private lateinit var numericContainer: LinearLayout
+
+    init {
+        orientation = VERTICAL
+        setBackgroundColor(0xFFD7DADC.toInt())
+        val pad = (3f * density).toInt()
+        setPadding(pad, pad, pad, pad)
+
+        initLayouts()
+        updateSwitchKeys()
+        updateModeVisibility()
+    }
+
+    /**
+     * エディタの入力種別に応じてキーボードの初期表示モードを設定する。
+     *
+     * @param numeric 数値入力欄（暗証番号、電話番号、金額など）かどうか
+     * @param password パスワード入力欄（予測変換不要・直接英語入力）かどうか
+     */
+    fun setEditorMode(numeric: Boolean, password: Boolean) {
+        this.isNumericField = numeric
+        this.isPasswordField = password
+
+        updateSwitchKeys()
+
+        if (numeric) {
+            switchMode(KeyboardMode.NUMERIC)
+        } else if (password) {
+            // パスワード入力欄では予測不要の英語表示（QWERTY）へ切り替え
+            switchMode(KeyboardMode.QWERTY)
+        } else {
+            switchMode(lastNormalMode)
+        }
+    }
+
+    /**
+     * Enter/確定キーのアクションラベルを設定する（例: "検索", "改行", "確定", "次へ" など）。
+     *
+     * @param label 設定する文言
+     */
+    fun setActionLabel(label: String) {
+        this.actionLabel = label.ifEmpty { "確定" }
+        enterKeyViews.forEach { it.updateActionLabel(this.actionLabel) }
+    }
+
+    /**
+     * 保留中のタッチ入力、フリック判定、リピート処理等を直ちに中断する。
+     */
+    fun cancelPendingInput() {
+        allKeyViews.forEach { it.cancelPendingInput() }
+    }
+
+    override fun onDetachedFromWindow() {
+        cancelPendingInput()
+        super.onDetachedFromWindow()
+    }
+
+    /**
+     * 各入力モード用のViewコンテナを初期化する。
+     */
+    private fun initLayouts() {
+        kanaContainer = buildKanaLayout()
+        qwertyContainer = buildQwertyLayout()
+        numericContainer = buildNumericLayout()
+
+        val lp = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+        addView(kanaContainer, lp)
+        addView(qwertyContainer, lp)
+        addView(numericContainer, lp)
+    }
+
+    /**
+     * 入力モードを切り替える。モード変更時に全キーの押下状態・リピートを確実に破棄する。
+     */
+    private fun switchMode(mode: KeyboardMode) {
+        // モード変更で押下状態・リピートを完全に破棄
+        cancelPendingInput()
+
+        // パスワード入力時は常に英語または数字のみ
+        val resolvedMode = if (isPasswordField && mode == KeyboardMode.KANA) {
+            KeyboardMode.QWERTY
+        } else {
+            mode
+        }
+
+        currentMode = resolvedMode
+        if (!isNumericField && !isPasswordField && (resolvedMode == KeyboardMode.KANA || resolvedMode == KeyboardMode.QWERTY)) {
+            lastNormalMode = resolvedMode
+        }
+        updateModeVisibility()
+    }
+
+    /**
+     * 現在のパスワード状態等に応じて切替キーの表示ラベルと遷移先を動的に更新する。
+     */
+    private fun updateSwitchKeys() {
+        if (isPasswordField) {
+            qwertySwitchKey?.updateModeSwitch("123", KeyboardMode.NUMERIC)
+            numericSwitchKey?.updateModeSwitch("ABC", KeyboardMode.QWERTY)
+        } else {
+            qwertySwitchKey?.updateModeSwitch("あ/123", KeyboardMode.KANA)
+            numericSwitchKey?.updateModeSwitch("あ/A", KeyboardMode.KANA)
+        }
+    }
+
+    /**
+     * 現在のモードに応じてコンテナの表示状態を更新する。
+     */
+    private fun updateModeVisibility() {
+        kanaContainer.visibility = if (currentMode == KeyboardMode.KANA) View.VISIBLE else View.GONE
+        qwertyContainer.visibility = if (currentMode == KeyboardMode.QWERTY) View.VISIBLE else View.GONE
+        numericContainer.visibility = if (currentMode == KeyboardMode.NUMERIC) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * アクション委譲と自動Shift解除を行う共通コールバック。
+     */
+    private fun dispatchAction(action: KeyboardAction) {
+        onAction(action)
+        if (action is KeyboardAction.Text && isShifted && !isCapsLock) {
+            isShifted = false
+            updateQwertyShiftViews()
+        }
+    }
+
+    /**
+     * Shiftキーの押下（単押し: Shiftトグル、素早いダブルタップ: Caps Lockトグル）。
+     */
+    private fun toggleShift() {
+        val now = System.currentTimeMillis()
+        if (isCapsLock) {
+            isCapsLock = false
+            isShifted = false
+        } else if (isShifted) {
+            if (now - lastShiftPressTime < DOUBLE_TAP_TIMEOUT_MS) {
+                isCapsLock = true
+                isShifted = false
+            } else {
+                isShifted = false
+            }
+        } else {
+            isShifted = true
+        }
+        lastShiftPressTime = now
+        updateQwertyShiftViews()
+    }
+
+    /**
+     * QWERTY配列の各文字キーおよびShiftキーへ最新のShift/Caps Lock状態を反映する。
+     * Shift切替や大文字入力後の自動小文字復帰時に、キートップ表示と文字入力を一括で同期させるために必要であり、
+     * パネル全体における英語入力状態の視覚的一貫性を保つ役割を担う。
+     */
+    private fun updateQwertyShiftViews() {
+        qwertyKeyViews.forEach { it.updateShiftState(isShifted, isCapsLock) }
+        shiftKeyViews.forEach { it.updateShiftState(isShifted, isCapsLock) }
+    }
+
+    /**
+     * 12キーかなレイアウトを構築する（5列×4行）。
+     */
+    private fun buildKanaLayout(): LinearLayout {
+        val container = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+        }
+
+        val rowHeight = (52f * density).toInt()
+
+        // Row 0: [切替: 英字] [あ] [か] [さ] [削除]
+        val row0 = createRow(rowHeight).apply {
+            addView(createKey(KeySpec.ModeSwitch("あ/A", KeyboardMode.QWERTY), 1.0f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.A), 1.2f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.KA), 1.2f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.SA), 1.2f))
+            addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.0f))
+        }
+
+        // Row 1: [カーソル←] [た] [な] [は] [変換]
+        val row1 = createRow(rowHeight).apply {
+            addView(createKey(KeySpec.Action(KeyboardAction.MoveCursor(-1), "◀"), 1.0f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.TA), 1.2f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.NA), 1.2f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.HA), 1.2f))
+            addView(createKey(KeySpec.Action(KeyboardAction.Convert, "変換"), 1.0f))
+        }
+
+        // Row 2: [カーソル→] [ま] [や] [ら] [空白]
+        val row2 = createRow(rowHeight).apply {
+            addView(createKey(KeySpec.Action(KeyboardAction.MoveCursor(1), "▶"), 1.0f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.MA), 1.2f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.YA), 1.2f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.RA), 1.2f))
+            addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 1.0f))
+        }
+
+        // Row 3: [数字切替] [記号] [わ] [小゛゜] [Enter]
+        val row3 = createRow(rowHeight).apply {
+            addView(createKey(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), 1.0f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.PUNCT), 1.2f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.WA), 1.2f))
+            addView(createKey(KeySpec.Action(KeyboardAction.TransformKana, "小゛゜"), 1.2f))
+            val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1.0f)
+            enterKeyViews.add(enterKey)
+            addView(enterKey)
+        }
+
+        container.addView(row0)
+        container.addView(row1)
+        container.addView(row2)
+        container.addView(row3)
+        return container
+    }
+
+    /**
+     * 英語QWERTYレイアウトを構築する（4行構成）。
+     */
+    private fun buildQwertyLayout(): LinearLayout {
+        val container = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+        }
+
+        val rowHeight = (48f * density).toInt()
+
+        // Row 0: q w e r t y u i o p
+        val row0Keys = listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p")
+        val row0 = createRow(rowHeight)
+        row0Keys.forEach { char ->
+            val key = createKey(KeySpec.SimpleText(char), 1.0f)
+            qwertyKeyViews.add(key)
+            row0.addView(key)
+        }
+
+        // Row 1: a s d f g h j k l (左右に0.5ウェイトの余白)
+        val row1Keys = listOf("a", "s", "d", "f", "g", "h", "j", "k", "l")
+        val row1 = createRow(rowHeight)
+        row1.addView(createSpacer(0.5f))
+        row1Keys.forEach { char ->
+            val key = createKey(KeySpec.SimpleText(char), 1.0f)
+            qwertyKeyViews.add(key)
+            row1.addView(key)
+        }
+        row1.addView(createSpacer(0.5f))
+
+        // Row 2: [Shift] z x c v b n m [Delete]
+        val row2Keys = listOf("z", "x", "c", "v", "b", "n", "m")
+        val row2 = createRow(rowHeight)
+        val shiftKey = createKey(KeySpec.Shift("⇧"), 1.5f)
+        shiftKeyViews.add(shiftKey)
+        row2.addView(shiftKey)
+
+        row2Keys.forEach { char ->
+            val key = createKey(KeySpec.SimpleText(char), 1.0f)
+            qwertyKeyViews.add(key)
+            row2.addView(key)
+        }
+
+        val delKey = createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.5f)
+        row2.addView(delKey)
+
+        // Row 3: [切替] [,] [Space] [.] [Enter]
+        val row3 = createRow(rowHeight)
+        val switchKey = createKey(KeySpec.ModeSwitch("あ/123", KeyboardMode.KANA), 1.5f)
+        qwertySwitchKey = switchKey
+        row3.addView(switchKey)
+
+        val commaKey = createKey(KeySpec.SimpleText(","), 1.0f)
+        row3.addView(commaKey)
+
+        val spaceKey = createKey(KeySpec.Action(KeyboardAction.Space, "Space"), 4.0f)
+        row3.addView(spaceKey)
+
+        val periodKey = createKey(KeySpec.SimpleText("."), 1.0f)
+        row3.addView(periodKey)
+
+        val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 2.0f)
+        enterKeyViews.add(enterKey)
+        row3.addView(enterKey)
+
+        container.addView(row0)
+        container.addView(row1)
+        container.addView(row2)
+        container.addView(row3)
+        return container
+    }
+
+    /**
+     * 数字・記号テンキーレイアウトを構築する（4行×5列）。
+     */
+    private fun buildNumericLayout(): LinearLayout {
+        val container = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+        }
+
+        val rowHeight = (52f * density).toInt()
+
+        // Row 0: [1] [2] [3] [/] [削除]
+        val row0 = createRow(rowHeight).apply {
+            addView(createKey(KeySpec.SimpleText("1"), 1.0f))
+            addView(createKey(KeySpec.SimpleText("2"), 1.0f))
+            addView(createKey(KeySpec.SimpleText("3"), 1.0f))
+            addView(createKey(KeySpec.SimpleText("/"), 1.0f))
+            addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.0f))
+        }
+
+        // Row 1: [4] [5] [6] [*] [-]
+        val row1 = createRow(rowHeight).apply {
+            addView(createKey(KeySpec.SimpleText("4"), 1.0f))
+            addView(createKey(KeySpec.SimpleText("5"), 1.0f))
+            addView(createKey(KeySpec.SimpleText("6"), 1.0f))
+            addView(createKey(KeySpec.SimpleText("*"), 1.0f))
+            addView(createKey(KeySpec.SimpleText("-"), 1.0f))
+        }
+
+        // Row 2: [7] [8] [9] [空白] [+]
+        val row2 = createRow(rowHeight).apply {
+            addView(createKey(KeySpec.SimpleText("7"), 1.0f))
+            addView(createKey(KeySpec.SimpleText("8"), 1.0f))
+            addView(createKey(KeySpec.SimpleText("9"), 1.0f))
+            addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 1.0f))
+            addView(createKey(KeySpec.SimpleText("+"), 1.0f))
+        }
+
+        // Row 3: [かな/英字切替] [0] [.] [,] [Enter]
+        val row3 = createRow(rowHeight).apply {
+            val returnKey = createKey(KeySpec.ModeSwitch("あ/A", KeyboardMode.KANA), 1.0f)
+            numericSwitchKey = returnKey
+            addView(returnKey)
+
+            addView(createKey(KeySpec.SimpleText("0"), 1.0f))
+            addView(createKey(KeySpec.SimpleText("."), 1.0f))
+            addView(createKey(KeySpec.SimpleText(","), 1.0f))
+            val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1.0f)
+            enterKeyViews.add(enterKey)
+            addView(enterKey)
+        }
+
+        container.addView(row0)
+        container.addView(row1)
+        container.addView(row2)
+        container.addView(row3)
+        return container
+    }
+
+    /**
+     * 指定した高さと上下マージンを持つ水平方向のLinearLayout（行コンテナ）を生成する。
+     * 複数キーを均等ウェイトで横一列に配置し、行間の余白を統一的に確保するために必要であり、
+     * キーボード各レイアウトの段組みを組み立てる共通の行基盤としての役割を担う。
+     */
+    private fun createRow(heightPx: Int): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, heightPx).apply {
+                val marginV = (1.5f * density).toInt()
+                setMargins(0, marginV, 0, marginV)
+            }
+        }
+    }
+
+    /**
+     * キー定義（KeySpec）とウェイトからKeyViewを生成し、共通設定とイベントコールバックを結線する。
+     * タップ領域（最小高48dp）の確保、アクション中継、パスワード欄での安全なモード切替を集約し、
+     * 全キーリスト（allKeyViews）へ登録して一括状態管理を可能にする役割を担う。
+     */
+    private fun createKey(spec: KeySpec, weight: Float): KeyView {
+        val keyView = KeyView(context).apply {
+            layoutParams = LayoutParams(0, LayoutParams.MATCH_PARENT, weight).apply {
+                val marginH = (1.5f * density).toInt()
+                setMargins(marginH, 0, marginH, 0)
+            }
+            minimumHeight = (48f * density).toInt()
+            setKeySpec(
+                spec = spec,
+                onAction = { dispatchAction(it) },
+                onModeSwitch = { targetMode ->
+                    // 実行時のpassword状態に応じて安全に切り替え
+                    val actualTarget = if (isPasswordField) {
+                        if (targetMode == KeyboardMode.KANA) KeyboardMode.QWERTY else targetMode
+                    } else {
+                        targetMode
+                    }
+                    switchMode(actualTarget)
+                },
+                onShiftToggle = { toggleShift() },
+            )
+        }
+        allKeyViews.add(keyView)
+        return keyView
+    }
+
+    /**
+     * 指定ウェイトを持つ透明なスペーサーViewを生成する。
+     * QWERTYの2行目などキー数が少ない行の左右に適切な空白を配置し、キー配置のセンタリングと押しやすさを整える役割を担う。
+     */
+    private fun createSpacer(weight: Float): View {
+        return View(context).apply {
+            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, weight)
+        }
+    }
+
+    companion object {
+        private const val DOUBLE_TAP_TIMEOUT_MS = 350L
+    }
+}

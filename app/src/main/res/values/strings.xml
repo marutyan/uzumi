@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Uzumi</string>
+    <string name="ime_name">Uzumi日本語入力</string>
+    <string name="ime_subtype_japanese">日本語</string>
+    <string name="setup_title">Uzumiを使う</string>
+    <string name="setup_steps">1. システム設定でUzumiを有効にします。\n2. 入力方法の選択からUzumiへ切り替えます。</string>
+    <string name="open_keyboard_settings">キーボード設定を開く</string>
+    <string name="choose_input_method">入力方法を選ぶ</string>
+    <string name="trial_input_title">試し入力</string>
+    <string name="trial_input_hint">ここへ入力できます</string>
+    <string name="candidate_button_label">%1$s　%2$s</string>
+    <string name="candidate_hint_default">かな・カナ候補</string>
+    <string name="candidate_hint_sensitive">機密入力：候補を表示しません</string>
+    <string name="candidate_hint_compatibility">互換入力：候補を表示しません</string>
+</resources>
