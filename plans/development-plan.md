@@ -2,7 +2,7 @@
 
 ## 現在地
 
-Phase 0の調査・設計と独立レビューは完了。実装・Androidビルド・実機検証は未実行。今回のbranchは`docs/phase0-design`。成果物のmergeは未決の提案の採用や実測完了を意味しない。
+Phase 0はPR #1で完了し、2026-09-21のユーザー指示でPhase 1へ着手。現在は`feature/ime-bootstrap`で入力基盤とキーUIを統合し、APK生成・単体テスト49件・lintを確認した段階。2026-09-22の再レビューで再現した空白確定時の遅延通知による文字欠落は修正し、独立レビューでも解消を確認した。入力基盤の初回実装を一つの作業単位として統合する。実機での互換性・性能は未検証であり、漢字変換とユーザー辞書を含むPhase 1全体の完成ではない。
 
 | 作業 | 状態 | 成果物・証拠 |
 |---|---|---|
@@ -12,7 +12,10 @@ Phase 0の調査・設計と独立レビューは完了。実装・Androidビル
 | UX・評価調査 | done | docs/research/ux-and-evaluation.md |
 | 状態設計とMVP・段階計画 | done | docs/phase0-proposal.md、docs/live-conversion-design.md、本書 |
 | 独立レビューと文書検証 | done | 2026-09-20、7文書の要求/API保証/license区分/状態/MVP整合を確認し合格。Android 17メモリ制限の指摘を修正して再確認。相対リンク・表列数・fence・git diff --cached --checkも合格 |
-| Phase 1以降 | pending | 本文の実装着手条件を満たしてから開始 |
+| Phase 1a 入力基盤 | in_progress | 初回実装・49単体テスト・独立レビュー完了。実機互換試験は未実施 |
+| Phase 1b キーUI | in_progress | 12-key flick、英語QWERTY、数字・記号の実装・ローカル検証完了。操作感とTalkBack実機試験は未実施 |
+| Phase 1c 漢字変換・辞書 | in_progress | [JNI・辞書資産・追加導入の確認](../docs/mozc-integration-plan.md)完了。native buildと組込みは未実施 |
+| Phase 2以降 | pending | Phase 1の受入条件を満たしてから開始 |
 
 ## 二つの到達点
 
@@ -43,7 +46,7 @@ Phase 0の調査・設計と独立レビューは完了。実装・Androidビル
 
 ## 共通の互換試験
 
-最小OS/API 30、中間API 33/35、調査時の最新安定版を対象に、arm64実機の性能とemulatorのAPI互換性を分ける。previewは補助試験にする。常用機種・RAMが不明なので実機性能の合格はまだ判定できない。
+最小OS/API 30、中間API 33/35、調査時の最新安定版を対象に、arm64実機の性能とemulatorのAPI互換性を分ける。previewは補助試験にする。接続端末はPixel 10 Pro、Android 17/API 37、約16 GB RAMと確認した。これを常用端末とするかは未確認で、実機性能の合格もまだ判定していない。
 
 View EditText、Compose TextField、WebView、Chrome、単一行/複数行、Search/Send/Done/Next、URL/email/number、password/PIN、no-personalized-learning、選択範囲の置換を含む。アプリ・OS・WebView/providerのversionと試験日を記録する。
 

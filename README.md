@@ -2,7 +2,9 @@
 
 確定操作を減らし、誤変換をその場で直せるAndroid向け日本語IMEを目指すプロジェクトです。
 
-現在はPhase 0の調査・設計段階です。Androidアプリ、変換性能、日常利用での互換性はまだ検証していません。
+Phase 1の入力基盤として、Android IMEサービス、かな・英字・数字キーボード、composition、かな・カナ候補、確定・削除・カーソル・editor actionを実装しています。設定画面からIMEの有効化と切替へ進み、同じ画面のEditTextで入力を試せます。
+
+漢字変換、ニューラル変換、ユーザー辞書はまだ含みません。ローカルのbuild・JVMテスト・lintは通過していますが、実機へインストールした互換性試験は未実施です。確認済みの範囲は[Phase 1検証記録](docs/phase1-validation.md)に記載します。
 
 - [要求・推奨方針](docs/phase0-proposal.md)
 - [Android公式APIと制約](docs/research/android-platform.md)
@@ -12,3 +14,13 @@
 - [段階的な計画・進捗](plans/development-plan.md)
 
 ユーザーが選んだ候補と安定した過去の変換を保護し、通常の入力内容をサーバーへ送らず、日々の入力速度・訂正しやすさ・見た目を優先します。
+
+## ローカル確認
+
+Android SDKを指定できる環境で、次を実行します。
+
+```sh
+./gradlew testDebugUnitTest assembleDebug lintDebug
+```
+
+debug APKは`app/build/outputs/apk/debug/app-debug.apk`へ生成されます。このプロジェクトは`INTERNET`権限を宣言しません。
