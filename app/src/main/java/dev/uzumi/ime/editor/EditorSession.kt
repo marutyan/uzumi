@@ -1,5 +1,10 @@
 package dev.uzumi.ime.editor
 
+import dev.uzumi.ime.conversion.ConversionClient
+import dev.uzumi.ime.conversion.ConversionOutcome
+import dev.uzumi.ime.conversion.ConversionRequest
+import dev.uzumi.ime.conversion.ConversionResult
+
 /**
  * 一つのEditorInfoとInputConnectionに結び付いた編集セッションを管理する。
  * 切替後の接続へcompositionや遅延イベントを送らない境界として機能する。
@@ -9,8 +14,18 @@ class EditorSession(
     val policy: InputFieldPolicy,
     initialSelectionStart: Int = 0,
     initialSelectionEnd: Int = initialSelectionStart,
+    // フィールドや接続ごとに異なる番号。変換応答を別のフィールドへ適用しないために要求へ含める。
+    val sessionEpoch: Long = 0,
+    // 変換エンジンへの非同期窓口。nullまたは利用不可なら、かな・カナ候補だけで動く。
+    private val conversionClient: ConversionClient? = null,
 ) {
     private val buffer = CompositionBuffer()
+    // compositionの内容が変わるたびに増える番号。変換応答が現在の読みに対するものかを照合する。
+    private var revision = 0L
+    private var pendingConversion: ConversionRequest? = null
+    private var appliedConversion: ConversionResult? = null
+    // 変換が失敗・時間超過したrevision。同じ読みでの再度の変換操作はカナ候補へ戻す。
+    private var failedConversionRevision: Long? = null
     private var active = true
     private var selectionStart: Int? = if (initialSelectionStart >= 0 && initialSelectionEnd >= 0) {
         minOf(initialSelectionStart, initialSelectionEnd)
@@ -35,8 +50,21 @@ class EditorSession(
     /** compositionの現在状態をUIや候補行へ返す。 */
     fun compositionSnapshot(): CompositionSnapshot = buffer.snapshot()
 
-    /** 現在の読みから基本候補を作る。 */
+    /** 応答を待っている変換要求。UIが時間超過を判定するために使う。 */
+    val pendingConversionRequest: ConversionRequest?
+        get() = pendingConversion
+
+    /** 変換結果を表示中なら変換候補、そうでなければ現在の読みから基本候補を作る。 */
     fun candidateOptions(): List<CandidateOption> {
+        currentConversion()?.let { conversion ->
+            return conversion.headCandidates.map { candidate ->
+                CandidateOption(
+                    value = candidate.value,
+                    label = "",
+                    conversionChoice = ConversionChoice(conversion.request, candidate.id),
+                )
+            }
+        }
         return BasicCandidateProvider.candidates(buffer.reading, policy.suppressSuggestions)
     }
 
@@ -52,9 +80,12 @@ class EditorSession(
             return accepted
         }
 
+        // 変換結果の表示中に続けて入力した場合は、表示中の変換を確定してから新しい読みを始める。
+        if (currentConversion() != null && !commitComposition()) return false
         if (compositionStart == null && selectionStart != null && selectionEnd != null) {
             compositionStart = minOf(selectionStart!!, selectionEnd!!)
         }
+        markCompositionChanged()
         buffer.insert(value)
         if (synchronizeComposition()) return true
         failClosed()
@@ -68,6 +99,7 @@ class EditorSession(
         if (!active) return false
         if (!buffer.isEmpty) {
             if (!buffer.deleteBackward()) return false
+            markCompositionChanged()
             if (synchronizeComposition()) return true
             failClosed()
             return false
@@ -93,6 +125,7 @@ class EditorSession(
         if (!buffer.isEmpty) {
             val before = buffer.snapshot()
             if (!buffer.moveCursor(delta)) return false
+            markCompositionChanged()
             if (before.display != before.reading) {
                 if (synchronizeComposition()) return true
                 failClosed()
@@ -150,17 +183,58 @@ class EditorSession(
     fun commitComposition(): Boolean {
         if (!active) return false
         if (buffer.isEmpty) return true
-        val text = buffer.display
-        val start = compositionStart ?: knownSelectionStart()
-        val accepted = connection.commitText(text, 1)
-        if (!accepted) {
+        val conversion = currentConversion()
+        if (!commitCompositionAs(buffer.display)) return false
+        conversion?.let { conversionClient?.commitAll(it.request) }
+        return true
+    }
+
+    /**
+     * 表示中の変換候補を選び、先頭文節をその候補で確定する。
+     * 残りの読みは新しいcompositionとして続けて変換を依頼する。表示元の要求が古ければ拒否する。
+     */
+    fun selectConversionCandidate(choice: ConversionChoice): Boolean {
+        if (!active) return false
+        val conversion = currentConversion() ?: return false
+        if (conversion.request != choice.request) return false
+        val candidate = conversion.headCandidates.firstOrNull { it.id == choice.candidateId } ?: return false
+        // isConsistentにより、先頭文節の読みは現在の読みの接頭辞であることが保証されている。
+        val remainingReading = buffer.reading.substring(conversion.segments.first().reading.length)
+        if (!commitCompositionAs(candidate.value)) return false
+        conversionClient?.commitCandidate(conversion.request, candidate.id)
+        if (remainingReading.isEmpty()) return true
+        if (!inputText(remainingReading)) return false
+        return convert()
+    }
+
+    /**
+     * workerから届いた変換応答を、待機中の要求・revision・読みと一致する場合だけ反映する。
+     * 失敗応答や不整合な結果では読みの表示を保ち、かな・カナ候補へ戻す。
+     */
+    fun applyConversionOutcome(outcome: ConversionOutcome): Boolean {
+        val pending = pendingConversion ?: return false
+        if (!active || outcome.request != pending) return false
+        pendingConversion = null
+        if (pending.revision != revision || pending.reading != buffer.reading) return false
+        val result = (outcome as? ConversionOutcome.Converted)?.result?.takeIf(ConversionResult::isConsistent)
+        if (result == null) {
+            failedConversionRevision = revision
+            return false
+        }
+        buffer.setDisplay(result.display)
+        if (!synchronizeComposition()) {
             failClosed()
             return false
         }
-        updateExternalSelectionAfterCommit(text, start)
-        buffer.clear()
-        compositionStart = null
-        clearCompositionExpectations()
+        appliedConversion = result
+        return true
+    }
+
+    /** 時間超過した要求を取り下げ、遅れて届いた応答を適用しないようにする。 */
+    fun abandonConversion(request: ConversionRequest): Boolean {
+        if (pendingConversion != request) return false
+        pendingConversion = null
+        failedConversionRevision = revision
         return true
     }
 
@@ -179,6 +253,7 @@ class EditorSession(
      */
     fun applyCandidate(value: String): Boolean {
         if (!active || policy.suppressSuggestions || value.isEmpty() || buffer.isEmpty) return false
+        markCompositionChanged()
         buffer.setDisplay(value)
         if (synchronizeComposition()) return true
         failClosed()
@@ -189,15 +264,33 @@ class EditorSession(
     fun transformKana(): Boolean {
         if (!active || policy.isTypeNull || buffer.isEmpty) return false
         if (!buffer.transformBeforeCursor(KanaModifier::transform)) return false
+        markCompositionChanged()
         if (synchronizeComposition()) return true
         failClosed()
         return false
     }
 
     /**
-     * 明示変換キーを処理する。現段階ではカタカナ候補を選ぶ。
+     * 明示変換キーを処理する。変換エンジンが使えれば読みの変換を非同期に依頼し、結果を待たずに戻る。
+     * 機密欄・互換入力欄では要求自体を送らない。エンジンが使えない、または同じ読みで失敗済みなら
+     * 従来どおりカタカナ候補を選ぶ。
      */
     fun convert(): Boolean {
+        if (active && !buffer.isEmpty && (pendingConversion != null || currentConversion() != null)) return true
+        val client = conversionClient
+        if (active && !buffer.isEmpty && client != null && client.isAvailable &&
+            !policy.suppressSuggestions && failedConversionRevision != revision
+        ) {
+            val request = ConversionRequest(
+                sessionEpoch = sessionEpoch,
+                revision = revision,
+                reading = buffer.reading,
+                incognito = policy.suppressLearning,
+            )
+            pendingConversion = request
+            client.requestConversion(request)
+            return true
+        }
         val katakana = BasicCandidateProvider.toKatakana(buffer.reading)
         return if (katakana == buffer.display) {
             buffer.reading.isNotEmpty()
@@ -304,10 +397,41 @@ class EditorSession(
         if (!active) return
         active = false
         buffer.clear()
+        markCompositionChanged()
         compositionStart = null
         clearCompositionExpectations()
         pendingCommittedSelections.clear()
         connection.invalidate()
+    }
+
+    /** compositionを確定済みの表記へ置き換えて確定し、内部の読みを空にする。 */
+    private fun commitCompositionAs(text: String): Boolean {
+        val start = compositionStart ?: knownSelectionStart()
+        val accepted = connection.commitText(text, 1)
+        if (!accepted) {
+            failClosed()
+            return false
+        }
+        updateExternalSelectionAfterCommit(text, start)
+        buffer.clear()
+        markCompositionChanged()
+        compositionStart = null
+        clearCompositionExpectations()
+        return true
+    }
+
+    /** compositionの変更を記録し、待機中の要求と表示中の変換結果を無効にする。 */
+    private fun markCompositionChanged() {
+        revision += 1
+        pendingConversion = null
+        appliedConversion = null
+    }
+
+    /** 表示中の変換結果が現在のrevisionと読みに一致する場合だけ返す。 */
+    private fun currentConversion(): ConversionResult? {
+        val conversion = appliedConversion ?: return null
+        if (conversion.request.revision != revision || conversion.request.reading != buffer.reading) return null
+        return conversion
     }
 
     private fun synchronizeComposition(): Boolean {
@@ -431,7 +555,7 @@ class EditorSession(
             }
         } ?: return false
 
-        buffer.setCursor(clusterIndex)
+        if (buffer.setCursor(clusterIndex)) markCompositionChanged()
         compositionStart = start
         selectionStart = cursor
         selectionEnd = cursor
@@ -451,6 +575,7 @@ class EditorSession(
     /** host側にspanがない場合に、Editorへ再送せず内部compositionだけを破棄する。 */
     private fun discardCompositionWithoutEditorCall() {
         buffer.clear()
+        markCompositionChanged()
         compositionStart = null
         clearCompositionExpectations()
         pendingCommittedSelections.clear()
@@ -489,6 +614,7 @@ class EditorSession(
     private fun failClosed() {
         active = false
         buffer.clear()
+        markCompositionChanged()
         compositionStart = null
         clearCompositionExpectations()
         pendingCommittedSelections.clear()

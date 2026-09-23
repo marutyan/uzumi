@@ -1,11 +1,22 @@
 package dev.uzumi.ime.editor
 
+import dev.uzumi.ime.conversion.ConversionRequest
+
 /**
- * 候補行へ表示する最小候補を表す。漢字辞書の結果はこの型へ混ぜない。
+ * 候補行へ表示する最小候補を表す。変換エンジンの候補は、表示元の要求と候補IDをconversionChoiceに持つ。
  */
 data class CandidateOption(
     val value: String,
     val label: String,
+    val conversionChoice: ConversionChoice? = null,
+)
+
+/**
+ * 変換エンジンの候補を選ぶ操作の識別子。タップ時に表示元の要求が現在の変換と一致するかを照合する。
+ */
+data class ConversionChoice(
+    val request: ConversionRequest,
+    val candidateId: Int,
 )
 
 /**
