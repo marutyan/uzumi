@@ -1,10 +1,12 @@
 package dev.uzumi.ime.conversion
 
 import dev.uzumi.ime.dictionary.UserDictionaryLookup
+import dev.uzumi.ime.learning.LearningStore
 import dev.uzumi.ime.live.ConversionRequest as LiveRequest
 import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.ResultSegment
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -57,6 +59,8 @@ class ConversionWorker(
     private val onLiveResult: (Long, LiveResult) -> Unit = { _, _ -> },
     // ユーザー辞書を返す。初回はファイルを読むため、worker threadからだけ呼ぶ。
     private val userDictionary: () -> UserDictionaryLookup? = { null },
+    // IME側の学習キャッシュを返す。初回はファイルを読むため、worker threadからだけ呼ぶ。nullなら学習を使わない。
+    private val learningStore: () -> LearningStore? = { null },
 ) : ConversionClient, LiveConversionClient {
     @Volatile
     private var currentHealth: EngineHealth = EngineHealth.Loading
@@ -74,6 +78,8 @@ class ConversionWorker(
     private val engineSessions = mutableMapOf<Long, Long>()
     // sessionEpochごとに、エンジン側sessionの状態を作った直前の要求。学習通知の照合に使う。
     private val lastConverted = mutableMapOf<Long, ConversionRequest>()
+    // sessionEpochごとに、直前の明示変換で表示した先頭文節の候補。確定した候補の読みと表記を引くために使う。
+    private val lastHeadCandidates = mutableMapOf<Long, List<ConversionCandidate>>()
 
     /** 最新の初期化状態。UI threadから読んでよい。 */
     val health: EngineHealth
@@ -96,6 +102,22 @@ class ConversionWorker(
             onHealthChanged(verified)
             // 初回の読込みはファイルを読むため、UI threadで初めて開かないようここで先に開く。
             lookupUserDictionary()
+            // 設定画面の「学習履歴を消す」で、Mozcの学習もこのworker経由で消せるようにする。
+            lookupLearningStore()?.setEngineClearer(::requestEngineLearningClear)
+        }
+    }
+
+    /**
+     * エンジンの学習の消去をworkerのキューへ積む。エンジンがReadyでない、またはworkerが止まっていて積めなければ
+     * falseを返し、呼び出し側（学習キャッシュ）がエンジンの保存ファイルを直接消す。
+     */
+    private fun requestEngineLearningClear(): Boolean {
+        if (currentHealth !is EngineHealth.Ready) return false
+        return try {
+            executor.execute { runCatching { engine.clearLearning() } }
+            true
+        } catch (_: RejectedExecutionException) {
+            false
         }
     }
 
@@ -112,6 +134,8 @@ class ConversionWorker(
         if (units.isEmpty() || isEnded(sessionEpoch)) return
         executor.execute {
             val sessionId = engineSessions[sessionEpoch] ?: return@execute
+            // 表示のまま確定したsegmentと、同じ単位の先頭からの句をIME側の学習にも記録する。
+            lookupLearningStore()?.let { store -> recordCommittedUnits(store, units) }
             if (!runCatching { engine.setIncognito(false) }.getOrDefault(false)) return@execute
             lastConverted.remove(sessionEpoch)
             for (unit in units) {
@@ -124,16 +148,50 @@ class ConversionWorker(
         }
     }
 
+    /**
+     * ライブ変換で確定した単位を学習キャッシュへ記録する。対象外の表記（ひらがなだけ、ASCIIだけ、50文字超）は記録の規則が除く。
+     * ユーザー辞書の登録語を表示したsegmentは記録しない。辞書から消した後も学習から表示され続けるのを防ぐ。
+     * 2segment以上の単位では、先頭からの累積句（1〜2番目、1〜3番目…、最後は単位の読み全体）も句として記録する。
+     * 句は登録語のsegmentを含むところで打ち切る。登録語を含む句も、辞書から消した後に登録語を表示し続けるためである。
+     * 新しい句は、ユーザーが候補を選んだsegmentを含む場合だけ作る。選ばずに確定した句はエンジンの結果の再現なので、
+     * 覚えても表示は変わらず上限を埋めるだけだからである。既に覚えている句は、選ばなくても時刻と回数を更新する。
+     */
+    private fun recordCommittedUnits(store: LearningStore, units: List<List<LearnedSegment>>) {
+        val dictionary = lookupUserDictionary()
+        // 読みと表記がユーザー辞書の登録語と一致するsegmentか。
+        fun registered(segment: LearnedSegment): Boolean =
+            dictionary?.exactMatches(segment.reading)?.any { it.surface == segment.surface } == true
+        for (unit in units) {
+            unit.filterNot(::registered).forEach { store.record(it.reading, it.surface) }
+            // 登録語のsegmentより前だけを句にする。
+            val phraseSource = unit.takeWhile { !registered(it) }
+            for (end in 2..phraseSource.size) {
+                val phrase = phraseSource.subList(0, end)
+                store.recordPhrase(
+                    reading = phrase.joinToString(separator = "") { it.reading },
+                    surface = phrase.joinToString(separator = "") { it.surface },
+                    createIfMissing = phrase.any { it.chosen },
+                )
+            }
+        }
+    }
+
     override fun requestConversion(request: ConversionRequest) {
         latestRequest.set(request)
         executor.execute(::drainLatestRequest)
     }
 
+    /**
+     * 明示的に選んだ候補の確定を、IME側の学習へ記録し、エンジンの候補ならエンジンへも通知する。
+     * 学習語だけから作った候補はエンジンが知らないため、エンジンへは送らない。
+     */
     override fun commitCandidate(request: ConversionRequest, candidateId: Int) {
         if (request.incognito) return
         executor.execute {
             val sessionId = sessionForCommit(request) ?: return@execute
-            runCatching { engine.commitCandidate(sessionId, candidateId) }
+            val candidate = lastHeadCandidates[request.sessionEpoch]?.firstOrNull { it.id == candidateId }
+            candidate?.let { lookupLearningStore()?.record(it.learnedReading ?: it.reading, it.value) }
+            if (candidate?.learnedReading == null) runCatching { engine.commitCandidate(sessionId, candidateId) }
             lastConverted.remove(request.sessionEpoch)
         }
     }
@@ -155,6 +213,9 @@ class ConversionWorker(
         endedThroughEpoch.accumulateAndGet(sessionEpoch, ::maxOf)
         executor.execute {
             lastConverted.remove(sessionEpoch)
+            lastHeadCandidates.remove(sessionEpoch)
+            // 学習は打鍵ごとではなく、入力欄の終了時にまとめて保存する。
+            lookupLearningStore()?.flush()
             val sessionId = engineSessions.remove(sessionEpoch) ?: return@execute
             runCatching { engine.deleteSession(sessionId) }
         }
@@ -181,7 +242,14 @@ class ConversionWorker(
             return
         }
         lastConverted[request.sessionEpoch] = request
-        val merged = UserDictionaryCandidates.mergeExplicit(request.reading, conversion, lookupUserDictionary())
+        // 並びは「ユーザー辞書 → 学習 → エンジン」。学習禁止欄では学習語を参照しない。
+        val learned = LearnedCandidates.mergeExplicit(
+            request.reading,
+            conversion,
+            lookupLearningStore().takeUnless { request.incognito },
+        )
+        val merged = UserDictionaryCandidates.mergeExplicit(request.reading, learned, lookupUserDictionary())
+        lastHeadCandidates[request.sessionEpoch] = merged.headCandidates
         val result = ConversionResult(request, merged.segments, merged.headCandidates)
         onOutcome(
             if (result.isConsistent) ConversionOutcome.Converted(result) else ConversionOutcome.Failed(request),
@@ -207,6 +275,14 @@ class ConversionWorker(
                 }
             },
             userDictionary = lookupUserDictionary(),
+            // 学習禁止欄では学習語を参照しない。完全一致した学習語のうちscoreが最も高いものを表示する。
+            learnedSurfaces = lookupLearningStore()?.takeIf { request.learningAllowed }?.let { store ->
+                { reading -> store.exactMatches(reading).map { it.surface } }
+            },
+            // 部分範囲の先頭からの読みに一致する句で区切りを合わせる。学習禁止欄では参照しない。
+            learnedPhrases = lookupLearningStore()?.takeIf { request.learningAllowed }?.let { store ->
+                { reading -> store.exactPhraseMatches(reading).map { it.surface } }
+            },
         )
         val result = runCatching { converter.convert(request) }.getOrNull() ?: return
         onLiveResult(sessionEpoch, result)
@@ -214,6 +290,9 @@ class ConversionWorker(
 
     /** ユーザー辞書を開いて返す。読めなければ登録語なしで変換を続ける。 */
     private fun lookupUserDictionary(): UserDictionaryLookup? = runCatching { userDictionary() }.getOrNull()
+
+    /** 学習キャッシュを開いて返す。開けなければ学習なしで変換を続ける。 */
+    private fun lookupLearningStore(): LearningStore? = runCatching { learningStore() }.getOrNull()
 
     /** 学習通知が、エンジン側sessionの現在の変換と同じ要求に対するものなら、そのsession IDを返す。 */
     private fun sessionForCommit(request: ConversionRequest): Long? {

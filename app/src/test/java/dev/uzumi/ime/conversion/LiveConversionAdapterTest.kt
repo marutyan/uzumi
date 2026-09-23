@@ -171,12 +171,77 @@ class LiveConversionAdapterTest {
         assertEquals("京は", headOnly.headCandidates.first().value)
     }
 
-    /** 学習単位は句読点と未変換のsegmentで区切り、ASCIIだけのsegmentは送らない。 */
+    /**
+     * 部分範囲の先頭からの読みが学習した句に一致すれば、句の表記の一segmentにして句の終わりで区切り、残りを別に変換する。
+     * 最も長い句を使い、範囲全体に一致する学習語があれば範囲全体を一segmentにする規則を優先する。
+     */
+    @Test
+    fun headPhraseAlignsSegmentBoundary() {
+        val phrases = mapOf("こうえんにいく" to listOf("校園に行く"), "こうえんに" to listOf("校園に"))
+        val chunks = mutableListOf<String>()
+        val converter = SegmentedLiveConverter(
+            convertRange = { chunk -> chunks += chunk; lexiconSegments(chunk) },
+            learnedPhrases = { phrases[it].orEmpty() },
+        )
+
+        val result = assertNotNullAndGet(converter.convert(request("こうえんにいくよ", cursor = 8)))
+
+        assertEquals(listOf("こうえんにいく", "よ"), chunks)
+        assertEquals(
+            listOf(
+                ResultSegment("こうえんにいく", "校園に行く", listOf("校園に行く", "公園に行く", "こうえんにいく")),
+                ResultSegment("よ", "よ", listOf("よ")),
+            ),
+            result.segments,
+        )
+        // 範囲全体が句に一致すれば、既存の規則どおり範囲全体を一segmentにする。
+        val whole = assertNotNullAndGet(converter.convert(request("こうえんにいく", cursor = 7)))
+        assertEquals(listOf("校園に行く"), whole.segments.map { it.surface })
+    }
+
+    /** 句が保護範囲（chosen/stable）や対象範囲内のカーソルの境界を越える場合は、句を使わずに区切る。 */
+    @Test
+    fun headPhraseNeverCrossesProtectedRangeOrCursor() {
+        val converter = SegmentedLiveConverter(
+            convertRange = ::lexiconSegments,
+            learnedPhrases = { reading -> listOf("校園に行く").takeIf { reading == "こうえんにいく" }.orEmpty() },
+        )
+
+        val atCursor = assertNotNullAndGet(converter.convert(request("こうえんにいくよ", cursor = 4)))
+        assertEquals(listOf("こうえん", "に", "いく", "よ"), atCursor.segments.map { it.reading })
+        assertEquals(listOf("公園", "に", "行く", "よ"), atCursor.segments.map { it.surface })
+
+        val chosen = listOf(ProtectedRange(0, 4, "講演"))
+        val afterProtected = assertNotNullAndGet(converter.convert(request("こうえんにいくよ", cursor = 8, protectedRanges = chosen)))
+        assertEquals(listOf("講演", "に", "行く", "よ"), afterProtected.segments.map { it.surface })
+    }
+
+    /** コアの要求をこのアダプターで変換すると、句で区切った結果もコアに拒否されず、句の表記が表示される。 */
+    @Test
+    fun coreAcceptsPhraseAlignedResults() {
+        val core = LiveConversionCore().apply { startField(LiveFieldPolicy.NORMAL) }
+        val converter = SegmentedLiveConverter(
+            convertRange = ::lexiconSegments,
+            learnedPhrases = { reading -> listOf("校園に行く").takeIf { reading == "こうえんにいく" }.orEmpty() },
+        )
+        // コアの操作を行い、要求があれば変換して結果を返す。結果が拒否されないことを確かめる。
+        fun run(update: LiveUpdate) {
+            val request = update.request ?: return
+            assertNull(core.onConversionResult(assertNotNullAndGet(converter.convert(request))).rejection)
+        }
+
+        run(core.inputText("こうえんにいくよ"))
+
+        assertEquals("校園に行くよ", core.display)
+        assertEquals(listOf("こうえんにいく", "よ"), core.segments.map { it.reading })
+    }
+
+    /** 学習単位は句読点と未変換のsegmentで区切り、ASCIIだけのsegmentは送らない。候補を選んだsegmentには印を付ける。 */
     @Test
     fun learningUnitsSplitAtPunctuationAndRawSegments() {
         val segments = listOf(
             segment("きょうは", "今日は"),
-            segment("いい", "いい"),
+            segment("いい", "いい", state = SegmentState.CHOSEN),
             segment("、", "、"),
             segment("てんき", "天気"),
             segment("だ", "だ", converted = false),
@@ -187,7 +252,7 @@ class LiveConversionAdapterTest {
 
         assertEquals(
             listOf(
-                listOf(LearnedSegment("きょうは", "今日は"), LearnedSegment("いい", "いい")),
+                listOf(LearnedSegment("きょうは", "今日は"), LearnedSegment("いい", "いい", chosen = true)),
                 listOf(LearnedSegment("てんき", "天気")),
                 listOf(LearnedSegment("ね", "ね")),
             ),
@@ -201,6 +266,7 @@ class LiveConversionAdapterTest {
             "こうえん" to listOf("公園", "講演"),
             "に" to listOf("に", "二"),
             "いく" to listOf("行く", "いく"),
+            "よ" to listOf("よ"),
         )
         val clusters = GraphemeClusters.split(chunk)
         val result = mutableListOf<ResultSegment>()
@@ -218,19 +284,30 @@ class LiveConversionAdapterTest {
     }
 
     /** 学習単位の試験に使う、読みの位置を持たないsegment。 */
-    private fun segment(reading: String, surface: String, converted: Boolean = true): LiveSegment {
+    private fun segment(
+        reading: String,
+        surface: String,
+        converted: Boolean = true,
+        state: SegmentState = SegmentState.PROVISIONAL,
+    ): LiveSegment {
         return LiveSegment(
             id = 0,
             readingStart = 0,
             readingEnd = 0,
             reading = reading,
             surface = surface,
-            state = SegmentState.PROVISIONAL,
+            state = state,
             candidates = listOf(surface),
             converted = converted,
             observations = 1,
             lastObservedReadingVersion = 0,
         )
+    }
+
+    /** 読み全体を対象範囲にした、書記素がすべて1文字の読みの要求を作る。 */
+    private fun request(reading: String, cursor: Int, protectedRanges: List<ProtectedRange> = emptyList()): LiveRequest {
+        val identity = RequestIdentity(1, 1, reading, 0, reading.length, protectedRanges, cursor, 0)
+        return LiveRequest(identity, reading, learningAllowed = true)
     }
 
     /** nullでないことを確かめ、その値を返す。 */

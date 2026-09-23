@@ -31,6 +31,8 @@ data class ConversionCandidate(
     val reading: String,
     // ユーザー辞書の登録語か。エンジンの候補ではないため、確定してもエンジンへ学習を通知しない。
     val fromUserDictionary: Boolean = false,
+    // IME側の学習語だけから作った候補なら、その学習語の読み。エンジンの候補ではないため、確定時はエンジンへ送らない。
+    val learnedReading: String? = null,
 )
 
 /**
@@ -45,10 +47,12 @@ data class EngineSegment(
 
 /**
  * ライブ変換で確定した一segmentの読みと表記。確定時にエンジンへ同じ区切りと表記を学習させるために使う。
+ * chosenは、ユーザーが候補を選んだsegment（chosen）か。IME側の学習で新しい句を作るかの判定にだけ使う。
  */
 data class LearnedSegment(
     val reading: String,
     val surface: String,
+    val chosen: Boolean = false,
 )
 
 /** エンジンが返した文節と先頭文節の候補。要求の世代とは独立した生の結果。 */
