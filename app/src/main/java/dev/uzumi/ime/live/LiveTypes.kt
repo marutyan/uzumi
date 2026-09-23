@@ -83,6 +83,11 @@ data class RequestIdentity(
     /** 変換してよい範囲の終了書記素位置（含まない）。 */
     val targetEnd: Int,
     val protectedRanges: List<ProtectedRange>,
+    /**
+     * 入力カーソルの書記素位置。対象範囲の内部にある場合、変換器はこの位置で必ずsegmentを区切る。
+     * 区切らないと、Editorに見えるカーソル（変換済み表記の後ろ）と読みの位置がずれるためである。
+     */
+    val inputCursor: Int,
     /** 辞書とモデルの世代。辞書更新前の要求を区別する。 */
     val converterGeneration: Long,
 )
@@ -174,6 +179,9 @@ enum class RejectReason {
     MALFORMED_SEGMENTS,
     /** 保護範囲の境界をまたいで再分割している。 */
     CROSSES_PROTECTED,
+
+    /** 対象範囲内の入力カーソル位置をまたいで一つのsegmentにしている。 */
+    CROSSES_CURSOR,
     /** 候補を表示したときとepoch、revision、segment、候補が一致しない。 */
     STALE_CANDIDATE,
 }

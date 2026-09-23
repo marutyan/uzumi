@@ -124,6 +124,21 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
     fun inputText(text: String): LiveUpdate {
         if (!acceptsInput()) return LiveUpdate.NOT_HANDLED
         if (text.isEmpty()) return LiveUpdate.NO_CHANGE
+        val parts = splitAtPunctuation(text)
+        if (parts.size == 1) return inputPart(text)
+        // 「よい。」のように句読点を含む文字列は、句読点ごとに分けて一文字ずつ入れた場合と同じ境界処理にする。
+        val commands = mutableListOf<EditorCommand>()
+        var request: ConversionRequest? = null
+        for (part in parts) {
+            val update = inputPart(part)
+            commands += update.commands
+            request = update.request
+        }
+        return LiveUpdate(handled = true, commands = commands, request = request)
+    }
+
+    /** 句読点一文字、または句読点を含まない文字列を入力カーソルへ入れる。 */
+    private fun inputPart(text: String): LiveUpdate {
         val cursor = state.inputCursor
         return when (text) {
             in LiveConversionRules.TERMINAL_PUNCTUATION -> {
@@ -148,13 +163,17 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
     }
 
     /**
-     * 入力カーソル直前の読みを書記素単位で削除する。compositionが空なら従来の削除へ回す。
-     * 変換済みsegmentの末尾を消すと、そのsegmentだけを読みへ戻して再変換する（「良い」→「よ」）。
+     * 入力カーソル直前の読みを書記素単位で削除する。変換済みsegmentの末尾を消すと、
+     * そのsegmentだけを読みへ戻して再変換する（「良い」→「よ」）。
+     * compositionが空、または入力カーソルがcompositionの先頭にある場合はhandled=falseを返す。
+     * 統合担当は従来の経路で、Editorのカーソル（composition先頭）より前の確定済み文字列を一書記素消す。
+     * compositionの読みと表示は変わらないため、コアの状態はそのまま使える。
      */
     fun deleteBackward(clusterCount: Int = 1): LiveUpdate {
         if (!acceptsInput() || state.clusters.isEmpty()) return LiveUpdate.NOT_HANDLED
         val cursor = state.inputCursor
-        if (cursor == 0 || clusterCount <= 0) return LiveUpdate.NO_CHANGE
+        if (cursor == 0) return LiveUpdate.NOT_HANDLED
+        if (clusterCount <= 0) return LiveUpdate.NO_CHANGE
         val start = (cursor - clusterCount).coerceAtLeast(0)
         if (!applyReadingEdit(start, cursor, "", OperationKind.DELETE)) return LiveUpdate.NO_CHANGE
         return compositionUpdate(buildRequest())
@@ -338,6 +357,13 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
         if (protectedInTarget.any { it.readingStart !in boundaries || it.readingEnd !in boundaries }) {
             return rejected(RejectReason.CROSSES_PROTECTED)
         }
+        // カーソルをまたいで結合すると、表示上のカーソルと読みの位置が対応しなくなる。
+        if (current.inputCursor > current.targetStart &&
+            current.inputCursor < current.targetEnd &&
+            current.inputCursor !in boundaries
+        ) {
+            return rejected(RejectReason.CROSSES_CURSOR)
+        }
 
         state = state.copy(segments = promoteSegments(mergeResult(pieces, current, protectedInTarget)))
         return compositionUpdate(request = null)
@@ -373,6 +399,23 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
             displayStart = displayEnd
         }
         return if (offset == displayStart) state.clusters.size else null
+    }
+
+    /** 入力文字列を、境界となる句読点一文字と、それ以外の連続した文字列とに分ける。 */
+    private fun splitAtPunctuation(text: String): List<String> {
+        val parts = mutableListOf<String>()
+        val run = StringBuilder()
+        for (cluster in GraphemeClusters.split(text)) {
+            if (cluster in LiveConversionRules.TERMINAL_PUNCTUATION || cluster == LiveConversionRules.SOFT_BOUNDARY) {
+                if (run.isNotEmpty()) parts += run.toString()
+                run.clear()
+                parts += cluster
+            } else {
+                run.append(cluster)
+            }
+        }
+        if (run.isNotEmpty()) parts += run.toString()
+        return parts
     }
 
     /** 入力欄に接続中で、ライブ変換がONのときだけ操作を受け付ける。 */
@@ -519,6 +562,7 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
             protectedRanges = state.segments.filter(::isProtected).map {
                 ProtectedRange(it.readingStart, it.readingEnd, it.surface)
             },
+            inputCursor = state.inputCursor,
             converterGeneration = converterGeneration,
         )
     }

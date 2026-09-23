@@ -27,8 +27,8 @@ class FakeLiveConverter(
                 position = protected.readingEnd
                 continue
             }
-            val chunkEnd = identity.protectedRanges
-                .map { it.readingStart }
+            // 保護範囲の先頭と入力カーソルの位置で必ず区切るという変換器の契約を守る。
+            val chunkEnd = (identity.protectedRanges.map { it.readingStart } + identity.inputCursor)
                 .filter { it > position && it < identity.targetEnd }
                 .minOrNull() ?: identity.targetEnd
             result += segmentGreedy(clusters.subList(position, chunkEnd))

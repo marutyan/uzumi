@@ -215,7 +215,7 @@ class LiveConversionCoreTest {
         assertEquals(listOf(ProtectedRange(0, 4, "今日は")), next.protectedRanges)
     }
 
-    /** 最後のsegmentは同じ表記が続いても、後続segmentがなければstableにしない。 */
+    /** 最後のsegmentは3回以上同じ表記を観測しても、後続segmentがなければstableにしない。 */
     @Test
     fun lastSegmentStaysProvisionalWithoutFollower() {
         val driver = typedSentence()
@@ -224,11 +224,87 @@ class LiveConversionCoreTest {
             listOf(SegmentState.STABLE, SegmentState.STABLE, SegmentState.PROVISIONAL),
             states(driver.core),
         )
-        val refreshed = assertNotNullAndGet(driver.core.setConverterGeneration(1).request)
-        repeat(3) {
-            driver.deliver(refreshed)
-        }
-        assertEquals(SegmentState.PROVISIONAL, driver.core.segments.last().state)
+        // 前方の読みを編集して、最後のsegmentを別の読みrevisionで同じ範囲・表記のまま観測させる。
+        driver.handle(driver.core.moveCursorTo(4))
+        driver.type("あ")
+        driver.type("あ")
+        val last = driver.core.segments.last()
+        assertEquals("いいですね", last.surface)
+        assertTrue(last.observations >= LiveConversionRules.STABLE_OBSERVATION_COUNT)
+        assertEquals(SegmentState.PROVISIONAL, last.state)
+    }
+
+    /** 境界にある入力カーソルをまたいで結合した結果を捨てる（「天気が」の「が」を消した後）。 */
+    @Test
+    fun resultMergingAcrossCursorAfterPastDeletionIsRejected() {
+        val driver = typedSentence()
+        driver.handle(driver.core.moveCursorTo(8))
+        driver.deliverImmediately = false
+        driver.backspace()
+        val request = driver.pending.last()
+        assertEquals(7, request.identity.inputCursor)
+
+        val merged = ConversionResult(request.identity, listOf(ResultSegment("てんきいいですね", "天気良いですね")))
+        val rejected = driver.core.onConversionResult(merged)
+        assertEquals(RejectReason.CROSSES_CURSOR, rejected.rejection)
+        assertTrue(rejected.commands.isEmpty())
+
+        assertNull(driver.deliver(request).rejection)
+        assertEquals(listOf("今日は", "天気", "いいですね"), surfaces(driver.core))
+        assertEquals("今日は天気".length, driver.editor.cursorInComposition)
+
+        driver.backspace()
+        assertEquals("今日はてんいいですね", driver.editor.composing)
+        assertEquals("きょうはてんいいですね", driver.core.reading)
+    }
+
+    /** 「良い|蚊」の境界にカーソルを置いた後、カーソルをまたぐ「宵か」を捨て、次の入力を見える位置へ入れる。 */
+    @Test
+    fun resultMergingAcrossCursorAtSegmentBoundaryIsRejected() {
+        val driver = LiveSessionDriver().type("よいか")
+        assertEquals(listOf("良い", "蚊"), surfaces(driver.core))
+        driver.deliverImmediately = false
+        driver.handle(driver.core.moveCursorTo(2))
+        val request = driver.pending.last()
+
+        val merged = ConversionResult(request.identity, listOf(ResultSegment("よいか", "宵か")))
+        assertEquals(RejectReason.CROSSES_CURSOR, driver.core.onConversionResult(merged).rejection)
+        assertEquals("良い蚊", driver.core.display)
+
+        assertNull(driver.deliver(request).rejection)
+        driver.handle(driver.core.inputText("は"))
+        assertEquals("良いは蚊", driver.editor.composing)
+        assertEquals(3, driver.editor.cursorInComposition)
+    }
+
+    /** compositionの先頭での削除は従来の経路へ回し、確定済みの文字列を消せるようにする。 */
+    @Test
+    fun deleteAtCompositionStartIsHandedToEditor() {
+        val driver = LiveSessionDriver().type("よい")
+        driver.handle(driver.core.moveCursorTo(0))
+        val deleted = driver.core.deleteBackward()
+        assertFalse(deleted.handled)
+        assertTrue(deleted.commands.isEmpty())
+        assertEquals("良い", driver.core.display)
+
+        driver.commit()
+        assertFalse(driver.core.deleteBackward().handled)
+    }
+
+    /** 句読点を含む複数文字の入力は、一文字ずつ入力した場合と同じ確定と境界処理になる。 */
+    @Test
+    fun multiCharacterInputMatchesPerCharacterInput() {
+        val text = "よい。きょうは、てんき"
+        val atOnce = heldDriver()
+        val update = atOnce.handle(atOnce.core.inputText(text))
+        val perCharacter = heldDriver().type(text)
+
+        assertEquals("よい。", atOnce.editor.committed.toString())
+        assertEquals(perCharacter.editor.text, atOnce.editor.text)
+        assertEquals(surfaces(perCharacter.core), surfaces(atOnce.core))
+        assertEquals(states(perCharacter.core), states(atOnce.core))
+        assertEquals(perCharacter.pending.last().targetReading, assertNotNullAndGet(update.request).targetReading)
+        assertEquals(atOnce.core.revision, update.request!!.identity.revision)
     }
 
     /** 候補を選んだsegmentはchosenになり、文全体は確定しない。表示時と違う候補のタップは捨てる。 */
