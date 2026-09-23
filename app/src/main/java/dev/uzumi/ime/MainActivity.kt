@@ -62,6 +62,8 @@ class MainActivity : Activity() {
         })
         content.addView(Button(this).apply {
             text = getString(R.string.settings_title)
+            // 「Uzumi」を大文字の「UZUMI」にしない
+            isAllCaps = false
             setOnClickListener {
                 startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
             }
