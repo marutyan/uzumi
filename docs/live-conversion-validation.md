@@ -12,7 +12,7 @@
 | Mozcの変換 | `MozcConversionEngine.convertSegments` | 部分範囲の読みを`AS_IS`で積み（`Input.request_suggestion=false`で入力途中の予測を求めない）、`SPACE`で変換する。preeditの各文節の`key`と`value`を読み、focusを`RIGHT`で右へ動かしながら、強調された文節の`all_candidate_words`から候補を取る。`key`が文節の読みと異なる候補（予測）と`num_segments_in_candidate`が2以上の候補（複数文節）は除く。確定しないため学習は起きない。文節の読みの連結が範囲と一致しない場合は、範囲全体を一segmentにする。 |
 | 学習 | `ConversionWorker.learnCommitted`、`MozcConversionEngine.learnSegments` | 確定したsegment列を、句読点・未変換・ASCIIのsegmentで区切った単位ごとに学習させる。単位の読みを変換し、文節の幅をShift+右・左で伸縮して区切りを合わせ、表記が違う文節は`SELECT_CANDIDATE`で選んでから`SUBMIT`する。合わせられなければ`REVERT`して確定せず、segmentごとに学習し直す。自動変換、候補の選択、Undoだけでは学習させない。学習禁止欄では送らない。 |
 | 直列worker | `ConversionWorker` | 明示変換と同じ単一threadだけがJNIを呼ぶ。ライブ変換も未処理の要求は最新の一件だけを変換する。学習と`endSession`は呼び出し時点で終了判定し、同じ世代のsession破棄より先にキューへ積むため、Send直後に欄が閉じても確定した内容を学習できる。 |
-| ユーザー辞書 | `UserDictionaryCandidates` | 各segmentの読みに完全一致する登録語を登録順に候補の先頭へ置き、最初の語を表示する（自動表示）。Mozc候補との重複は除く。部分範囲全体の読みに一致する語があれば、範囲を一segmentにまとめてその語を表示する。明示変換では、読み全体に一致する語があればその最初の語を読み全体の一文節として表示し、読み全体と先頭文節に一致する語を候補の先頭へ置く。登録語を確定・表示のまま確定しても、Mozcへは通知・学習させない。辞書はworkerの初期化時に開き、UIスレッドで初めて読まない。 |
+| ユーザー辞書 | `UserDictionaryCandidates` | 各segmentの読みに完全一致する登録語を登録順に候補の先頭へ置き、最初の語を表示する（自動表示）。Mozc候補との重複は除く。部分範囲全体の読みに一致する語があれば、範囲を一segmentにまとめてその語を表示する。明示変換では、読み全体に一致する語があればその最初の語を読み全体の一文節として表示し、読み全体と先頭文節に一致する語を候補の先頭へ置く。明示変換では、登録語を選ぶか表示のまま確定してもMozcへ通知しない。ライブ変換では、登録語の表記がMozcの候補にも無ければその単位は学習させない。候補にある場合（例：「はし」→「箸」を登録）は、他の確定と同じく学習させる。辞書はworkerの初期化時に開き、UIスレッドで初めて読まない。 |
 | 候補バー | `UzumiInputMethodService.refreshLiveCandidates` | 対象segmentの候補を常時表示し、現在の表記を太字にする。左右に「◀」「▶」（前後のsegmentへ。読点は飛ばす）、「末尾」（入力位置へ戻る）、「取消」（直前の操作を取り消す）を置く。訂正中のsegmentはEditor上で背景色を付ける。変換済み表示の内部をEditorでタップすると、そのsegmentを対象にしてカーソルを入力位置へ戻す。変換キーは対象segmentの次の候補を選ぶ。 |
 | 設定・表示 | `MainActivity`、`LicenseActivity` | ライブ変換のON/OFF（既定ON）をSharedPreferencesへ保存する。第三者ライセンスはAPKのassets`licenses/mozc-NOTICE.txt`を原文のまま表示する。 |
 
@@ -80,7 +80,7 @@ Pixel 10 Pro（Android 17/API 37）、2026-09-23 21:04〜21:15。開始時の`de
 独立レビューの指摘を受け、commit `ad7aeb5`で次を直した。
 
 - 明示変換の表示中の削除で、自動の再変換をやめた。表示は読みへ戻るだけにした（回帰テスト`explicitDeleteDuringConversionReturnsToReadingWithoutReconverting`を追加）。
-- 読みが完全に一致する登録語は、登録順で最初の語を表示するようにした。対象はライブ変換のsegmentと部分範囲、明示変換の読み全体。登録語を表示したまま確定しても、Mozcへは学習させない。
+- 読みが完全に一致する登録語は、登録順で最初の語を表示するようにした。対象はライブ変換のsegmentと部分範囲、明示変換の読み全体。明示変換で登録語を表示したまま確定しても、Mozcへは通知しない。ライブ変換では、登録語の表記がMozcの候補にもある場合だけ学習される。
 - `MAX_STALE_COMPOSITIONS`を8から32にした（理由は「構成」の節）。
 
 `./gradlew clean testDebugUnitTest assembleDebug lintDebug`は成功した。JVMテストは165件で失敗0件、lintの警告は起点と同じ4件。APKは34,408,076 bytes、SHA-256は`fbf0dbb2e25bd6e8b33aef7cbe8be2e9cfc828ea30c0dd80dcaab7dffbfcf3fc`で、端末へ入れた。`libmozc.so`、`mozc.data`、NOTICEが入っていることを確認した。前回とのサイズ差は、cleanビルドによるdexの分割の違いである。
