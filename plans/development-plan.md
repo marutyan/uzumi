@@ -16,6 +16,7 @@ Phase 0はPR #1で完了し、2026-09-21のユーザー指示でPhase 1へ着手
 | Phase 1b キーUI | in_progress | 12-key、英語QWERTY、数字の試用欄入力と最下段操作をPixelで確認。2026-09-23に記号面（3ページ）、QWERTYから数字・記号への直接切替、削除・カーソルの連続実行、QWERTY長押しの数字・記号、触覚、TalkBack用の読み上げ・操作メニューを実装し、63単体テスト・APK・lintは合格（[記録](../docs/phase1-validation.md#キー入力の追加2026-09-23)）。実機での操作・TalkBack・触覚は未確認 |
 | Phase 1c 漢字変換・辞書 | in_progress | [Mozcのnative・辞書・Java liteのローカルビルド](../docs/mozc-build-probe.md)成功。[配布物監査](../docs/mozc-distribution-audit.md)でNOTICE添付を条件に本人用debug APKへの同梱可と判定し、[`NOTICE.txt`](../third_party/mozc/NOTICE.txt)を作成。APK組込み・端末変換は未実施。ユーザー辞書は保存・登録・検索・編集・削除・TSV入出力・管理画面・参照APIを実装しJVMテストで確認したが、実機操作とIME候補への接続は未実施 |
 | Phase 2a ライブ状態 | in_progress | Android・Mozcに依存しない状態機械`dev.uzumi.ime.live`を実装し、古い結果の拒否、安定化、chosen保護、境界、ON/OFF、Undo/Redo、書記素境界を試験用変換器の決定的なイベント列32件で確認（2026-09-23）。2026-09-23にIMEへ配線し、Mozcの部分範囲ごとの変換と確定時の学習、候補バーの過去segment訂正・末尾復帰・取消、ユーザー辞書の登録語の候補、設定のON/OFF（既定ON）と第三者ライセンス表示を接続。164単体テスト・APK・lintは合格、Pixelの試用画面で表示・句点確定・訂正・Undo・OFF時の明示変換・登録語・password欄を確認（[記録](../docs/live-conversion-validation.md)）。文脈を含む学習の効き方、Compose/WebView、性能は未確認 |
+| Phase 3a 単一neural選定 | in_progress | 2026-09-24、ユーザーが「ニューラルで直接変換し、辞書で補う方式」（karukanの形）で始めると決定。llama.cpp（azooKey fork）とzenz v3.2・jinen v2の各small・xsmallを[ローカル試作](../docs/neural-probe.md)で取得・ビルドし、Macで固定8文の変換を確認（品質比較は未実施）。[設計案](../docs/neural-direct-conversion-design.md)と[評価条件の案](../docs/phase3a-model-selection-protocol.md)は承認待ち。fakeモデルでの部分範囲変換器の骨組みとJVMテスト7件は合格。JNI・別プロセス・端末測定は未実施 |
 | Phase 2以降 | pending | Phase 1の受入条件を満たしてから開始 |
 
 ## 二つの到達点
