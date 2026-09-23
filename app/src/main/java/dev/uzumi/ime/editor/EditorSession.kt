@@ -7,6 +7,8 @@ import dev.uzumi.ime.conversion.ConversionResult
 import dev.uzumi.ime.conversion.LiveConversionClient
 import dev.uzumi.ime.conversion.SegmentedLiveConverter
 import dev.uzumi.ime.conversion.liveLearningUnits
+import dev.uzumi.ime.evaluation.EvaluationCounter
+import dev.uzumi.ime.evaluation.LiveChangeClassifier
 import dev.uzumi.ime.live.CandidateChoice
 import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.EditorCommand
@@ -41,6 +43,8 @@ class EditorSession(
     private val liveClient: LiveConversionClient? = null,
     // composition表示へ訂正中のsegmentの強調を付ける。JVMテストでは文字列をそのまま返す既定値を使う。
     private val compositionStyler: (String, DisplaySpan?) -> CharSequence = { text, _ -> text },
+    // Phase 2cの評価用計数。ライブ変換の表示と文節状態の変化を、評価モードの間だけ件数として渡す。
+    private val evaluation: EvaluationCounter? = null,
 ) {
     private val buffer = CompositionBuffer()
     // compositionの内容が変わるたびに増える番号。変換応答が現在の読みに対するものかを照合する。
@@ -665,9 +669,18 @@ class EditorSession(
     fun applyLiveResult(result: LiveResult): Boolean {
         val core = liveCore ?: return false
         if (!active) return false
+        val before = core.segments
         val update = core.onConversionResult(result)
-        if (update.rejection != null || update.commands.isEmpty()) return false
-        return applyLiveUpdate(update, core.segments)
+        val rejection = update.rejection
+        if (rejection != null && LiveChangeClassifier.isStale(rejection)) {
+            evaluation?.recordLive(LiveChangeClassifier.STALE_RESULT_DISCARDED)
+        }
+        if (rejection != null || update.commands.isEmpty()) return false
+        val applied = applyLiveUpdate(update, core.segments)
+        if (applied && evaluation?.isRecording == true) {
+            evaluation.recordLive(LiveChangeClassifier.resultApplied(before, core.segments))
+        }
+        return applied
     }
 
     /** ライブ変換の表示（明示変換では読みの表示）。selection通知の照合で使う。 */
@@ -686,6 +699,9 @@ class EditorSession(
         val update = operation(core)
         if (!update.handled) return null
         if (update.rejection != null) return false
+        if (evaluation?.isRecording == true) {
+            evaluation.recordLive(LiveChangeClassifier.userOperation(before, core.segments))
+        }
         return applyLiveUpdate(update, before)
     }
 

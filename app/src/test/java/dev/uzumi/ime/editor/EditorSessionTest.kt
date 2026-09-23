@@ -9,6 +9,7 @@ import dev.uzumi.ime.conversion.ConversionResult
 import dev.uzumi.ime.conversion.ConversionSegment
 import dev.uzumi.ime.conversion.LearnedSegment
 import dev.uzumi.ime.conversion.LiveConversionClient
+import dev.uzumi.ime.evaluation.EvaluationCounter
 import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.FakeLiveConverter
 import dev.uzumi.ime.live.LiveConversionCore
@@ -733,6 +734,34 @@ class EditorSessionTest {
         assertEquals("良い", connection.text)
     }
 
+    /** 評価モードでは、結果による表示の変化・古い結果・候補の選択を評価用計数へ件数として渡す。 */
+    @Test
+    fun liveChangesAreReportedToEvaluationCounter() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val counter = EvaluationCounter()
+        val session = liveSession(connection, client, evaluation = counter)
+        assertTrue(counter.start("N01"))
+
+        // 「よ」→「世」は初回の表示、「世い」→「良い」は変換済みの表示の自動変更
+        session.inputText("よ")
+        val older = client.result(0)
+        client.deliverLatest(session)
+        typeLive(session, client, "い")
+        assertFalse(session.applyLiveResult(older))
+        assertEquals("良い", connection.text)
+
+        val choice = session.liveCandidateState()!!.choices.first { it.value == "酔い" }
+        assertTrue(session.selectLiveCandidate(choice))
+
+        val live = counter.finish()!!.live
+        assertEquals(2, live.displayChanges)
+        assertEquals(1, live.flicker)
+        assertEquals(1, live.staleResultsDiscarded)
+        assertEquals(1, live.toChosen)
+        assertEquals(0, live.stableOverwrites + live.chosenOverwrites)
+    }
+
     /** 明示変換で登録語の候補を確定しても、エンジンの候補ではないため確定を通知しない。 */
     @Test
     fun explicitUserDictionaryCandidateIsNotReportedToEngine() {
@@ -945,6 +974,7 @@ class EditorSessionTest {
         client: FakeLiveClient,
         policy: InputFieldPolicy = normalPolicy(),
         styler: (String, DisplaySpan?) -> CharSequence = { text, _ -> text },
+        evaluation: EvaluationCounter? = null,
     ): EditorSession {
         return EditorSession(
             connection = connection,
@@ -955,6 +985,7 @@ class EditorSessionTest {
             liveCore = LiveConversionCore(),
             liveClient = client,
             compositionStyler = styler,
+            evaluation = evaluation,
         )
     }
 

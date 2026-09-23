@@ -208,6 +208,7 @@ class UzumiInputMethodService : InputMethodService() {
             liveCore = if (live) LiveConversionCore() else null,
             liveClient = conversionWorker,
             compositionStyler = ::highlightSegment,
+            evaluation = evaluation,
         )
         applyPolicyToKeyboard()
         refreshCandidates()

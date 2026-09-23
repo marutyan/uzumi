@@ -85,13 +85,23 @@ H3は安全性の条件であり、件数の多少ではなく発生の有無で
 - 最終文：終端操作の後に`uiautomator dump`で試験欄の文字列を取り、許容表記と照合する。
 - 訂正：最終文が許容表記と一致しない場合は、目標表記と候補一覧を照合して必要な候補を選ぶ手順を機械的に行う。このときの訂正操作数は「必要な操作数の下限」であり、人の訂正コストとは別の値として報告する。目標表記は照合にだけ使い、IMEへは渡さない。
 - 評価用計数：Uzumiのdebug buildに、評価モードを明示的に有効にした間だけ、操作の種別ごとの回数、表示の自動変更の回数、誤書換えの判定に必要なsegmentの状態変化、時刻を記録する仕組みを設ける。評価モードは`adb`からの設定で入れ、試験の終了時に切る。記録には課題IDを付け、入力本文・候補の文字列は残さない。誤書換えの判定に表記が必要な場合は、課題文と照合した結果（正誤）だけを残す。
-  - 実装済みの範囲：課題ごとの操作数（キー操作数、確定操作数、訂正操作数、終端操作数）。表示の自動変更の回数、segmentの状態変化、時刻は未実装であり、flickerと誤書換えを測る前に別作業で足す。
-  - 操作の分類（計数の版1、`app/src/main/java/dev/uzumi/ime/evaluation/OperationCounts.kt`）：句点の入力とEnterは終端操作。明示変換の変換キーと第一候補の選択は確定操作。削除、行頭までの削除、カーソル・文節の移動、第一候補以外の候補選択、元に戻す、「末尾」、カナへの切り替え、ライブ変換中の変換キー（次の候補）は訂正操作。キー操作数は終端操作を除くすべての押下で、面の切替、Shift、候補一覧の開閉も含む。長押しの連続削除は、計数器では消えた回数ずつ数える。これは上の指標の定義（1回と数える）と異なるため、自動測定では長押しを使わず、本人が操作する条件では`getevent`で押下を数えて定義どおり1回とする。取り消した削除ドラッグのように、IMEへ操作が届かない押下は数えない。
+  - 実装済みの範囲（計数の版2）：課題ごとの操作数（キー操作数、確定操作数、訂正操作数、終端操作数）、ライブ変換の表示の自動変更の回数とflicker、stable・chosenの文節の書換え、捨てた古い結果の数、segmentの状態変化、時刻。版1からは列を足しただけで、操作の分類は変えていない。
+  - 表示と文節状態の計数（`app/src/main/java/dev/uzumi/ime/evaluation/LiveDisplayCounts.kt`）：ライブ変換の文節列を変換結果の適用とユーザーの操作の前後で比べ、件数だけを足す。比べた文節列と文字列は残さない。明示変換の条件（条件O）では変換結果の到着で表示が変わらないため、これらの列は0になる。
+    - `display_changes`：変換結果の到着（ユーザーの操作ではない）によって、Editorの表示（composition全体の文字列）が変わった回数。変わらない表示の再送と、文節の分け方だけが変わって文字列が同じ場合は数えない。一回の結果の適用は、何か所変わっても1回とする。
+    - `flicker`：`display_changes`のうち、変わった部分に既に変換済みの表示が掛かっていた回数。変わった部分は、変更前後の表示から共通の先頭と末尾を除いた範囲とする。未変換の読みが初めて変換された表示（初回の表示）はここに入れない。候補の選択、削除、Undoなど、ユーザーの操作による表示の変更はどちらの列にも入れない。指標のflicker（読み100文字あたり）は、この列を課題の`読み`（`phase2c-tasks.tsv`）の文字数で割って100を掛けて求める。
+    - `stable_overwrites`、`chosen_overwrites`：変換結果の適用の前にstable（chosen）だった文節のうち、適用の後に同じ読み範囲・同じ表記・同じ状態の文節が残っていなかった数。誤書換えのうち「chosenの侵害」と、stableの自動変更を自動で検出する部分であり、コアの規則上は0になる。1件でもあればH3の反証とする。
+    - `stale_results_discarded`：要求の後に状態が変わったため、コアが照合して捨てた結果の数（epoch、辞書の世代、revision、読み、対象範囲、保護範囲のどれかが合わない）。「古い結果による上書き」は、捨てずに適用された場合だけ起こるため計数器では検出できない。この列は古い結果が実際に届いたことを示し、上書きが起きていないことは`stable_overwrites`・`chosen_overwrites`と最終文で確かめる。
+    - 誤書換えのうち「過去の正解の破壊」（正しい表記が誤った表記へ変わった）は、正誤の判定に課題文との照合が要るため計数器では数えない。provisionalの文節の自動の変更は`flicker`に含まれ、正誤は最終文の照合で判定する。
+    - `to_stable`：provisionalからstableへ変わった文節の数。変換結果の適用による昇格と、読点の入力などユーザーの操作による昇格の両方を数える。変換結果が新しく作った文節がその場でstableになった場合も含む。
+    - `to_chosen`：provisionalまたはstableからchosenへ変わった文節の数（候補の選択）。
+    - `to_provisional`：stableまたはchosenからprovisionalへ戻った文節の数（Undo・Redoで同じ文節が戻った場合）。読みの編集で文節が作り直された場合は、元の文節が消えたものとして扱い、数えない。ユーザーが入れた句読点の文節は作られた時からstableであり、状態の変化に数えない。
+  - 時刻（epochからのミリ秒、端末の時計）：`started_ms`は計数の開始、`finished_ms`は計数の終了を受けた時刻。`elapsed_ms`は最初の押下から最後の終端操作までの時間で、上の指標の完了時間に当たる。押下の時刻はIMEが操作を受け取った時刻であり、画面に触れた時刻ではない。押下または終端操作が無ければ`elapsed_ms`は-1とする。どの文字を打った時刻かは残さない。
+  - 操作の分類（計数の版2、`app/src/main/java/dev/uzumi/ime/evaluation/OperationCounts.kt`）：句点の入力とEnterは終端操作。明示変換の変換キーと第一候補の選択は確定操作。削除、行頭までの削除、カーソル・文節の移動、第一候補以外の候補選択、元に戻す、「末尾」、カナへの切り替え、ライブ変換中の変換キー（次の候補）は訂正操作。キー操作数は終端操作を除くすべての押下で、面の切替、Shift、候補一覧の開閉も含む。長押しの連続削除は、計数器では消えた回数ずつ数える。これは上の指標の定義（1回と数える）と異なるため、自動測定では長押しを使わず、本人が操作する条件では`getevent`で押下を数えて定義どおり1回とする。取り消した削除ドラッグのように、IMEへ操作が届かない押下は数えない。
   - 課題ごとの手順（debug APKだけで使える）：
     1. 試験欄を空にする：`adb shell am start -n dev.uzumi.ime/.compat.Phase2cTaskActivity --es task <課題ID>`。開くたびに欄（`dev.uzumi.ime:id/phase2c_task_field`）を空にし、課題IDを表示する。この操作は数えない。
     2. 計数を始める：`adb shell am broadcast -n dev.uzumi.ime/.compat.EvaluationCounterReceiver -a dev.uzumi.ime.debug.EVAL_START --es task <課題ID>`。課題IDは英数字・`_`・`-`の16文字以内に限る。
     3. 読みを入力し、終端操作まで行う。
-    4. 計数を終える：`adb shell am broadcast -n dev.uzumi.ime/.compat.EvaluationCounterReceiver -a dev.uzumi.ime.debug.EVAL_FINISH`。出力の`data`に1行（`counter_version`、`task_id`、`keys`、`commits`、`corrections`、`terminators`のTSV）が返り、端末内の`no_backup/phase2c-counts.tsv`へも追記される。
+    4. 計数を終える：`adb shell am broadcast -n dev.uzumi.ime/.compat.EvaluationCounterReceiver -a dev.uzumi.ime.debug.EVAL_FINISH`。出力の`data`に1行（`counter_version`、`task_id`、`keys`、`commits`、`corrections`、`terminators`、`display_changes`、`flicker`、`stable_overwrites`、`chosen_overwrites`、`stale_results_discarded`、`to_stable`、`to_chosen`、`to_provisional`、`started_ms`、`finished_ms`、`elapsed_ms`のTSV）が返り、端末内の`no_backup/phase2c-counts.tsv`へも追記される。端末内のファイルが前の版の見出しで始まる場合は、列がずれないよう計数を始めずに拒否する。取り出してから下の`EVAL_CLEAR`で消す。
     5. 最終文を`uiautomator dump`で試験欄から取る。
   - 取り出しと消去：`-a dev.uzumi.ime.debug.EVAL_DUMP`で全行を、`-a dev.uzumi.ime.debug.EVAL_CLEAR`で記録の消去と計数の停止を行う（どちらも上と同じ`-n`で送る）。`adb shell run-as dev.uzumi.ime cat no_backup/phase2c-counts.tsv`でも読める。取り出した結果は`.local-build/phase2c/<実施日>/`へ置く。受信口はDUMP権限を持つ`adb shell`からだけ送れ、releaseビルドには入らない。
 - 実施：条件Oと条件Nで54文を同じ順に1回ずつ流す。条件ごとに学習履歴を消してから始める。
