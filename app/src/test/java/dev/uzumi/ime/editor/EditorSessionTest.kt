@@ -757,21 +757,49 @@ class EditorSessionTest {
         assertTrue(client.committedCandidates.isEmpty())
     }
 
-    /** 明示変換の表示中に削除すると、読み末尾を消した残りの読みを変換し直す。 */
+    /**
+     * 明示変換の表示中に削除すると読みへ戻り、自動では再変換しない。続けて入力しても、
+     * 削除前の変換や別の変換結果を確定せず、読みへ文字を足す（「良い」→削除→「よ」→「る」で「よる」）。
+     */
     @Test
-    fun explicitDeleteDuringConversionReconvertsRemainingReading() {
-        val connection = FakeEditorConnection()
+    fun explicitDeleteDuringConversionReturnsToReadingWithoutReconverting() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
         val client = FakeConversionClient()
-        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        val session = EditorSession(connection, normalPolicy(), 0, 0, conversionClient = client)
         session.inputText("よい")
         session.convert()
         assertTrue(session.applyConversionOutcome(converted(client.requests.single(), "良い")))
+        assertEquals("良い", connection.text)
 
         assertTrue(session.deleteBackward())
+        assertEquals("よ", connection.text)
+        assertEquals(1, client.requests.size)
 
-        assertEquals("よ", connection.composingTexts.last())
-        assertEquals("よ", client.requests.last().reading)
-        assertEquals(2, client.requests.size)
+        assertTrue(session.inputText("る"))
+        assertEquals("よる", connection.text)
+        assertEquals("よる", session.compositionSnapshot().reading)
+        assertTrue(client.committedAll.isEmpty())
+    }
+
+    /** 明示変換で読み全体の登録語を表示したまま確定しても、エンジンへ確定を学習させない。 */
+    @Test
+    fun explicitCommitOfUserDictionaryDisplayIsNotReportedToEngine() {
+        val connection = FakeEditorConnection()
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("うずみ")
+        session.convert()
+        val result = ConversionResult(
+            client.requests.single(),
+            listOf(ConversionSegment("うずみ", "Uzumi", fromUserDictionary = true)),
+            listOf(ConversionCandidate(Int.MIN_VALUE, "Uzumi", "うずみ", fromUserDictionary = true)),
+        )
+        assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(result)))
+        assertEquals("Uzumi", connection.composingTexts.last())
+
+        assertTrue(session.commitComposition())
+        assertEquals(listOf("Uzumi"), connection.committedTexts)
+        assertTrue(client.committedAll.isEmpty())
     }
 
     /** ライブ変換の編集セッションを作る。変換要求はclientへ記録され、テストが結果を返す。 */

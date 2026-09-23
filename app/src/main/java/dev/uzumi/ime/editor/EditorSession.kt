@@ -151,14 +151,9 @@ class EditorSession(
             return deleteOutsideComposition()
         }
         if (!buffer.isEmpty) {
-            // 変換結果の表示中の削除は、読み末尾の書記素を消し、残りの読みを変換し直す（「良い」→「よ」の再変換）。
-            val reconvert = currentConversion() != null
             if (!buffer.deleteBackward()) return false
             markCompositionChanged()
-            if (synchronizeComposition()) {
-                if (reconvert && !buffer.isEmpty && conversionClient?.isAvailable == true) convert()
-                return true
-            }
+            if (synchronizeComposition()) return true
             failClosed()
             return false
         }
@@ -262,7 +257,9 @@ class EditorSession(
         if (buffer.isEmpty) return true
         val conversion = currentConversion()
         if (!commitCompositionAs(buffer.display)) return false
-        conversion?.let { conversionClient?.commitAll(it.request) }
+        // 登録語を表示していた場合、エンジン側の変換とは表記が違うため、確定をエンジンへ学習させない。
+        conversion?.takeIf { result -> result.segments.none { it.fromUserDictionary } }
+            ?.let { conversionClient?.commitAll(it.request) }
         return true
     }
 
@@ -909,8 +906,13 @@ class EditorSession(
     }
 
     private companion object {
-        /** 遅延通知の照合に残す過去composition数の上限。 */
-        const val MAX_STALE_COMPOSITIONS = 8
+        /**
+         * 遅延通知の照合に残す過去composition数の上限。ライブ変換では一打鍵で読みの表示と変換結果の表示の
+         * 2回（カーソルが末尾以外なら位置の指定を加えて最大4回）書き込むため、明示変換で使っていた8では
+         * 2〜4打鍵分の遅れしか照合できない。照合できない遅延通知は外部の変更とみなしてcompositionを
+         * 確定・破棄するので、速い連続入力でも誤って確定しないよう32（8打鍵以上）にする。
+         */
+        const val MAX_STALE_COMPOSITIONS = 32
     }
 }
 

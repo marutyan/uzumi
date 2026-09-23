@@ -17,6 +17,8 @@ data class ConversionRequest(
 data class ConversionSegment(
     val reading: String,
     val value: String,
+    // 表記がユーザー辞書の登録語か。エンジンの変換結果ではないため、確定してもエンジンへ学習させない。
+    val fromUserDictionary: Boolean = false,
 )
 
 /**

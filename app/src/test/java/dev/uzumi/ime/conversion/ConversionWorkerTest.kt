@@ -222,7 +222,9 @@ class ConversionWorkerTest {
         fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "かん"))
         fixture.executor.runAll()
 
-        assertEquals(listOf("缶", "かん"), fixture.liveResults.single().second.segments.single().candidates)
+        val segment = fixture.liveResults.single().second.segments.single()
+        assertEquals("缶", segment.surface)
+        assertEquals(listOf("缶", "かん"), segment.candidates)
     }
 
     /** 明示変換の先頭文節の候補にも、登録語を先頭に加える。 */
@@ -237,6 +239,8 @@ class ConversionWorkerTest {
         val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
         assertEquals(listOf("幹事", "漢字", "感じ"), result.headCandidates.map { it.value })
         assertTrue(result.headCandidates.first().fromUserDictionary)
+        assertEquals("幹事", result.display)
+        assertTrue(result.isConsistent)
     }
 
     /** 確定の学習はsession破棄より先にキューへ積まれ、合わせられない単位はsegmentごとに学習し直す。 */

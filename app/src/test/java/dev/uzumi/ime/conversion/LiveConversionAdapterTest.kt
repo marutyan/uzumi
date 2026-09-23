@@ -107,7 +107,7 @@ class LiveConversionAdapterTest {
         assertNull(toLiveSegments("か", emptyList()))
     }
 
-    /** 各segmentの読みに一致する登録語を候補の先頭へ置き、Mozc候補との重複を除く。表示は変えない。 */
+    /** 各segmentの読みに一致する登録語を登録順に候補の先頭へ置いて最初の語を表示し、Mozc候補との重複を除く。 */
     @Test
     fun userDictionaryWordsLeadSegmentCandidates() {
         val dictionary = FakeLookup("てんき" to "テンキ辞書", "てんき" to "転機")
@@ -121,11 +121,12 @@ class LiveConversionAdapterTest {
         )
 
         assertEquals(listOf("今日", "京"), merged[0].candidates)
-        assertEquals("天気", merged[1].surface)
+        assertEquals("今日", merged[0].surface)
+        assertEquals("テンキ辞書", merged[1].surface)
         assertEquals(listOf("テンキ辞書", "転機", "天気"), merged[1].candidates)
     }
 
-    /** 範囲全体の読みに一致する登録語があれば、範囲を一segmentにまとめて全体の候補として出す。 */
+    /** 範囲全体の読みに一致する登録語があれば、範囲を一segmentにまとめてその語を表示する。 */
     @Test
     fun wholeRangeUserDictionaryWordBecomesWholeCandidate() {
         val dictionary = FakeLookup("うずみ" to "Uzumi")
@@ -135,10 +136,13 @@ class LiveConversionAdapterTest {
             dictionary,
         )
 
-        assertEquals(listOf(ResultSegment("うずみ", "鵜済み", listOf("Uzumi", "鵜済み", "うずみ"))), merged)
+        assertEquals(listOf(ResultSegment("うずみ", "Uzumi", listOf("Uzumi", "鵜済み", "うずみ"))), merged)
     }
 
-    /** 明示変換では、先頭文節と読み全体に一致する登録語を先頭へ置き、エンジンの同じ候補を除く。 */
+    /**
+     * 明示変換では、読み全体と先頭文節に一致する登録語を先頭へ置き、エンジンの同じ候補を除く。
+     * 読み全体に一致する語があれば、その語を読み全体の一文節として表示する。
+     */
     @Test
     fun explicitCandidatesStartWithUserDictionaryWords() {
         val conversion = EngineConversion(
@@ -153,13 +157,18 @@ class LiveConversionAdapterTest {
 
         val merged = UserDictionaryCandidates.mergeExplicit("きょうはいい", conversion, dictionary)
 
-        assertEquals(listOf("京は", "今日はイイ", "今日は", "キョウハ"), merged.headCandidates.map { it.value })
-        assertEquals(listOf("きょうは", "きょうはいい"), merged.headCandidates.take(2).map { it.reading })
+        assertEquals(listOf("今日はイイ", "京は", "今日は", "キョウハ"), merged.headCandidates.map { it.value })
+        assertEquals(listOf("きょうはいい", "きょうは"), merged.headCandidates.take(2).map { it.reading })
         assertTrue(merged.headCandidates.take(2).all { it.fromUserDictionary })
         assertFalse(merged.headCandidates.drop(2).any { it.fromUserDictionary })
         assertEquals(merged.headCandidates.size, merged.headCandidates.map { it.id }.distinct().size)
-        assertEquals(conversion.segments, merged.segments)
+        assertEquals(listOf(ConversionSegment("きょうはいい", "今日はイイ", fromUserDictionary = true)), merged.segments)
         assertEquals(conversion, UserDictionaryCandidates.mergeExplicit("きょうはいい", conversion, null))
+
+        // 先頭文節だけに一致する語は候補の先頭に置くが、表示はエンジンの結果のままにする。
+        val headOnly = UserDictionaryCandidates.mergeExplicit("きょうはいい", conversion, FakeLookup("きょうは" to "京は"))
+        assertEquals(conversion.segments, headOnly.segments)
+        assertEquals("京は", headOnly.headCandidates.first().value)
     }
 
     /** 学習単位は句読点と未変換のsegmentで区切り、ASCIIだけのsegmentは送らない。 */

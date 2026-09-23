@@ -68,13 +68,15 @@ fun toLiveSegments(chunk: String, segments: List<EngineSegment>): List<ResultSeg
 fun isAsciiOnly(chunk: String): Boolean = chunk.all { it.code < 0x80 }
 
 /**
- * ユーザー辞書の登録語を変換候補へ加える規則を一か所に置く。登録語は候補の先頭に置き、
- * 変換エンジンの候補との重複は除く。登録語の表示は学習ではないため、学習禁止欄でも参照してよい。
+ * ユーザー辞書の登録語を変換候補へ加える規則を一か所に置く。登録語は登録順に候補の先頭へ置き、
+ * 変換エンジンの候補との重複は除く。読みが完全に一致する登録語は、最初に表示する候補にもする。
+ * 登録語の表示は学習ではないため、学習禁止欄でも参照してよい。
  */
 object UserDictionaryCandidates {
     /**
-     * 明示変換の先頭文節の候補へ登録語を加える。先頭文節の読みに一致する語と、
-     * 読み全体に一致する語（確定すると読み全体を置き換える）を先頭に置く。
+     * 明示変換の先頭文節の候補へ登録語を加える。読み全体に一致する語（確定すると読み全体を置き換える）と、
+     * 先頭文節の読みに一致する語を先頭に置く。読み全体に一致する語があれば、その最初の語を読み全体の
+     * 一文節として表示する。
      */
     fun mergeExplicit(
         reading: String,
@@ -83,7 +85,7 @@ object UserDictionaryCandidates {
     ): EngineConversion {
         if (userDictionary == null) return conversion
         val headReading = conversion.segments.firstOrNull()?.reading ?: return conversion
-        val readings = listOf(headReading, reading).distinct()
+        val readings = listOf(reading, headReading).distinct()
         val registered = readings.flatMap { target ->
             userDictionary.exactMatches(target).map { it.surface to target }
         }.distinct()
@@ -99,13 +101,19 @@ object UserDictionaryCandidates {
         val engine = conversion.headCandidates.filterNot { candidate ->
             registered.any { it.first == candidate.value && it.second == candidate.reading }
         }
-        return conversion.copy(headCandidates = user + engine)
+        val whole = user.firstOrNull { it.reading == reading }
+        val segments = if (whole != null) {
+            listOf(ConversionSegment(reading, whole.value, fromUserDictionary = true))
+        } else {
+            conversion.segments
+        }
+        return EngineConversion(segments = segments, headCandidates = user + engine)
     }
 
     /**
      * ライブ変換の一部分範囲の結果へ登録語を加える。範囲全体の読みに一致する語があれば、
-     * 範囲を一segmentにまとめてその語を候補の先頭へ置く。それ以外は各segmentの読みに一致する語を先頭へ置く。
-     * どちらの場合も表示（第一候補）は変換エンジンの結果のままにする。
+     * 範囲を一segmentにまとめる。それ以外は各segmentの読みに一致する語を加える。
+     * どちらの場合も、最初の登録語を表示し、登録語の後に変換エンジンの候補を続ける。
      */
     fun mergeLive(
         chunk: String,
@@ -114,16 +122,17 @@ object UserDictionaryCandidates {
     ): List<ResultSegment> {
         if (userDictionary == null) return segments
         val whole = userDictionary.exactMatches(chunk).map { it.surface }
-        if (whole.isNotEmpty() && segments.size > 1) {
+        if (whole.isNotEmpty()) {
             val joined = segments.joinToString(separator = "") { it.surface }
-            return listOf(ResultSegment(chunk, joined, (whole + joined + chunk).distinct()))
+            val engineCandidates = if (segments.size == 1) segments.single().candidates else listOf(joined)
+            return listOf(ResultSegment(chunk, whole.first(), (whole + engineCandidates + chunk).distinct()))
         }
         return segments.map { segment ->
             val registered = userDictionary.exactMatches(segment.reading).map { it.surface }
             if (registered.isEmpty()) {
                 segment
             } else {
-                segment.copy(candidates = (registered + segment.candidates).distinct())
+                segment.copy(surface = registered.first(), candidates = (registered + segment.candidates).distinct())
             }
         }
     }
