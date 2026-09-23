@@ -39,6 +39,30 @@ data class ImeEvaluationStatus(
     val workerTasks: Int,
     /** 編集セッションの変換の進み具合。セッションが無ければ既定値。 */
     val progress: ConversionProgress,
+    /** ニューラル変換の状態。Mozcだけの条件では既定値。 */
+    val neural: NeuralRuntimeStatus = NeuralRuntimeStatus(),
+)
+
+/**
+ * ニューラル変換の状態の要約（数値と真偽だけ）。自動測定の道具が、モデルの準備を待ってから課題を始めるために読む。
+ * PSSはこの要約では測らず（測るのに時間がかかるため）、`EVAL_MEMORY`で別に問い合わせる。
+ */
+data class NeuralRuntimeStatus(
+    /** モデルを選んでいるか（debugの選択）。falseならMozcだけ。 */
+    val selected: Boolean = false,
+    /**
+     * 選んでいるモデルの識別子（`NeuralModelSpec.generation`、モデルのSHA-256の先頭48 bitとプロンプト形式の版から作る数値）。
+     * Mozcだけなら0。自動測定の道具が、条件のモデルと一致することを確かめるために読む。
+     */
+    val modelGeneration: Long = 0,
+    /** モデルの読み込みを終え、推論を受け付けるか。 */
+    val ready: Boolean = false,
+    /** モデルの読み込みの結果の番号（`NeuralRuntimeService`の定数）。未完了なら-1。 */
+    val loadReason: Int = -1,
+    /** bindから最初の推論結果までの時間（ミリ秒）。未計測なら-1。 */
+    val coldStartMillis: Long = -1,
+    /** 最後に受け取った`:neural`のPSS（KB）。未取得なら-1。 */
+    val lastNeuralPssKb: Int = -1,
 )
 
 /**
@@ -49,4 +73,7 @@ data class ImeEvaluationStatus(
 object EvaluationStatusSource {
     /** 登録中のIMEの状態を返す関数。IMEが起動していなければnull。 */
     var provider: (() -> ImeEvaluationStatus)? = null
+
+    /** `:neural`へPSSを問い合わせる関数（結果は後から[NeuralRuntimeStatus.lastNeuralPssKb]へ入る）。IMEが起動していなければnull。 */
+    var neuralMemoryRequester: (() -> Unit)? = null
 }

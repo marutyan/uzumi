@@ -32,7 +32,7 @@ class NeuralRangeConverterTest {
         val calls = mutableListOf<Pair<String, String>>()
         val model = NeuralKanaKanjiModel { reading, context ->
             calls += reading to context
-            mapOf("ねんです" to "年です", "のてすと" to "のテスト")[reading]
+            output(mapOf("ねんです" to "年です", "のてすと" to "のテスト")[reading])
         }
         val converter = NeuralRangeConverter(model, ::lexiconSegments)
 
@@ -52,7 +52,7 @@ class NeuralRangeConverterTest {
         val expected = lexiconSegments(reading)
 
         for (output in listOf("電車(でんしゃ)なおくれる", "電車が遅", "", null)) {
-            val converter = NeuralRangeConverter(model = { _, _ -> output }, dictionary = ::lexiconSegments)
+            val converter = NeuralRangeConverter(model = { _, _ -> output(output) }, dictionary = ::lexiconSegments)
             assertEquals("出力: $output", expected, converter.convert(reading))
         }
     }
@@ -61,7 +61,7 @@ class NeuralRangeConverterTest {
     @Test
     fun withoutDictionaryShowsNeuralOrReading() {
         val neuralOnly = NeuralRangeConverter(model = fixedModel("てんき" to "天気"), dictionary = { null })
-        val neither = NeuralRangeConverter(model = { _, _ -> null }, dictionary = { null })
+        val neither = NeuralRangeConverter(model = { _, _ -> output(null) }, dictionary = { null })
 
         assertEquals(listOf(ResultSegment("てんき", "天気", listOf("天気", "てんき"))), neuralOnly.convert("てんき"))
         assertEquals(listOf(ResultSegment("てんき", "てんき")), neither.convert("てんき"))
@@ -90,8 +90,8 @@ class NeuralRangeConverterTest {
      */
     @Test
     fun digitsGeneratedFromKanaNeedDictionaryCandidate() {
-        val withDictionary = { output: String -> NeuralRangeConverter(model = { _, _ -> output }, dictionary = ::lexiconSegments) }
-        val withoutDictionary = { output: String -> NeuralRangeConverter(model = { _, _ -> output }, dictionary = { null }) }
+        val withDictionary = { text: String -> NeuralRangeConverter(model = { _, _ -> output(text) }, dictionary = ::lexiconSegments) }
+        val withoutDictionary = { text: String -> NeuralRangeConverter(model = { _, _ -> output(text) }, dictionary = { null }) }
 
         assertEquals(lexiconSegments("じゅうじ"), withDictionary("11時").convert("じゅうじ"))
         assertEquals(lexiconSegments("にせんにじゅうろくねん"), withDictionary("1999年").convert("にせんにじゅうろくねん"))
@@ -114,7 +114,7 @@ class NeuralRangeConverterTest {
     fun digitsOverlappingDictionarySegmentPartlyAreRejected() {
         // 「じゅうじか」を一文節とする辞書。出力の「10時」は読み「じゅうじ」に対応し、文節の一部だけに重なる。
         val crossing = listOf(ResultSegment("じゅうじか", "10時か", listOf("10時か")), ResultSegment("ら", "ら"))
-        val converter = NeuralRangeConverter(model = { _, _ -> "10時から" }, dictionary = { crossing })
+        val converter = NeuralRangeConverter(model = { _, _ -> output("10時から") }, dictionary = { crossing })
 
         assertEquals(crossing, converter.convert("じゅうじから"))
     }
@@ -160,11 +160,102 @@ class NeuralRangeConverterTest {
         assertEquals(SegmentState.CHOSEN, core.segments.first().state)
     }
 
+    /** 保護範囲の表記と前の部分範囲の表記は、`SegmentedLiveConverter`から左文脈としてモデルへ渡る。 */
+    @Test
+    fun protectedSurfaceBecomesLeftContext() {
+        val calls = mutableListOf<Pair<String, String>>()
+        val model = NeuralKanaKanjiModel { reading, context ->
+            calls += reading to context
+            output(mapOf("てんき" to "天気", "きょうは" to "今日は")[reading])
+        }
+        val converter = SegmentedLiveConverter(convertRange = NeuralRangeConverter(model, ::lexiconSegments)::convert)
+        val identity = dev.uzumi.ime.live.RequestIdentity(
+            sessionEpoch = 1, revision = 1, reading = "きょうはてんき", targetStart = 0, targetEnd = 7,
+            protectedRanges = listOf(dev.uzumi.ime.live.ProtectedRange(0, 4, "京は")), inputCursor = 7, converterGeneration = 0,
+        )
+
+        val result = converter.convert(dev.uzumi.ime.live.ConversionRequest(identity, "きょうはてんき", learningAllowed = true))
+
+        assertEquals(listOf("てんき" to "京は"), calls)
+        assertEquals(listOf("京は", "天気"), result!!.segments.map { it.surface })
+    }
+
+    /** 学習禁止欄・機密欄では、部分範囲より前の表示も同じ部分範囲の先の表記も、左文脈としてモデルへ渡さない。 */
+    @Test
+    fun leftContextIsWithheldWhenDisabled() {
+        val calls = mutableListOf<Pair<String, String>>()
+        val model = NeuralKanaKanjiModel { reading, context ->
+            calls += reading to context
+            output(mapOf("ねんです" to "年です")[reading])
+        }
+        val converter = NeuralRangeConverter(model, ::lexiconSegments, useLeftContext = false)
+
+        converter.convert("2026ねんです", leftContext = "保護範囲")
+
+        assertEquals(listOf("ねんです" to ""), calls)
+    }
+
+    /** 30文字を超えるかなの連なりは、30文字以内で最も後ろの辞書の文節境界で区切り、前の表記を後ろの左文脈にする。 */
+    @Test
+    fun longKanaRunIsSplitAtLastDictionaryBoundaryWithinLimit() {
+        val calls = mutableListOf<Pair<String, String>>()
+        val model = NeuralKanaKanjiModel { reading, context ->
+            calls += reading to context
+            output(reading)
+        }
+        val observed = mutableListOf<Boolean>()
+        val observer = object : NeuralConversionObserver {
+            override fun onKanaRun(reading: String, split: Boolean) {
+                observed += split
+            }
+        }
+        // 「あいう」を1文節とする辞書で、31文字（あいう×10＋え）を変換する。境界は3文字ごと。
+        val dictionary = { chunk: String ->
+            GraphemeClusters.split(chunk).chunked(3).map { part -> ResultSegment(part.joinToString(""), part.joinToString("")) }
+        }
+        val reading = "あいう".repeat(10) + "え"
+        val segments = NeuralRangeConverter(model, dictionary, observer).convert(reading)
+
+        assertEquals(listOf("あいう".repeat(10), "え"), calls.map { it.first })
+        assertEquals("あいう".repeat(10), calls[1].second)
+        assertEquals(listOf(true, false), observed)
+        assertEquals(reading, segments.joinToString("") { it.reading })
+    }
+
+    /** token上限で打ち切った出力（検査2）は使わず、辞書の結果を表示する。検査の結果は窓口へ伝わる。 */
+    @Test
+    fun truncatedOutputIsRejectedByCheckTwo() {
+        val verdicts = mutableListOf<NeuralVerdict>()
+        val observer = object : NeuralConversionObserver {
+            override fun onModelOutput(reading: String, output: String, verdict: NeuralVerdict) {
+                verdicts += verdict
+            }
+        }
+        val converter = NeuralRangeConverter(
+            model = { _, _ -> NeuralModelOutput.Completed("今日は", truncated = true) },
+            dictionary = ::lexiconSegments,
+            observer = observer,
+        )
+
+        assertEquals(lexiconSegments("きょうは"), converter.convert("きょうは"))
+        assertEquals(listOf(NeuralVerdict.CHECK2_TRUNCATED), verdicts)
+    }
+
+    /** 新しい入力で推論が中断されたら、辞書へ戻さず変換要求全体を取り下げる。 */
+    @Test(expected = NeuralRequestCancelled::class)
+    fun cancelledInferenceAbortsWholeRequest() {
+        NeuralRangeConverter(model = { _, _ -> NeuralModelOutput.Cancelled }, dictionary = ::lexiconSegments).convert("てんき")
+    }
+
     /** 読みに完全一致する入力だけに決まった表記を返すfakeのモデル。 */
     private fun fixedModel(vararg outputs: Pair<String, String>): NeuralKanaKanjiModel {
         val table = outputs.toMap()
-        return NeuralKanaKanjiModel { reading, _ -> table[reading] }
+        return NeuralKanaKanjiModel { reading, _ -> output(table[reading]) }
     }
+
+    /** fakeのモデルの出力を作る。nullはモデルが使えない場合を表す。 */
+    private fun output(text: String?): NeuralModelOutput =
+        text?.let { NeuralModelOutput.Completed(it) } ?: NeuralModelOutput.Failed(NeuralFailure.UNAVAILABLE)
 
     /** 小さな語彙で最長一致の文節に分けるfakeの辞書。語彙に無い書記素はそのまま一文節にする。 */
     private fun lexiconSegments(chunk: String): List<ResultSegment> {

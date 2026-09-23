@@ -21,8 +21,9 @@ import dev.uzumi.ime.live.SegmentState
  * ユーザーが伸縮で区切りを決めた範囲（fixedRanges）は、それだけを一つの部分範囲として一segmentに変換する。
  */
 class SegmentedLiveConverter(
-    // 一つの部分範囲の読みを変換する。読みの連結がその範囲に一致するsegment列を返し、失敗時はnull。
-    private val convertRange: (String) -> List<ResultSegment>?,
+    // 一つの部分範囲の読みを変換する。二つ目の引数は部分範囲より前の表示（保護範囲の表記と、同じ要求で先に変換した表記）で、
+    // ニューラル変換が左文脈に使う。読みの連結がその範囲に一致するsegment列を返し、失敗時はnull。
+    private val convertRange: (reading: String, leftContext: String) -> List<ResultSegment>?,
     // 登録語を候補の先頭へ加えるためのユーザー辞書。nullなら加えない。
     private val userDictionary: UserDictionaryLookup? = null,
     // 読みに完全一致する学習語の表記を、優先する順に返す。nullなら学習語を加えない（学習禁止欄・学習OFF）。
@@ -52,7 +53,7 @@ class SegmentedLiveConverter(
             val fixed = identity.fixedRanges.firstOrNull { it.readingStart == position }
             if (fixed != null) {
                 val reading = clusters.subList(fixed.readingStart, fixed.readingEnd).joinToString("")
-                segments += convertFixedMerged(reading) ?: return null
+                segments += convertFixedMerged(reading, leftContext(segments)) ?: return null
                 position = fixed.readingEnd
                 continue
             }
@@ -67,20 +68,26 @@ class SegmentedLiveConverter(
             val chunk = chunkClusters.joinToString("")
             val phraseEnd = headPhraseEnd(chunk, chunkClusters)
             if (phraseEnd == null) {
-                segments += convertMerged(chunk) ?: return null
+                segments += convertMerged(chunk, leftContext(segments)) ?: return null
             } else {
                 // 句の読みを一つの範囲として変換すると、範囲全体に一致する句の表記の一segmentにまとまる。残りは別に変換する。
-                segments += convertMerged(chunkClusters.subList(0, phraseEnd).joinToString("")) ?: return null
-                segments += convertMerged(chunkClusters.subList(phraseEnd, chunkClusters.size).joinToString("")) ?: return null
+                segments += convertMerged(chunkClusters.subList(0, phraseEnd).joinToString(""), leftContext(segments)) ?: return null
+                segments += convertMerged(
+                    chunkClusters.subList(phraseEnd, chunkClusters.size).joinToString(""),
+                    leftContext(segments),
+                ) ?: return null
             }
             position = chunkEnd
         }
         return LiveResult(identity, segments)
     }
 
+    /** 部分範囲より前の表示。先に並べたsegment（保護範囲と、同じ要求で先に変換した部分範囲）の表記を連結する。 */
+    private fun leftContext(segments: List<ResultSegment>): String = segments.joinToString(separator = "") { it.surface }
+
     /** 一つの読みを変換し、「ユーザー辞書 → 学習 → エンジン」の順に候補を合成する。学習語を先に合成し、その上へ登録語を置く。 */
-    private fun convertMerged(reading: String): List<ResultSegment>? {
-        val converted = convertRange(reading) ?: return null
+    private fun convertMerged(reading: String, leftContext: String): List<ResultSegment>? {
+        val converted = convertRange(reading, leftContext) ?: return null
         val learned = exactSurfaces?.let { mergeExactSurfaces(reading, converted, it) } ?: converted
         return UserDictionaryCandidates.mergeLive(reading, learned, userDictionary)
     }
@@ -89,9 +96,9 @@ class SegmentedLiveConverter(
      * ユーザーが区切りを決めた読みを一segmentとして変換し、convertMergedと同じ順で登録語と学習語を合成する。
      * 読み全体が一segmentなので、合成しても一segmentのまま残る。
      */
-    private fun convertFixedMerged(reading: String): ResultSegment? {
+    private fun convertFixedMerged(reading: String, leftContext: String): ResultSegment? {
         val single = convertFixed?.invoke(reading)?.takeIf { it.reading == reading }
-            ?: convertRange(reading)?.let { joinIntoOne(reading, it) }
+            ?: convertRange(reading, leftContext)?.let { joinIntoOne(reading, it) }
             ?: return null
         val learned = exactSurfaces?.let { mergeExactSurfaces(reading, listOf(single), it) } ?: listOf(single)
         val merged = UserDictionaryCandidates.mergeLive(reading, learned, userDictionary).single()

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ニューラル変換の評価用の選択を使えるか。製品（release）では使わない。debugビルドはsrc/debugの同名の値で上書きする。 -->
+<resources>
+    <bool name="neural_selection_enabled">false</bool>
+</resources>

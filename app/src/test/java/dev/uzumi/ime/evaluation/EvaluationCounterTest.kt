@@ -72,7 +72,7 @@ class EvaluationCounterTest {
         counter.record(OperationKind.TERMINATOR)
         val result = counter.finish()
         assertEquals(OperationCounts(keys = 1, terminators = 1), result?.counts)
-        assertEquals("2\tN01\t1\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t5\t5\t0", result?.toTsvRow())
+        assertEquals("3\tN01\t1\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t5\t5\t0" + NEURAL_ZEROS_AND_UNJUDGED_DIGITS, result?.toTsvRow())
         assertEquals(TaskOperationCounts.TSV_HEADER.split('\t').size, result?.toTsvRow()?.split('\t')?.size)
 
         // 終えた後の押下は数えない
@@ -142,7 +142,7 @@ class EvaluationCounterTest {
         counter.record(OperationKind.TERMINATOR)
         val result = counter.finish()!!
         assertEquals(LiveDisplayCounts(displayChanges = 1, flicker = 1, staleResultsDiscarded = 1, toStable = 2), result.live)
-        assertEquals("2\tN04\t0\t0\t0\t1\t1\t1\t0\t0\t1\t2\t0\t0\t10\t10\t0", result.toTsvRow())
+        assertEquals("3\tN04\t0\t0\t0\t1\t1\t1\t0\t0\t1\t2\t0\t0\t10\t10\t0" + NEURAL_ZEROS_AND_UNJUDGED_DIGITS, result.toTsvRow())
         assertEquals(TaskOperationCounts.TSV_HEADER.split('\t').size, result.toTsvRow().split('\t').size)
     }
 
@@ -239,6 +239,7 @@ class EvaluationCounterTest {
             OperationCounts::class.java to Int::class.javaPrimitiveType,
             LiveDisplayCounts::class.java to Int::class.javaPrimitiveType,
             TaskTiming::class.java to Long::class.javaPrimitiveType,
+            NeuralCounts::class.java to Int::class.javaPrimitiveType,
         )) {
             val declared = fields(type)
             assertTrue(declared.isNotEmpty())
@@ -252,8 +253,20 @@ class EvaluationCounterTest {
                 "counts" to OperationCounts::class.java,
                 "live" to LiveDisplayCounts::class.java,
                 "timing" to TaskTiming::class.java,
+                "neural" to NeuralCounts::class.java,
+                "digitViolation" to Int::class.javaPrimitiveType,
+                "samples" to List::class.java,
             ),
             resultFields,
+        )
+        // 時間の記録も、種類（列挙）と数値だけ
+        assertEquals(
+            mapOf(
+                "kind" to TimingKind::class.java,
+                "millis" to Double::class.javaPrimitiveType,
+                "outcome" to dev.uzumi.ime.conversion.NeuralCallOutcome::class.java,
+            ),
+            fields(TimingSample::class.java).associate { it.name to it.type },
         )
 
         // 計数器が保持する値も、課題ID・件数・時刻と時計だけ
@@ -265,13 +278,16 @@ class EvaluationCounterTest {
                 "counts" to OperationCounts::class.java,
                 "live" to LiveDisplayCounts::class.java,
                 "timing" to TaskTiming::class.java,
+                "neural" to NeuralCounts::class.java,
+                "samples" to List::class.java,
             ),
             counterFields,
         )
 
         // 状態の確認口へ返す要約も、数値と真偽だけ（本文・読み・候補の文字列を持たない）
-        val statusFields = fields(ImeEvaluationStatus::class.java).filterNot { it.type == ConversionProgress::class.java } +
-            fields(ConversionProgress::class.java)
+        val statusFields = fields(ImeEvaluationStatus::class.java)
+            .filterNot { it.type == ConversionProgress::class.java || it.type == NeuralRuntimeStatus::class.java } +
+            fields(ConversionProgress::class.java) + fields(NeuralRuntimeStatus::class.java)
         assertTrue(statusFields.isNotEmpty())
         assertTrue(statusFields.all { it.type in setOf(Int::class.javaPrimitiveType, Long::class.javaPrimitiveType, Boolean::class.javaPrimitiveType) })
     }
@@ -296,4 +312,9 @@ class EvaluationCounterTest {
         observations = 1,
         lastObservedReadingVersion = 0,
     )
+
+    private companion object {
+        /** ニューラル側の計数がすべて0で、最終文の数字の並びを判定していない（-1）行の末尾。 */
+        val NEURAL_ZEROS_AND_UNJUDGED_DIGITS = "\t0".repeat(NeuralCounts.TSV_COLUMNS.size) + "\t-1"
+    }
 }

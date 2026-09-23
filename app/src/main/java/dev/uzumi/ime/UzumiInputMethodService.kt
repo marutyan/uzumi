@@ -20,16 +20,22 @@ import dev.uzumi.ime.conversion.EngineHealth
 import dev.uzumi.ime.conversion.JniMozcNativeBridge
 import dev.uzumi.ime.conversion.MozcConversionEngine
 import dev.uzumi.ime.conversion.MozcDataInstaller
+import dev.uzumi.ime.conversion.NeuralModelSpec
 import dev.uzumi.ime.dictionary.UserDictionaries
 import dev.uzumi.ime.editor.AndroidInputConnectionPort
 import dev.uzumi.ime.editor.EditorSession
 import dev.uzumi.ime.editor.InputFieldPolicy
 import dev.uzumi.ime.evaluation.ConversionProgress
+import dev.uzumi.ime.evaluation.CorrectnessJudge
 import dev.uzumi.ime.evaluation.EvaluationCounter
 import dev.uzumi.ime.evaluation.EvaluationStatusSource
 import dev.uzumi.ime.evaluation.ImeEvaluationStatus
+import dev.uzumi.ime.evaluation.LiveRequestReport
+import dev.uzumi.ime.evaluation.NeuralRuntimeStatus
 import dev.uzumi.ime.evaluation.OperationClassifier
 import dev.uzumi.ime.evaluation.OperationKind
+import dev.uzumi.ime.evaluation.TimingKind
+import dev.uzumi.ime.evaluation.TimingSample
 import dev.uzumi.ime.keyboard.CandidateBarViews
 import dev.uzumi.ime.keyboard.CandidateGridView
 import dev.uzumi.ime.keyboard.KeyboardAction
@@ -40,6 +46,9 @@ import dev.uzumi.ime.live.CandidateResult
 import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.LiveConversionCore
+import dev.uzumi.ime.live.RequestIdentity
+import dev.uzumi.ime.neural.NeuralRuntimeConnection
+import dev.uzumi.ime.neural.NeuralSelection
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -71,6 +80,10 @@ class UzumiInputMethodService : InputMethodService() {
     private var lastSessionEpoch = 0L
     // Phase 2cの評価用計数。debugビルドの受信口で開始したときだけ数え、既定では何もしない。
     private val evaluation = EvaluationCounter.shared
+    // 評価で選んだモデルの推論serviceとの接続。Mozcだけ（製品の既定）ならnull。
+    private var neuralConnection: NeuralRuntimeConnection? = null
+    // 最後に適用したライブ変換の結果の要求と、適用した時刻（System.nanoTime）。評価用の報告の照合にだけ使う。
+    private var lastAppliedLive: Pair<RequestIdentity, Long>? = null
     // 変換の直列threadへ積んで、まだ終わっていない仕事の数。評価用の状態の確認口が、処理の終わりを確かめるために読む。
     private val conversionTasksInFlight = AtomicInteger(0)
     // 入力先の欄がUzumi自身の画面か、とその欄のview id。評価用の状態の確認口が、試験欄への入力かを確かめるために読む。
@@ -115,6 +128,9 @@ class UzumiInputMethodService : InputMethodService() {
             },
             onOutcome = { outcome -> mainHandler.post { deliverConversion(outcome) } },
             onLiveResult = { sessionEpoch, result -> mainHandler.post { deliverLiveResult(sessionEpoch, result) } },
+            onLiveReport = { sessionEpoch, report -> mainHandler.post { deliverLiveReport(sessionEpoch, report) } },
+            // 評価用の報告は評価モードの間だけ作る。計数器の状態はworkerのthreadからも読める。
+            evaluationActive = { evaluation.isRecording },
             onCandidateResult = { sessionEpoch, result -> mainHandler.post { deliverCandidateResult(sessionEpoch, result) } },
             userDictionary = { UserDictionaries.get(this) },
             learningStore = { LearningStores.get(this) },
@@ -125,12 +141,15 @@ class UzumiInputMethodService : InputMethodService() {
         Thread({ LearningStores.get(applicationContext) }, "uzumi-learning-preload").start()
         worker.start()
         EvaluationStatusSource.provider = ::evaluationStatus
+        EvaluationStatusSource.neuralMemoryRequester = { neuralConnection?.requestMemory() }
     }
 
     /** 保留中のUI更新を捨て、エンジン側sessionを破棄してからworkerを止める。 */
     override fun onDestroy() {
         EvaluationStatusSource.provider = null
+        EvaluationStatusSource.neuralMemoryRequester = null
         closeSession()
+        applyNeuralSelection(null)
         mainHandler.removeCallbacksAndMessages(null)
         conversionExecutor?.shutdown()
         conversionExecutor = null
@@ -231,6 +250,10 @@ class UzumiInputMethodService : InputMethodService() {
         currentPolicy = policy
         // ライブ変換の設定は入力開始ごとに読み、設定画面での変更を次の入力欄から反映する。
         val live = policy.usesLiveConversion(UzumiSettings.isLiveConversionEnabled(this))
+        // debugビルドで選んだモデル。ニューラル変換はライブ変換の要求だけに使う。releaseビルドでは常にMozcだけ。
+        // 明示変換の欄へ移っても接続は切らず、欄を行き来するたびにモデルを読み直さない。
+        val neuralSpec = NeuralSelection.current(this)
+        applyNeuralSelection(neuralSpec)
         session = EditorSession(
             connection = AndroidInputConnectionPort(connection),
             policy = policy,
@@ -238,10 +261,12 @@ class UzumiInputMethodService : InputMethodService() {
             initialSelectionEnd = info.initialSelEnd,
             sessionEpoch = ++lastSessionEpoch,
             conversionClient = conversionWorker,
-            liveCore = if (live) LiveConversionCore() else null,
+            // 変換結果の世代はモデルごとに変え、モデルを切り替えた前後の結果を混ぜない。
+            liveCore = if (live) LiveConversionCore(initialConverterGeneration = neuralSpec?.generation ?: 0L) else null,
             liveClient = conversionWorker,
             compositionStyler = ::highlightSegment,
             evaluation = evaluation,
+            correctness = CorrectnessJudge.shared,
         )
         applyPolicyToKeyboard()
         refreshCandidates()
@@ -340,7 +365,37 @@ class UzumiInputMethodService : InputMethodService() {
     private fun deliverLiveResult(sessionEpoch: Long, result: LiveResult) {
         val current = session ?: return
         if (current.sessionEpoch != sessionEpoch) return
-        if (current.applyLiveResult(result)) refreshCandidates()
+        if (current.applyLiveResult(result)) {
+            lastAppliedLive = result.identity to System.nanoTime()
+            refreshCandidates()
+        }
+    }
+
+    /**
+     * 評価モードの間、ライブ変換の要求ごとの報告を計数へ足す。結果が適用された場合だけ、適用後に数える項目
+     * （H3の適用後の違反件数、入力した数字・英字の改変）と適用までの時間を足す。報告は結果の直後に届く。
+     */
+    private fun deliverLiveReport(sessionEpoch: Long, report: LiveRequestReport) {
+        if (session?.sessionEpoch != sessionEpoch) return
+        val applied = lastAppliedLive?.takeIf { report.identity != null && it.first == report.identity }
+        if (applied == null) {
+            evaluation.recordNeural(report.counts, report.samples)
+            return
+        }
+        val latency = TimingSample(TimingKind.APPLY, (applied.second - report.requestedAtNanos) / 1_000_000.0)
+        evaluation.recordNeural(report.counts + report.appliedOnly, report.samples + latency)
+    }
+
+    /**
+     * 使うモデルを切り替える。前と同じなら何もしない。nullならMozcだけに戻し、推論serviceとの接続を切る。
+     * 新しいモデルは`:neural`へbindして読み込ませ、準備ができるまではMozcの結果で入力を続ける。
+     */
+    private fun applyNeuralSelection(spec: NeuralModelSpec?) {
+        if (neuralConnection?.spec == spec) return
+        conversionWorker?.setNeuralBackend(null)
+        neuralConnection?.close()
+        neuralConnection = spec?.let { NeuralRuntimeConnection(this, it).apply { open() } }
+        conversionWorker?.setNeuralBackend(neuralConnection?.client)
     }
 
     /** 取り直した文節の候補を、同じ編集セッションが照合できる場合だけ反映する。 */
@@ -537,6 +592,16 @@ class UzumiInputMethodService : InputMethodService() {
             composing = current?.hasComposition == true,
             workerTasks = conversionTasksInFlight.get(),
             progress = current?.conversionProgress() ?: ConversionProgress(),
+            neural = neuralConnection?.let { connection ->
+                NeuralRuntimeStatus(
+                    selected = true,
+                    modelGeneration = connection.spec.generation,
+                    ready = connection.client.isReady,
+                    loadReason = connection.loadReason,
+                    coldStartMillis = connection.coldStartMillis,
+                    lastNeuralPssKb = connection.lastNeuralPssKb,
+                )
+            } ?: NeuralRuntimeStatus(),
         )
     }
 
