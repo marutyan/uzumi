@@ -25,4 +25,16 @@ interface ConversionEngine {
 
     /** 直前の変換の全文節を第一候補のまま確定し、エンジンへ学習させる。 */
     fun commitAll(sessionId: Long): Boolean
+
+    /**
+     * ライブ変換用に、読みから変換して全文節とそれぞれの候補を返す。確定はせず、学習もさせない。
+     * 読みの連結が入力と一致しない場合も含め、結果の照合は呼び出し側が行う。失敗時はnull。
+     */
+    fun convertSegments(sessionId: Long, reading: String): List<EngineSegment>?
+
+    /**
+     * 読みを変換し、segmentsと同じ区切りと表記へ合わせてから全体を確定し、エンジンへ学習させる。
+     * 区切りか表記を合わせられなければ確定せずに取り消し、falseを返す。
+     */
+    fun learnSegments(sessionId: Long, segments: List<LearnedSegment>): Boolean
 }
