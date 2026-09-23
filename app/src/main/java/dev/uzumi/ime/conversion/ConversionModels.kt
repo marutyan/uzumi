@@ -17,6 +17,8 @@ data class ConversionRequest(
 data class ConversionSegment(
     val reading: String,
     val value: String,
+    // 表記がユーザー辞書の登録語か。エンジンの変換結果ではないため、確定してもエンジンへ学習させない。
+    val fromUserDictionary: Boolean = false,
 )
 
 /**
@@ -27,6 +29,26 @@ data class ConversionCandidate(
     val id: Int,
     val value: String,
     val reading: String,
+    // ユーザー辞書の登録語か。エンジンの候補ではないため、確定してもエンジンへ学習を通知しない。
+    val fromUserDictionary: Boolean = false,
+)
+
+/**
+ * ライブ変換でエンジンが返す一文節。readingは文節の読み、valueは第一候補、
+ * candidatesはその文節だけを置き換える候補（複数文節をまとめる候補と予測候補は除く）。
+ */
+data class EngineSegment(
+    val reading: String,
+    val value: String,
+    val candidates: List<String>,
+)
+
+/**
+ * ライブ変換で確定した一segmentの読みと表記。確定時にエンジンへ同じ区切りと表記を学習させるために使う。
+ */
+data class LearnedSegment(
+    val reading: String,
+    val surface: String,
 )
 
 /** エンジンが返した文節と先頭文節の候補。要求の世代とは独立した生の結果。 */

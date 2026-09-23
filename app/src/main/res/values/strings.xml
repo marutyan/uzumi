@@ -55,4 +55,16 @@
     <string name="candidate_status_no_dictionary">辞書なし</string>
     <string name="candidate_hint_sensitive">機密入力：候補を表示しません</string>
     <string name="candidate_hint_compatibility">互換入力：候補を表示しません</string>
+    <string name="candidate_hint_live">ライブ変換：入力すると変換します</string>
+    <string name="live_previous_segment">前の文節へ</string>
+    <string name="live_next_segment">次の文節へ</string>
+    <string name="live_return_label">末尾</string>
+    <string name="live_return_to_input">入力位置へ戻る</string>
+    <string name="live_undo_label">取消</string>
+    <string name="live_undo">直前の操作を取り消す</string>
+    <string name="live_conversion_switch">ライブ変換</string>
+    <string name="live_conversion_description">入力中の読みを自動で変換し、句点・改行・送信などで確定します。OFFにすると変換キーで変換します。切り替えは次に入力欄を開いたときから反映されます。</string>
+    <string name="open_licenses">第三者ライセンス</string>
+    <string name="licenses_title">第三者ライセンス</string>
+    <string name="licenses_missing">このビルドには第三者表示が含まれていません。</string>
 </resources>

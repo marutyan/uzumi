@@ -4,6 +4,9 @@ import android.graphics.Typeface
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.BackgroundColorSpan
 import android.view.View
 import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
@@ -17,11 +20,15 @@ import dev.uzumi.ime.conversion.EngineHealth
 import dev.uzumi.ime.conversion.JniMozcNativeBridge
 import dev.uzumi.ime.conversion.MozcConversionEngine
 import dev.uzumi.ime.conversion.MozcDataInstaller
+import dev.uzumi.ime.dictionary.UserDictionaries
 import dev.uzumi.ime.editor.AndroidInputConnectionPort
 import dev.uzumi.ime.editor.EditorSession
 import dev.uzumi.ime.editor.InputFieldPolicy
 import dev.uzumi.ime.keyboard.KeyboardAction
 import dev.uzumi.ime.keyboard.KeyboardPanel
+import dev.uzumi.ime.live.ConversionResult as LiveResult
+import dev.uzumi.ime.live.DisplaySpan
+import dev.uzumi.ime.live.LiveConversionCore
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -32,6 +39,12 @@ class UzumiInputMethodService : InputMethodService() {
     private var session: EditorSession? = null
     private var keyboardPanel: KeyboardPanel? = null
     private var candidateRow: LinearLayout? = null
+    // ライブ変換の候補バーの両脇に置く、segmentの移動・末尾復帰・取り消しのボタン。明示変換では隠す。
+    private var liveControls: List<Button> = emptyList()
+    private var previousSegmentButton: Button? = null
+    private var nextSegmentButton: Button? = null
+    private var returnToInputButton: Button? = null
+    private var undoButton: Button? = null
     private var currentPolicy: InputFieldPolicy? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var conversionExecutor: ExecutorService? = null
@@ -62,6 +75,8 @@ class UzumiInputMethodService : InputMethodService() {
                 }
             },
             onOutcome = { outcome -> mainHandler.post { deliverConversion(outcome) } },
+            onLiveResult = { sessionEpoch, result -> mainHandler.post { deliverLiveResult(sessionEpoch, result) } },
+            userDictionary = { UserDictionaries.get(this) },
         )
         conversionExecutor = executor
         conversionWorker = worker
@@ -92,10 +107,30 @@ class UzumiInputMethodService : InputMethodService() {
             setPadding((8 * density).toInt(), 0, (8 * density).toInt(), 0)
         }
         candidateRow = candidates
-        root.addView(HorizontalScrollView(this).apply {
+        val previous = controlButton("◀", R.string.live_previous_segment) { it.moveLiveFocus(-1) }
+        val next = controlButton("▶", R.string.live_next_segment) { it.moveLiveFocus(1) }
+        val returnToInput = controlButton(getString(R.string.live_return_label), R.string.live_return_to_input) {
+            it.returnLiveFocusToInput()
+        }
+        val undo = controlButton(getString(R.string.live_undo_label), R.string.live_undo) { it.undoLive() }
+        previousSegmentButton = previous
+        nextSegmentButton = next
+        returnToInputButton = returnToInput
+        undoButton = undo
+        liveControls = listOf(previous, next, returnToInput, undo)
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        bar.addView(previous)
+        bar.addView(HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             addView(candidates)
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (48 * density).toInt()))
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+        bar.addView(next)
+        bar.addView(returnToInput)
+        bar.addView(undo)
+        root.addView(bar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (48 * density).toInt()))
 
         keyboardPanel = KeyboardPanel(this, ::handleKeyboardAction).also { panel ->
             root.addView(
@@ -133,6 +168,8 @@ class UzumiInputMethodService : InputMethodService() {
         val connection = currentInputConnection ?: return
         val policy = InputFieldPolicy.fromEditorInfo(info)
         currentPolicy = policy
+        // ライブ変換の設定は入力開始ごとに読み、設定画面での変更を次の入力欄から反映する。
+        val live = policy.usesLiveConversion(UzumiSettings.isLiveConversionEnabled(this))
         session = EditorSession(
             connection = AndroidInputConnectionPort(connection),
             policy = policy,
@@ -140,6 +177,9 @@ class UzumiInputMethodService : InputMethodService() {
             initialSelectionEnd = info.initialSelEnd,
             sessionEpoch = ++lastSessionEpoch,
             conversionClient = conversionWorker,
+            liveCore = if (live) LiveConversionCore() else null,
+            liveClient = conversionWorker,
+            compositionStyler = ::highlightSegment,
         )
         applyPolicyToKeyboard()
         refreshCandidates()
@@ -218,6 +258,42 @@ class UzumiInputMethodService : InputMethodService() {
         refreshCandidates()
     }
 
+    /** ライブ変換の結果を、同じ編集セッションが照合できる場合だけ反映する。 */
+    private fun deliverLiveResult(sessionEpoch: Long, result: LiveResult) {
+        val current = session ?: return
+        if (current.sessionEpoch != sessionEpoch) return
+        if (current.applyLiveResult(result)) refreshCandidates()
+    }
+
+    /** 訂正中のsegmentの表示範囲へ背景色を付け、どのsegmentを直しているかをEditor上で示す。 */
+    private fun highlightSegment(text: String, span: DisplaySpan?): CharSequence {
+        if (span == null || span.start >= span.end || span.end > text.length) return text
+        return SpannableString(text).apply {
+            setSpan(BackgroundColorSpan(FOCUSED_SEGMENT_COLOR), span.start, span.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+    }
+
+    /** 候補バーの脇に置く小さな操作ボタンを作る。押すと現在の編集セッションへ操作を一度だけ送る。 */
+    private fun controlButton(label: String, descriptionId: Int, action: (EditorSession) -> Boolean): Button {
+        val density = resources.displayMetrics.density
+        return Button(this).apply {
+            text = label
+            isAllCaps = false
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setPadding((10 * density).toInt(), 0, (10 * density).toInt(), 0)
+            contentDescription = getString(descriptionId)
+            visibility = View.GONE
+            setOnClickListener {
+                val current = session ?: return@setOnClickListener
+                action(current)
+                refreshCandidates()
+            }
+        }
+    }
+
     /** 変換応答が一定時間内に届かなければ要求を取り下げ、読みとかな・カナ候補へ戻す。 */
     private fun scheduleConversionTimeout(current: EditorSession) {
         val request = current.pendingConversionRequest ?: return
@@ -238,6 +314,11 @@ class UzumiInputMethodService : InputMethodService() {
         val row = candidateRow ?: return
         row.removeAllViews()
         val current = session
+        if (current?.isLiveMode == true) {
+            refreshLiveCandidates(row, current)
+            return
+        }
+        liveControls.forEach { it.visibility = View.GONE }
         val snapshot = current?.compositionSnapshot()
         val options = current?.candidateOptions().orEmpty()
         if (current == null || snapshot == null || options.isEmpty()) {
@@ -273,6 +354,40 @@ class UzumiInputMethodService : InputMethodService() {
         }
     }
 
+    /**
+     * ライブ変換の候補バーを作る。対象segmentの候補を並べ、現在の表記を太字にする。
+     * 左右のボタンで過去segmentへ移り、「末尾」で入力位置へ戻り、「取消」で直前の操作を取り消す。
+     */
+    private fun refreshLiveCandidates(row: LinearLayout, current: EditorSession) {
+        val state = current.liveCandidateState()
+        val choices = state?.choices.orEmpty()
+        liveControls.forEach { it.visibility = View.VISIBLE }
+        previousSegmentButton?.isEnabled = state?.canFocusPrevious == true
+        nextSegmentButton?.isEnabled = state != null && !state.focusAtInput
+        returnToInputButton?.isEnabled = state != null && !state.focusAtInput
+        undoButton?.isEnabled = state?.canUndo == true
+        if (state == null || choices.isEmpty()) {
+            row.addView(candidateHint(current.policy, live = true))
+            return
+        }
+        if (engineHealth is EngineHealth.Unavailable) {
+            row.addView(candidateStatus(getString(R.string.candidate_status_no_dictionary)))
+        }
+        choices.forEach { choice ->
+            row.addView(Button(this).apply {
+                isAllCaps = false
+                text = choice.value
+                if (choice.value == state.currentValue) setTypeface(typeface, Typeface.BOLD)
+                setOnClickListener {
+                    val latest = session
+                    if (latest !== current) return@setOnClickListener
+                    latest.selectLiveCandidate(choice)
+                    refreshCandidates()
+                }
+            })
+        }
+    }
+
     /** 候補の前に置く短い状態表示を作る。 */
     private fun candidateStatus(message: String): TextView {
         return TextView(this).apply {
@@ -283,12 +398,13 @@ class UzumiInputMethodService : InputMethodService() {
     }
 
     /** 候補を出さない理由または候補行の用途を短く表示する。 */
-    private fun candidateHint(policy: InputFieldPolicy?): TextView {
+    private fun candidateHint(policy: InputFieldPolicy?, live: Boolean = false): TextView {
         return TextView(this).apply {
             text = when {
                 policy?.isPassword == true -> getString(R.string.candidate_hint_sensitive)
                 policy?.isTypeNull == true -> getString(R.string.candidate_hint_compatibility)
                 engineHealth is EngineHealth.Unavailable -> getString(R.string.candidate_hint_no_dictionary)
+                live && engineHealth is EngineHealth.Ready -> getString(R.string.candidate_hint_live)
                 engineHealth is EngineHealth.Ready -> getString(R.string.candidate_hint_conversion)
                 else -> getString(R.string.candidate_hint_default)
             }
@@ -307,5 +423,8 @@ class UzumiInputMethodService : InputMethodService() {
     private companion object {
         /** 変換応答を待つ上限。超えたら読みとかな・カナ候補へ戻す。 */
         const val CONVERSION_TIMEOUT_MILLIS = 2_000L
+
+        /** 訂正中のsegmentの背景色（半透明の青）。下線だけのsegmentと区別できる濃さにする。 */
+        const val FOCUSED_SEGMENT_COLOR = 0x553F7FFF
     }
 }

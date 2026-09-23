@@ -87,4 +87,41 @@ class InputFieldPolicyTest {
         assertEquals("実行", policy.actionLabel)
         assertFalse(EditorActionPolicy.shouldInsertNewline(policy))
     }
+
+    /** ライブ変換は設定がONの通常欄だけで使い、機密・互換入力・数字・URL・メールの欄では明示変換にする。 */
+    @Test
+    fun liveConversionFollowsSettingAndFieldKind() {
+        val text = InputFieldPolicy.fromRaw(InputType.TYPE_CLASS_TEXT, EditorInfo.IME_ACTION_DONE, null)
+        val noLearning = InputFieldPolicy.fromRaw(
+            InputType.TYPE_CLASS_TEXT,
+            EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING,
+            null,
+        )
+        val hidden = InputFieldPolicy.fromRaw(
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD,
+            EditorInfo.IME_ACTION_DONE,
+            null,
+        )
+        val uri = InputFieldPolicy.fromRaw(
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
+            EditorInfo.IME_ACTION_GO,
+            null,
+        )
+        val email = InputFieldPolicy.fromRaw(
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS,
+            EditorInfo.IME_ACTION_NEXT,
+            null,
+        )
+        val typeNull = InputFieldPolicy.fromRaw(InputType.TYPE_NULL, EditorInfo.IME_ACTION_NONE, null)
+        val number = InputFieldPolicy.fromRaw(InputType.TYPE_CLASS_NUMBER, EditorInfo.IME_ACTION_DONE, null)
+
+        assertTrue(text.usesLiveConversion(liveSettingEnabled = true))
+        assertFalse(text.usesLiveConversion(liveSettingEnabled = false))
+        assertTrue(noLearning.usesLiveConversion(liveSettingEnabled = true))
+        assertFalse(hidden.usesLiveConversion(liveSettingEnabled = true))
+        assertFalse(uri.usesLiveConversion(liveSettingEnabled = true))
+        assertFalse(email.usesLiveConversion(liveSettingEnabled = true))
+        assertFalse(typeNull.usesLiveConversion(liveSettingEnabled = true))
+        assertFalse(number.usesLiveConversion(liveSettingEnabled = true))
+    }
 }
