@@ -22,6 +22,9 @@
             android:name=".UserDictionaryActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".LicenseActivity"
+            android:exported="false" />
 
         <service
             android:name=".UzumiInputMethodService"

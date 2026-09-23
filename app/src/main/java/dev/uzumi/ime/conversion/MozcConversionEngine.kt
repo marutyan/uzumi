@@ -2,10 +2,12 @@ package dev.uzumi.ime.conversion
 
 import dev.uzumi.ime.editor.GraphemeClusters
 import java.io.File
+import org.mozc.android.inputmethod.japanese.protobuf.ProtoCandidateWindow.CandidateWord
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Command
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Input
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.KeyEvent
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Output
+import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Preedit
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Request
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.SessionCommand
 
@@ -27,7 +29,7 @@ interface MozcNativeBridge {
 }
 
 /**
- * Mozcのprotocol（commands.proto）で、明示変換に必要な最小の命令列を組み立てる。
+ * Mozcのprotocol（commands.proto）で、明示変換とライブ変換に必要な最小の命令列を組み立てる。
  * 読みはIME側が所有し、変換のたびにエンジン側のcompositionを読みから作り直す。
  */
 class MozcConversionEngine(
@@ -75,6 +77,66 @@ class MozcConversionEngine(
     }
 
     override fun convert(sessionId: Long, reading: String): EngineConversion? {
+        val output = composeAndConvert(sessionId, reading, requestSuggestion = true) ?: return null
+        return toConversion(sessionId, output)
+    }
+
+    override fun convertSegments(sessionId: Long, reading: String): List<EngineSegment>? {
+        var output = composeAndConvert(sessionId, reading, requestSuggestion = false) ?: return null
+        if (!output.hasPreedit()) return null
+        val preedit = output.preedit.segmentList
+        // 文節ごとの候補。focusを右へ一つずつ動かし、強調された文節の候補一覧を読み取る。
+        // focusの移動は文節を仮に固定するだけで確定しないため、学習は起きない。
+        val candidates = arrayOfNulls<List<String>>(preedit.size)
+        for (step in preedit.indices) {
+            val focused = focusedSegmentIndex(output)
+            if (focused !in preedit.indices || candidates[focused] != null) break
+            candidates[focused] = segmentCandidates(preedit[focused].key, output)
+            if (step == preedit.lastIndex) break
+            output = sendKey(sessionId, KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.RIGHT)) ?: break
+        }
+        return preedit.mapIndexed { index, segment ->
+            EngineSegment(
+                reading = segment.key,
+                value = segment.value,
+                candidates = candidates[index] ?: listOf(segment.value),
+            )
+        }
+    }
+
+    override fun learnSegments(sessionId: Long, segments: List<LearnedSegment>): Boolean {
+        if (segments.isEmpty() || segments.any { it.reading.isEmpty() || it.surface.isEmpty() }) return false
+        val reading = segments.joinToString(separator = "") { it.reading }
+        var output = composeAndConvert(sessionId, reading, requestSuggestion = false) ?: return false
+        for ((index, target) in segments.withIndex()) {
+            output = alignFocusedSegment(sessionId, output, index, target.reading) ?: return revertLearning(sessionId)
+            val focused = output.preedit.getSegment(index)
+            if (focused.value != target.surface) {
+                val word = output.allCandidateWords.candidatesList.firstOrNull {
+                    it.value == target.surface && replacesOnlySegment(it, target.reading)
+                } ?: return revertLearning(sessionId)
+                output = sendCommand(sessionId, SessionCommand.CommandType.SELECT_CANDIDATE, word.id)
+                    ?: return revertLearning(sessionId)
+            }
+            if (index < segments.lastIndex) {
+                output = sendKey(sessionId, KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.RIGHT))
+                    ?: return revertLearning(sessionId)
+            }
+        }
+        val finalSegments = output.preedit.segmentList
+        if (finalSegments.map { it.key } != segments.map { it.reading } ||
+            finalSegments.map { it.value } != segments.map { it.surface }
+        ) {
+            return revertLearning(sessionId)
+        }
+        return commitAll(sessionId)
+    }
+
+    /**
+     * 読みの各文字をcompositionへ積み、SPACEで変換した応答を返す。
+     * requestSuggestionがfalseなら入力途中の予測を求めず、ライブ変換の一回あたりの処理を減らす。
+     */
+    private fun composeAndConvert(sessionId: Long, reading: String, requestSuggestion: Boolean): Output? {
         if (reading.isEmpty()) return null
         // REVERTは変換中なら変換の取り消しだが、確定後の待機状態では直前の確定の学習を取り消すため、
         // preeditが残っている場合だけ送る。
@@ -86,12 +148,61 @@ class MozcConversionEngine(
             val key = KeyEvent.newBuilder()
                 .setKeyString(character)
                 .setInputStyle(KeyEvent.InputStyle.AS_IS)
-            val output = sendKey(sessionId, key) ?: return null
+            val output = sendKey(sessionId, key, requestSuggestion) ?: return null
             if (!output.consumed) return null
         }
-        val output = sendKey(sessionId, KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.SPACE))
-            ?: return null
-        return toConversion(sessionId, output)
+        return sendKey(sessionId, KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.SPACE))
+    }
+
+    /**
+     * index番目の文節にfocusがある状態で、その文節の読みがtargetReadingになるまで幅を伸縮する。
+     * 幅の変更はMozcの変換キー（Shift+右で伸ばす、Shift+左で縮める）で行う。合わせられなければnull。
+     */
+    private fun alignFocusedSegment(sessionId: Long, start: Output, index: Int, targetReading: String): Output? {
+        var output = start
+        val targetLength = targetReading.codePointCount(0, targetReading.length)
+        // 伸縮は一回で一文字ずつ動くため、読み全体の長さを超えて繰り返す必要はない。
+        var remainingSteps = output.preedit.segmentList.sumOf { it.key.codePointCount(0, it.key.length) }
+        while (true) {
+            if (focusedSegmentIndex(output) != index) return null
+            val key = output.preedit.getSegment(index).key
+            if (key == targetReading) return output
+            val length = key.codePointCount(0, key.length)
+            if (length == targetLength || remainingSteps-- <= 0) return null
+            val direction = if (length < targetLength) KeyEvent.SpecialKey.RIGHT else KeyEvent.SpecialKey.LEFT
+            output = sendKey(
+                sessionId,
+                KeyEvent.newBuilder().setSpecialKey(direction).addModifierKeys(KeyEvent.ModifierKey.SHIFT),
+            ) ?: return null
+        }
+    }
+
+    /** 学習用の変換を確定せずに取り消し、失敗を返す。 */
+    private fun revertLearning(sessionId: Long): Boolean {
+        if (sessionId in sessionsWithPreedit) sendCommand(sessionId, SessionCommand.CommandType.REVERT)
+        return false
+    }
+
+    /** preeditのうち、Mozcがfocusを置いて強調している文節の位置。無ければ-1。 */
+    private fun focusedSegmentIndex(output: Output): Int {
+        return output.preedit.segmentList.indexOfFirst { it.annotation == Preedit.Segment.Annotation.HIGHLIGHT }
+    }
+
+    /** focus中の文節の候補一覧から、その文節の読みだけを置き換える候補の表記を取り出す。 */
+    private fun segmentCandidates(segmentReading: String, output: Output): List<String> {
+        return output.allCandidateWords.candidatesList
+            .filter { it.hasValue() && it.value.isNotEmpty() && replacesOnlySegment(it, segmentReading) }
+            .map { it.value }
+            .distinct()
+    }
+
+    /**
+     * 候補が文節の読みだけを置き換えるか。keyは読みが入力と異なる候補（予測など）にだけ付き、
+     * 複数の文節をまとめる候補はnum_segments_in_candidateが2以上になる。どちらもsegment境界を壊すため除く。
+     */
+    private fun replacesOnlySegment(word: CandidateWord, segmentReading: String): Boolean {
+        val sameReading = !word.hasKey() || word.key == segmentReading
+        return sameReading && word.numSegmentsInCandidate <= 1
     }
 
     override fun commitCandidate(sessionId: Long, candidateId: Int): Boolean {
@@ -128,14 +239,14 @@ class MozcConversionEngine(
         return EngineConversion(segments = segments, headCandidates = candidates)
     }
 
-    /** 指定sessionへキー入力を一つ送る。 */
-    private fun sendKey(sessionId: Long, key: KeyEvent.Builder): Output? {
-        return eval(
-            Input.newBuilder()
-                .setType(Input.CommandType.SEND_KEY)
-                .setId(sessionId)
-                .setKey(key),
-        )?.also { recordPreedit(sessionId, it) }
+    /** 指定sessionへキー入力を一つ送る。requestSuggestionがfalseなら入力途中の予測を求めない。 */
+    private fun sendKey(sessionId: Long, key: KeyEvent.Builder, requestSuggestion: Boolean = true): Output? {
+        val input = Input.newBuilder()
+            .setType(Input.CommandType.SEND_KEY)
+            .setId(sessionId)
+            .setKey(key)
+        if (!requestSuggestion) input.setRequestSuggestion(false)
+        return eval(input)?.also { recordPreedit(sessionId, it) }
     }
 
     /** 応答にpreeditがあるかを記録し、次の変換でREVERTを送るべきかの判断に使う。 */

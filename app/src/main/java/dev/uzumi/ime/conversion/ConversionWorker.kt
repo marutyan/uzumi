@@ -1,5 +1,9 @@
 package dev.uzumi.ime.conversion
 
+import dev.uzumi.ime.dictionary.UserDictionaryLookup
+import dev.uzumi.ime.live.ConversionRequest as LiveRequest
+import dev.uzumi.ime.live.ConversionResult as LiveResult
+import dev.uzumi.ime.live.ResultSegment
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -22,6 +26,21 @@ interface ConversionClient {
 }
 
 /**
+ * 編集セッションがライブ変換の要求と確定時の学習をエンジンへ出す非同期窓口。呼び出し側は結果を待たない。
+ * sessionEpochは編集セッションの世代で、エンジン側sessionの対応付けと終了判定に使う。
+ */
+interface LiveConversionClient {
+    /** 辞書の読み込みと確認が済み、変換を依頼できるか。 */
+    val isAvailable: Boolean
+
+    /** ライブ変換を依頼する。未処理の古い要求は捨てられ、最新の要求だけが変換される。 */
+    fun requestLiveConversion(sessionEpoch: Long, request: LiveRequest)
+
+    /** ライブ変換で確定したsegment列を、単位ごとにエンジンへ学習させる。学習禁止欄では呼ばない。 */
+    fun learnCommitted(sessionEpoch: Long, units: List<List<LearnedSegment>>)
+}
+
+/**
  * 変換エンジンを一つの直列executorだけから呼ぶ窓口。
  * globalなSessionHandlerへの同時呼び出しを防ぎ、UI threadをJNI呼び出しで止めない。
  * Editor sessionの世代（sessionEpoch）ごとにエンジン側のsessionを作成・破棄する。
@@ -34,12 +53,19 @@ class ConversionWorker(
     private val onHealthChanged: (EngineHealth) -> Unit,
     // 変換応答の通知。worker threadから呼ばれるため、UIへはpostして反映する。
     private val onOutcome: (ConversionOutcome) -> Unit,
-) : ConversionClient {
+    // ライブ変換の結果の通知（編集セッションの世代、結果）。worker threadから呼ばれる。失敗時は通知しない。
+    private val onLiveResult: (Long, LiveResult) -> Unit = { _, _ -> },
+    // ユーザー辞書を返す。初回はファイルを読むため、worker threadからだけ呼ぶ。
+    private val userDictionary: () -> UserDictionaryLookup? = { null },
+) : ConversionClient, LiveConversionClient {
     @Volatile
     private var currentHealth: EngineHealth = EngineHealth.Loading
 
     // 未処理の変換要求のうち最新の一件。古い要求は処理前に上書きされて捨てられる。
     private val latestRequest = AtomicReference<ConversionRequest?>(null)
+
+    // 未処理のライブ変換要求のうち最新の一件と、その編集セッションの世代。
+    private val latestLiveRequest = AtomicReference<Pair<Long, LiveRequest>?>(null)
 
     // この値以下のsessionEpochは終了済み。キューに残った要求もエンジンへ送らない。
     private val endedThroughEpoch = AtomicLong(Long.MIN_VALUE)
@@ -68,6 +94,33 @@ class ConversionWorker(
             }
             currentHealth = verified
             onHealthChanged(verified)
+            // 初回の読込みはファイルを読むため、UI threadで初めて開かないようここで先に開く。
+            lookupUserDictionary()
+        }
+    }
+
+    override fun requestLiveConversion(sessionEpoch: Long, request: LiveRequest) {
+        latestLiveRequest.set(sessionEpoch to request)
+        executor.execute(::drainLatestLiveRequest)
+    }
+
+    /**
+     * 終了判定は呼び出し時点で行う。Send等で確定直後に入力欄が閉じても、同じ世代のsession破棄より先に
+     * キューへ積むため、確定した内容を学習できる。
+     */
+    override fun learnCommitted(sessionEpoch: Long, units: List<List<LearnedSegment>>) {
+        if (units.isEmpty() || isEnded(sessionEpoch)) return
+        executor.execute {
+            val sessionId = engineSessions[sessionEpoch] ?: return@execute
+            if (!runCatching { engine.setIncognito(false) }.getOrDefault(false)) return@execute
+            lastConverted.remove(sessionEpoch)
+            for (unit in units) {
+                val learned = runCatching { engine.learnSegments(sessionId, unit) }.getOrDefault(false)
+                // まとめて合わせられない単位（登録語を含む等）は、segmentごとに学習し直す。
+                if (!learned && unit.size > 1) {
+                    unit.forEach { segment -> runCatching { engine.learnSegments(sessionId, listOf(segment)) } }
+                }
+            }
         }
     }
 
@@ -128,11 +181,39 @@ class ConversionWorker(
             return
         }
         lastConverted[request.sessionEpoch] = request
-        val result = ConversionResult(request, conversion.segments, conversion.headCandidates)
+        val merged = UserDictionaryCandidates.mergeExplicit(request.reading, conversion, lookupUserDictionary())
+        val result = ConversionResult(request, merged.segments, merged.headCandidates)
         onOutcome(
             if (result.isConsistent) ConversionOutcome.Converted(result) else ConversionOutcome.Failed(request),
         )
     }
+
+    /**
+     * 最新のライブ変換要求だけを取り出し、保護範囲と入力カーソルで区切った部分範囲ごとに変換する。
+     * 学習を止める欄では読みを送る前にincognitoを指定する。自動変換は確定しないため学習されない。
+     */
+    private fun drainLatestLiveRequest() {
+        val (sessionEpoch, request) = latestLiveRequest.getAndSet(null) ?: return
+        if (isEnded(sessionEpoch) || currentHealth !is EngineHealth.Ready) return
+        val sessionId = sessionFor(sessionEpoch) ?: return
+        if (!runCatching { engine.setIncognito(!request.learningAllowed) }.getOrDefault(false)) return
+        lastConverted.remove(sessionEpoch)
+        val converter = SegmentedLiveConverter(
+            convertRange = { chunk ->
+                if (isAsciiOnly(chunk)) {
+                    listOf(ResultSegment(chunk, chunk))
+                } else {
+                    engine.convertSegments(sessionId, chunk)?.let { toLiveSegments(chunk, it) }
+                }
+            },
+            userDictionary = lookupUserDictionary(),
+        )
+        val result = runCatching { converter.convert(request) }.getOrNull() ?: return
+        onLiveResult(sessionEpoch, result)
+    }
+
+    /** ユーザー辞書を開いて返す。読めなければ登録語なしで変換を続ける。 */
+    private fun lookupUserDictionary(): UserDictionaryLookup? = runCatching { userDictionary() }.getOrNull()
 
     /** 学習通知が、エンジン側sessionの現在の変換と同じ要求に対するものなら、そのsession IDを返す。 */
     private fun sessionForCommit(request: ConversionRequest): Long? {

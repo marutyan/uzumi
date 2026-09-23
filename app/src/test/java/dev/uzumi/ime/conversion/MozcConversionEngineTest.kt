@@ -195,6 +195,68 @@ class MozcConversionEngineTest {
             .build()
     }
 
+    /**
+     * ライブ変換の変換は予測を求めずに読みを積んでSPACEで変換し、focusを右へ動かして各文節の候補を読む。
+     * 読みの異なる予測候補と複数文節をまとめる候補は除き、確定しない。
+     */
+    @Test
+    fun convertSegmentsReadsCandidatesOfEverySegmentWithoutCommitting() {
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        val segments = engine.convertSegments(sessionId = 5, reading = "きょうはいい")!!
+
+        assertEquals(
+            listOf(
+                EngineSegment("きょうは", "今日は", listOf("今日は", "京は")),
+                EngineSegment("いい", "いい", listOf("いい", "良い")),
+            ),
+            segments,
+        )
+        val characterKeys = native.inputs.filter { it.type == Input.CommandType.SEND_KEY && it.key.hasKeyString() }
+        assertTrue(characterKeys.all { it.hasRequestSuggestion() && !it.requestSuggestion })
+        assertEquals(1, native.inputs.count { it.key.specialKey == KeyEvent.SpecialKey.RIGHT })
+        assertFalse(native.inputs.any { it.command.type == SessionCommand.CommandType.SUBMIT })
+        assertTrue(mozc.submitted.isEmpty())
+    }
+
+    /** 学習は区切りを文節の幅の伸縮で合わせ、表記を候補から選んでから全体を確定する。 */
+    @Test
+    fun learnSegmentsAlignsBoundariesAndSurfacesBeforeSubmitting() {
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        val learned = engine.learnSegments(
+            sessionId = 5,
+            segments = listOf(LearnedSegment("きょう", "京"), LearnedSegment("はいい", "はいい")),
+        )
+
+        assertTrue(learned)
+        assertEquals(listOf("京はいい"), mozc.submitted)
+        val shrink = native.inputs.filter {
+            it.key.specialKey == KeyEvent.SpecialKey.LEFT && KeyEvent.ModifierKey.SHIFT in it.key.modifierKeysList
+        }
+        assertEquals(1, shrink.size)
+        assertTrue(native.inputs.any { it.command.type == SessionCommand.CommandType.SELECT_CANDIDATE })
+        assertFalse(native.inputs.any { it.command.type == SessionCommand.CommandType.REVERT })
+    }
+
+    /** 表記を候補から選べない場合は確定せずに取り消し、学習させない。 */
+    @Test
+    fun learnSegmentsRevertsWhenSurfaceIsNotACandidate() {
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        val learned = engine.learnSegments(sessionId = 5, segments = listOf(LearnedSegment("きょうは", "登録語")))
+
+        assertFalse(learned)
+        assertTrue(mozc.submitted.isEmpty())
+        assertEquals(SessionCommand.CommandType.REVERT, native.inputs.last().command.type)
+    }
+
     private fun createTempDir(): File = Files.createTempDirectory("mozc-engine-test").toFile()
 }
 
@@ -220,4 +282,134 @@ private class FakeMozcNative : MozcNativeBridge {
     }
 
     override fun dataVersion(): String = version
+}
+
+/**
+ * 変換状態を持つ最小の偽Mozc。読みを積み、SPACEで決まった規則の文節に分け、focusの移動、
+ * 文節の幅の伸縮、候補の選択、確定（SUBMIT）、取り消し（REVERT）を再現する。
+ */
+private class StatefulMozc {
+    /** SUBMITで確定した表記。学習が行われたかの確認に使う。 */
+    val submitted = mutableListOf<String>()
+    private val composition = StringBuilder()
+    private val keys = mutableListOf<String>()
+    private val selected = mutableListOf<Int>()
+    private var focus = 0
+    private var converting = false
+
+    /** 読みごとの候補。載っていない読みは読みそのものだけを候補にする。 */
+    private val dictionary = mapOf(
+        "きょうは" to listOf("今日は", "京は"),
+        "いい" to listOf("いい", "良い"),
+        "きょう" to listOf("今日", "京"),
+    )
+
+    /** Inputを一つ処理し、その時点のOutputを返す。 */
+    fun respond(input: Input): Output {
+        when {
+            input.type == Input.CommandType.SEND_KEY && input.key.hasKeyString() -> {
+                composition.append(input.key.keyString)
+                converting = false
+            }
+
+            input.type == Input.CommandType.SEND_KEY -> handleSpecialKey(input.key)
+            input.command.type == SessionCommand.CommandType.SELECT_CANDIDATE ->
+                selected[focus] = candidatesOf(keys[focus]).indexOfFirst { it.second == input.command.id }
+            input.command.type == SessionCommand.CommandType.SUBMIT -> {
+                submitted += keys.indices.joinToString("") { candidatesOf(keys[it])[selected[it]].first }
+                clear()
+            }
+
+            input.command.type == SessionCommand.CommandType.REVERT -> clear()
+        }
+        return output()
+    }
+
+    /** SPACE、focusの左右移動、Shift付きの幅の伸縮を処理する。 */
+    private fun handleSpecialKey(key: KeyEvent) {
+        val shift = KeyEvent.ModifierKey.SHIFT in key.modifierKeysList
+        when {
+            key.specialKey == KeyEvent.SpecialKey.SPACE -> {
+                // 「は」の後ろで区切る単純な分割規則。
+                val reading = composition.toString()
+                val split = reading.indexOf("は") + 1
+                keys.clear()
+                keys += if (split in 1 until reading.length) {
+                    listOf(reading.substring(0, split), reading.substring(split))
+                } else {
+                    listOf(reading)
+                }
+                selected.clear()
+                selected += keys.map { 0 }
+                focus = 0
+                converting = true
+            }
+
+            key.specialKey == KeyEvent.SpecialKey.RIGHT && !shift -> focus = (focus + 1) % keys.size
+            key.specialKey == KeyEvent.SpecialKey.LEFT && shift -> {
+                val current = keys[focus]
+                keys[focus] = current.dropLast(1)
+                if (focus + 1 < keys.size) {
+                    keys[focus + 1] = current.last() + keys[focus + 1]
+                } else {
+                    keys += current.last().toString()
+                    selected += 0
+                }
+                selected[focus] = 0
+            }
+        }
+    }
+
+    /** 読みの候補を、表記とIDの組で返す。 */
+    private fun candidatesOf(key: String): List<Pair<String, Int>> {
+        return (dictionary[key] ?: listOf(key)).mapIndexed { index, value -> value to index }
+    }
+
+    /** 変換状態をすべて捨てる。 */
+    private fun clear() {
+        composition.clear()
+        keys.clear()
+        selected.clear()
+        converting = false
+    }
+
+    /** 現在の状態のOutput。変換中はfocus中の文節を強調し、その候補一覧を付ける。 */
+    private fun output(): Output {
+        val builder = Output.newBuilder().setConsumed(true)
+        if (!converting) {
+            if (composition.isNotEmpty()) {
+                builder.setPreedit(
+                    Preedit.newBuilder().setCursor(composition.length).addSegment(
+                        Preedit.Segment.newBuilder()
+                            .setKey(composition.toString())
+                            .setValue(composition.toString())
+                            .setValueLength(composition.length)
+                            .setAnnotation(Preedit.Segment.Annotation.UNDERLINE),
+                    ),
+                )
+            }
+            return builder.build()
+        }
+        val preedit = Preedit.newBuilder().setCursor(0)
+        keys.forEachIndexed { index, key ->
+            val value = candidatesOf(key)[selected[index]].first
+            preedit.addSegment(
+                Preedit.Segment.newBuilder()
+                    .setKey(key)
+                    .setValue(value)
+                    .setValueLength(value.length)
+                    .setAnnotation(
+                        if (index == focus) Preedit.Segment.Annotation.HIGHLIGHT else Preedit.Segment.Annotation.UNDERLINE,
+                    ),
+            )
+        }
+        val words = CandidateList.newBuilder().setFocusedIndex(selected[focus])
+        candidatesOf(keys[focus]).forEach { (value, id) ->
+            words.addCandidates(CandidateWord.newBuilder().setId(id).setValue(value).setNumSegmentsInCandidate(1))
+        }
+        // 読みが異なる予測候補と、二つの文節をまとめる候補。どちらもライブ変換の候補から除かれるべきもの。
+        words.addCandidates(CandidateWord.newBuilder().setId(90).setKey(keys[focus] + "ね").setValue("予測"))
+        words.addCandidates(CandidateWord.newBuilder().setId(91).setValue("連結").setNumSegmentsInCandidate(2))
+        return builder.setPreedit(preedit).setAllCandidateWords(words).build()
+    }
 }

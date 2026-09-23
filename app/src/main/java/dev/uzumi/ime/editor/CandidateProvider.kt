@@ -1,6 +1,7 @@
 package dev.uzumi.ime.editor
 
 import dev.uzumi.ime.conversion.ConversionRequest
+import dev.uzumi.ime.live.CandidateChoice
 
 /**
  * 候補行へ表示する最小候補を表す。変換エンジンの候補は、表示元の要求と候補IDをconversionChoiceに持つ。
@@ -17,6 +18,20 @@ data class CandidateOption(
 data class ConversionChoice(
     val request: ConversionRequest,
     val candidateId: Int,
+)
+
+/**
+ * ライブ変換の候補バーに出す内容。対象segmentの候補と、segmentの移動・末尾復帰・取り消しの可否を表す。
+ */
+data class LiveCandidateState(
+    val choices: List<CandidateChoice>,
+    // 対象segmentの現在の表記。候補バーで選択中の候補を示すために使う。
+    val currentValue: String?,
+    val canUndo: Boolean,
+    // 対象より前に移れるsegmentがあるか。
+    val canFocusPrevious: Boolean,
+    // 対象が末尾入力位置のsegmentか。falseなら過去segmentを訂正中。
+    val focusAtInput: Boolean,
 )
 
 /**

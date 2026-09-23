@@ -648,6 +648,38 @@ class LiveConversionCoreTest {
         assertEquals(OperationCounts(keys = 4, commits = 1, corrections = 0, terminators = 1), driver.counts)
     }
 
+    /** Editor側でcompositionが終わった場合は、書込みなしで内部状態を捨て、保留中の結果も適用しない。 */
+    @Test
+    fun discardingCompositionWritesNothingAndRejectsPendingResult() {
+        val driver = heldDriver().type("よい")
+        val pending = driver.pending.last()
+
+        driver.core.discardComposition()
+
+        assertEquals("", driver.core.display)
+        assertFalse(driver.core.canUndo)
+        val update = driver.deliver(pending)
+        assertTrue(update.commands.isEmpty())
+        assertEquals(RejectReason.REVISION_MISMATCH, update.rejection)
+        driver.type("か")
+        driver.deliver(driver.pending.last())
+        assertEquals("蚊", driver.editor.composing)
+    }
+
+    /** 過去segmentへ移ると末尾入力位置ではなくなり、末尾へ戻すか同じsegmentを選ぶと戻る。 */
+    @Test
+    fun focusAtInputReflectsPastSegmentCorrection() {
+        val driver = typedSentence()
+        assertTrue(driver.core.isFocusAtInput)
+
+        driver.focus(1)
+        assertFalse(driver.core.isFocusAtInput)
+        driver.returnToInput()
+        assertTrue(driver.core.isFocusAtInput)
+        driver.focus(2)
+        assertTrue(driver.core.isFocusAtInput)
+    }
+
     /** nullでないことを確かめ、その値を返す。 */
     private fun <T : Any> assertNotNullAndGet(value: T?): T {
         assertNotNull(value)
