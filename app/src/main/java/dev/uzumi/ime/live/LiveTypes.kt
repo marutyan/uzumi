@@ -41,6 +41,8 @@ data class LiveSegment(
     val lastObservedReadingVersion: Long,
     /** 候補を、明示変換と同じ方法で変換器から取り直したか。trueなら注目しても候補を求め直さない。 */
     val candidatesComplete: Boolean = false,
+    /** 区切りをユーザーが伸縮で決めたか。変換器はこの範囲を必ず一segmentとして返し、結果はchosenになる。 */
+    val userBounded: Boolean = false,
 ) {
     /** 未変換の入力中segmentか。新しい読みを隣へ入力したときに結合してよい対象を表す。 */
     val isRaw: Boolean
@@ -72,6 +74,15 @@ data class ProtectedRange(
 )
 
 /**
+ * ユーザーが文節の伸縮で決めた、まだ変換していない一segmentの読み範囲。
+ * 変換器は保護範囲と同じくこの両端で必ず区切り、範囲全体を一つのsegmentとして返す。
+ */
+data class FixedRange(
+    val readingStart: Int,
+    val readingEnd: Int,
+)
+
+/**
  * 変換要求が作られた時点の状態を識別する。
  * 結果を適用する前にすべての項目を現在値と照合し、一つでも違えば捨てる。
  */
@@ -92,6 +103,8 @@ data class RequestIdentity(
     val inputCursor: Int,
     /** 辞書とモデルの世代。辞書更新前の要求を区別する。 */
     val converterGeneration: Long,
+    /** 対象範囲内でユーザーが区切りを決めた範囲。変換器は各範囲を一segmentとして返さなければならない。 */
+    val fixedRanges: List<FixedRange> = emptyList(),
 )
 
 /**
@@ -186,6 +199,9 @@ enum class RejectReason {
 
     /** 対象範囲内の入力カーソル位置をまたいで一つのsegmentにしている。 */
     CROSSES_CURSOR,
+
+    /** ユーザーが伸縮で決めた範囲を、一つのsegmentとして返していない。 */
+    CROSSES_FIXED,
     /** 候補を表示したときとepoch、revision、segment、候補が一致しない。 */
     STALE_CANDIDATE,
 }
@@ -269,4 +285,7 @@ enum class OperationKind {
     BOUNDARY,
     CANDIDATE,
     READING_REVERT,
+
+    /** 文節の区切りの伸縮。 */
+    SEGMENT_RESIZE,
 }

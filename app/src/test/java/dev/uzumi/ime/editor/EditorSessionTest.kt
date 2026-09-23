@@ -14,6 +14,7 @@ import dev.uzumi.ime.live.CandidateRequest
 import dev.uzumi.ime.live.CandidateResult
 import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.FakeLiveConverter
+import dev.uzumi.ime.live.FixedRange
 import dev.uzumi.ime.live.LiveConversionCore
 import dev.uzumi.ime.live.ConversionRequest as LiveRequest
 import org.junit.Assert.assertEquals
@@ -995,6 +996,56 @@ class EditorSessionTest {
 
         assertTrue(session.selectLiveCandidate(choices.first { it.value == "教派" }))
         assertEquals("教派天気が", connection.text)
+    }
+
+    /** ライブ変換の入力中は文節を伸縮でき、縮めた範囲を区切りに決めた変換を依頼して表示へ反映する。 */
+    @Test
+    fun liveResizeRequestsFixedRangeAndShowsResult() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        assertFalse(session.canResizeSegment)
+        typeLive(session, client, "きょうはてんきが")
+        assertTrue(session.canResizeSegment)
+
+        assertTrue(session.resizeSegment(-1))
+        assertEquals("今日はてんきが", connection.text)
+        assertEquals(listOf(FixedRange(4, 7)), client.requests.last().second.identity.fixedRanges)
+        client.deliverLatest(session)
+        assertEquals("今日は天気が", connection.text)
+    }
+
+    /** 明示変換では、変換結果の表示中だけ先頭文節を伸縮でき、続けて押すと応答待ちの区切りから数える。 */
+    @Test
+    fun explicitResizeRequestsConversionWithHeadLength() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), 0, 0, sessionEpoch = 3, conversionClient = client)
+        session.inputText("かんじ")
+        assertFalse(session.canResizeSegment)
+        assertFalse(session.resizeSegment(-1))
+        session.convert()
+        session.applyConversionOutcome(converted(client.requests.single(), "漢字", "感じ"))
+        assertTrue(session.canResizeSegment)
+
+        assertTrue(session.resizeSegment(-1))
+        assertEquals(2, client.requests.last().headLength)
+        assertTrue(session.resizeSegment(-1))
+        assertEquals(1, client.requests.last().headLength)
+        assertFalse(session.resizeSegment(-1))
+        assertFalse(session.resizeSegment(0))
+
+        val resized = client.requests.last()
+        val outcome = ConversionOutcome.Converted(
+            ConversionResult(
+                resized,
+                listOf(ConversionSegment("か", "蚊"), ConversionSegment("んじ", "んじ")),
+                listOf(ConversionCandidate(0, "蚊", "か"), ConversionCandidate(1, "か", "か")),
+            ),
+        )
+        assertTrue(session.applyConversionOutcome(outcome))
+        assertEquals("蚊んじ", connection.text)
+        assertEquals(listOf("蚊", "か"), session.candidateOptions().map(CandidateOption::value))
     }
 
     /** ライブ変換の編集セッションを作る。変換要求はclientへ記録され、テストが結果を返す。 */

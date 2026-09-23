@@ -4,6 +4,7 @@ import dev.uzumi.ime.dictionary.UserDictionaryEntry
 import dev.uzumi.ime.dictionary.UserDictionaryLookup
 import dev.uzumi.ime.editor.GraphemeClusters
 import dev.uzumi.ime.live.ConversionRequest as LiveRequest
+import dev.uzumi.ime.live.FixedRange
 import dev.uzumi.ime.live.LiveConversionCore
 import dev.uzumi.ime.live.LiveFieldPolicy
 import dev.uzumi.ime.live.LiveSegment
@@ -281,6 +282,31 @@ class LiveConversionAdapterTest {
             index = end
         }
         return result
+    }
+
+    /**
+     * 区切りを決めた範囲は、その範囲だけを一segmentとして変換する。convertFixedが無いか失敗したときは、
+     * convertRangeの結果を連結して一segmentにする。範囲の両端は前後の部分範囲の境界にもなる。
+     */
+    @Test
+    fun fixedRangeIsConvertedAsOneSegment() {
+        val converted = mutableListOf<String>()
+        val converter = SegmentedLiveConverter(
+            convertRange = { chunk -> converted += chunk; chunk.map { ResultSegment(it.toString(), it.uppercase()) } },
+            convertFixed = { reading -> ResultSegment(reading, "[$reading]", listOf("[$reading]"), candidatesComplete = true) },
+        )
+        val identity = RequestIdentity(1, 1, "abcde", 0, 5, emptyList(), 5, 0, fixedRanges = listOf(FixedRange(1, 3)))
+
+        val result = converter.convert(LiveRequest(identity, "abcde", learningAllowed = true))!!
+
+        assertEquals(listOf("a", "bc", "d", "e"), result.segments.map { it.reading })
+        assertEquals("[bc]", result.segments[1].surface)
+        assertTrue(result.segments[1].candidatesComplete)
+        assertEquals(listOf("a", "de"), converted)
+
+        val fallback = SegmentedLiveConverter(convertRange = { chunk -> chunk.map { ResultSegment(it.toString(), it.uppercase()) } })
+        val joined = fallback.convert(LiveRequest(identity, "abcde", learningAllowed = true))!!.segments[1]
+        assertEquals(ResultSegment("bc", "BC", listOf("BC", "bc")), joined)
     }
 
     /** 学習単位の試験に使う、読みの位置を持たないsegment。 */

@@ -679,6 +679,23 @@ class EditorSession(
         return update.handled && update.rejection == null
     }
 
+    /**
+     * 文節の区切りを伸縮できる状態か。ライブ変換では入力中、明示変換では変換結果を表示している間。
+     * キーボードは、この間だけ←→の長押しを伸縮に使う。
+     */
+    val canResizeSegment: Boolean
+        get() = active && if (liveCore != null) hasComposition else currentConversion() != null
+
+    /**
+     * 文節の区切りを一書記素縮める（delta<0）か伸ばす（delta>0）。ライブ変換では候補バーの対象の文節、
+     * 明示変換では候補を出している先頭の文節を対象にする。伸縮できなければfalse。
+     */
+    fun resizeSegment(delta: Int): Boolean {
+        if (!active || delta == 0) return false
+        if (liveCore != null) return performLive { it.resizeFocusedSegment(delta) } ?: false
+        return resizeConversionHead(delta)
+    }
+
     /** 候補バーの対象を末尾入力位置のsegmentへ戻す。 */
     fun returnLiveFocusToInput(): Boolean {
         val core = liveCore ?: return false
@@ -795,6 +812,31 @@ class EditorSession(
     private fun dispatchCandidateRequest(request: CandidateRequest) {
         val client = liveClient ?: return
         if (client.isAvailable) client.requestSegmentCandidates(sessionEpoch, request)
+    }
+
+    /**
+     * 明示変換の表示中に、先頭文節の区切りを一書記素伸縮した変換をエンジンへ依頼する。
+     * 伸縮を続けて押した場合は、応答を待っている要求の区切りから数える。結果は通常の変換応答として届く。
+     */
+    private fun resizeConversionHead(delta: Int): Boolean {
+        val conversion = currentConversion() ?: return false
+        val client = conversionClient ?: return false
+        if (!client.isAvailable || policy.suppressSuggestions) return false
+        val total = GraphemeClusters.split(buffer.reading).size
+        val current = pendingConversion?.headLength
+            ?: GraphemeClusters.split(conversion.segments.first().reading).size
+        val length = current + if (delta < 0) -1 else 1
+        if (length < 1 || length > total) return false
+        val request = ConversionRequest(
+            sessionEpoch = sessionEpoch,
+            revision = revision,
+            reading = buffer.reading,
+            incognito = policy.suppressLearning,
+            headLength = length,
+        )
+        pendingConversion = request
+        client.requestConversion(request)
+        return true
     }
 
     /** 確定したsegment列をエンジンへ学習させる。学習禁止欄とエンジンが使えない場合は送らない。 */

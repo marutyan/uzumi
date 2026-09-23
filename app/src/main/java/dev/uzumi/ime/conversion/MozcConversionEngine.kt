@@ -76,8 +76,12 @@ class MozcConversionEngine(
         return eval(input) != null
     }
 
-    override fun convert(sessionId: Long, reading: String): EngineConversion? {
-        val output = composeAndConvert(sessionId, reading, requestSuggestion = true) ?: return null
+    override fun convert(sessionId: Long, reading: String, headLength: Int?): EngineConversion? {
+        var output = composeAndConvert(sessionId, reading, requestSuggestion = true) ?: return null
+        if (headLength != null) {
+            val head = GraphemeClusters.split(reading).take(headLength).joinToString(separator = "")
+            output = alignFocusedSegment(sessionId, output, 0, head) ?: return null
+        }
         return toConversion(sessionId, output)
     }
 

@@ -242,6 +242,40 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
     }
 
     /**
+     * 候補バーの対象segmentの区切りを、終わりの側で一書記素だけ縮める（delta<0）か伸ばす（delta>0）。
+     * 伸縮したsegmentはユーザーが決めた区切りとして読みへ戻し、変換器へ一segmentとしての変換を求める。
+     * 結果が届くとchosenになり、以後の自動更新から守られる。縮めて外れた書記素は未変換のsegmentになり、
+     * 後ろが自由なsegmentなら次の変換で一緒に変換される。伸ばして一部を取り込んだ後ろのsegmentは、残りを未変換へ戻す。
+     * 入力カーソルを内部に含むことになる伸縮と、読点をまたぐ伸縮はしない。Undo可能な一操作である。
+     */
+    fun resizeFocusedSegment(delta: Int): LiveUpdate {
+        if (!acceptsInput()) return LiveUpdate.NOT_HANDLED
+        val target = focusedSegment ?: return LiveUpdate.NOT_HANDLED
+        if (delta == 0 || target.reading == LiveConversionRules.SOFT_BOUNDARY) return LiveUpdate.NO_CHANGE
+        val newEnd = target.readingEnd + if (delta < 0) -1 else 1
+        if (newEnd <= target.readingStart || newEnd > state.clusters.size) return LiveUpdate.NO_CHANGE
+        // カーソルが伸縮後のsegmentの内部に入ると、表示上のカーソルと読みの位置を対応付けられない。
+        if (state.inputCursor > target.readingStart && state.inputCursor < newEnd) return LiveUpdate.NO_CHANGE
+        val index = state.segments.indexOfFirst { it.id == target.id }
+        val next = state.segments.getOrNull(index + 1)
+        if (delta > 0 && (next == null || next.reading == LiveConversionRules.SOFT_BOUNDARY)) return LiveUpdate.NO_CHANGE
+        val clusters = state.clusters
+        val resized = rawSegment(clusters, target.readingStart, newEnd).copy(userBounded = true)
+        val segments = if (delta < 0) {
+            state.segments.take(index) + resized + rawSegment(clusters, newEnd, target.readingEnd) +
+                state.segments.drop(index + 1)
+        } else {
+            // 伸ばした分を取り込んだ後ろのsegmentの残り。一書記素だけのsegmentなら残りは無い。
+            val rest = next?.takeIf { it.readingEnd > newEnd }?.let { rawSegment(clusters, newEnd, it.readingEnd) }
+            state.segments.take(index) + listOfNotNull(resized, rest) + state.segments.drop(index + 2)
+        }
+        pushUndo(OperationKind.SEGMENT_RESIZE)
+        state = state.copy(segments = segments, focusedSegmentId = resized.id)
+        revision += 1
+        return compositionUpdate(buildRequest())
+    }
+
+    /**
      * 取り直した候補を、要求時と同じepoch・revision・segmentの場合だけ対象segmentへ入れる。表示は変えない。
      * 候補は増えるだけなので、表示済みの候補のタップはそのまま受け付けられる。
      */
@@ -402,7 +436,8 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
             identity.targetStart != current.targetStart || identity.targetEnd != current.targetEnd ->
                 return rejected(RejectReason.TARGET_MISMATCH)
 
-            identity.protectedRanges != current.protectedRanges -> return rejected(RejectReason.PROTECTED_MISMATCH)
+            identity.protectedRanges != current.protectedRanges || identity.fixedRanges != current.fixedRanges ->
+                return rejected(RejectReason.PROTECTED_MISMATCH)
         }
 
         val pieces = tileResult(result.segments, current) ?: return rejected(RejectReason.MALFORMED_SEGMENTS)
@@ -419,6 +454,10 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
             current.inputCursor !in boundaries
         ) {
             return rejected(RejectReason.CROSSES_CURSOR)
+        }
+        // ユーザーが伸縮で決めた範囲は、ちょうど一つのsegmentとして返っていなければならない。
+        if (current.fixedRanges.any { fixed -> pieces.none { it.start == fixed.readingStart && it.end == fixed.readingEnd } }) {
+            return rejected(RejectReason.CROSSES_FIXED)
         }
 
         state = state.copy(segments = promoteSegments(mergeResult(pieces, current, protectedInTarget)))
@@ -622,6 +661,7 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
             },
             inputCursor = state.inputCursor,
             converterGeneration = converterGeneration,
+            fixedRanges = free.filter { it.userBounded }.map { FixedRange(it.readingStart, it.readingEnd) },
         )
     }
 
@@ -715,18 +755,21 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
                 }
                 // 同じ読み範囲・表記で候補を取り直し済みなら、その候補を引き継ぐ。
                 val kept = previous?.takeIf { it.candidatesComplete && it.surface == piece.surface }
+                // ユーザーが伸縮で決めた範囲の結果はchosenにして、以後の自動更新から守る。
+                val userBounded = previous?.userBounded == true
                 LiveSegment(
                     id = previous?.id ?: newSegmentId(),
                     readingStart = piece.start,
                     readingEnd = piece.end,
                     reading = state.clusters.subList(piece.start, piece.end).joinToString(separator = ""),
                     surface = piece.surface,
-                    state = SegmentState.PROVISIONAL,
+                    state = if (userBounded) SegmentState.CHOSEN else SegmentState.PROVISIONAL,
                     candidates = kept?.let { (piece.candidates + it.candidates).distinct() } ?: piece.candidates,
                     converted = true,
                     observations = observations,
                     lastObservedReadingVersion = readingVersion,
                     candidatesComplete = piece.candidatesComplete || kept != null,
+                    userBounded = userBounded,
                 )
             }
         return before + (converted + protectedInTarget).sortedBy { it.readingStart } + after

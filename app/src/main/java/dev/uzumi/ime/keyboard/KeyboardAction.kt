@@ -24,6 +24,13 @@ sealed interface KeyboardAction {
     data class MoveCursor(val delta: Int) : KeyboardAction
 
     /**
+     * 変換中の文節の区切りを一文字縮める・伸ばす要求。変換中に←→キーを長押ししたときに送る。
+     *
+     * @property delta 負で縮め、正で伸ばす
+     */
+    data class ResizeSegment(val delta: Int) : KeyboardAction
+
+    /**
      * 改行またはエディタのアクション実行。
      */
     data object Enter : KeyboardAction

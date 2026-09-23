@@ -17,8 +17,11 @@ interface ConversionEngine {
     /** 以後の変換で学習・履歴を使うかを切り替える。変換を送る前に呼ぶ。 */
     fun setIncognito(incognito: Boolean): Boolean
 
-    /** sessionの状態を読みだけから作り直して変換し、文節と先頭文節の候補を返す。 */
-    fun convert(sessionId: Long, reading: String): EngineConversion?
+    /**
+     * sessionの状態を読みだけから作り直して変換し、文節と先頭文節の候補を返す。
+     * headLengthを渡すと、先頭文節の読みをその書記素数へ伸縮してから候補を集める（明示変換の文節の伸縮）。
+     */
+    fun convert(sessionId: Long, reading: String, headLength: Int? = null): EngineConversion?
 
     /** 直前の変換の先頭文節を指定候補で確定し、エンジンへ選択を学習させる。 */
     fun commitCandidate(sessionId: Long, candidateId: Int): Boolean

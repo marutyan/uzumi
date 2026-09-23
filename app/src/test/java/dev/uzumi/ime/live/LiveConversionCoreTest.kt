@@ -762,6 +762,105 @@ class LiveConversionCoreTest {
         assertTrue(driver.core.segments.single().candidatesComplete)
     }
 
+    /** segmentの読みを並べる。 */
+    private fun readings(core: LiveConversionCore): List<String> = core.segments.map { it.reading }
+
+    /**
+     * 注目した文節を縮めると、縮めた範囲を必須の区切りとして一segmentに変換させ、結果はchosenになる。
+     * 外れた書記素は後ろの自由な範囲と一緒に変換し直される。読みは変わらず、表示は各segmentの表記の連結になる。
+     */
+    @Test
+    fun shrinkingSegmentFixesBoundaryAndResultBecomesChosen() {
+        val driver = typedSentence()
+        assertEquals(listOf("きょうは", "てんきが", "いいですね"), readings(driver.core))
+        driver.focus(1)
+        driver.deliverImmediately = false
+
+        val update = driver.resize(-1)
+        assertEquals(listOf("きょうは", "てんき", "が", "いいですね"), readings(driver.core))
+        assertEquals("今日はてんきがいいですね", driver.editor.composing)
+        val request = assertNotNullAndGet(update.request)
+        assertEquals(listOf(FixedRange(4, 7)), request.identity.fixedRanges)
+
+        assertNull(driver.deliver(request).rejection)
+        assertEquals(sentence, driver.core.reading)
+        assertEquals("今日は天気がいいですね", driver.core.display)
+        assertEquals(driver.core.display, driver.editor.composing)
+        val resized = driver.core.segments[1]
+        assertEquals("てんき", resized.reading)
+        assertEquals(SegmentState.CHOSEN, resized.state)
+        assertEquals(resized.id, driver.core.focusedSegment?.id)
+
+        // chosenになった文節は、後続の入力による自動変換で書き換わらない。
+        driver.deliverImmediately = true
+        driver.returnToInput()
+        driver.type("よ")
+        assertEquals("天気", driver.core.segments[1].surface)
+        assertEquals(SegmentState.CHOSEN, driver.core.segments[1].state)
+    }
+
+    /** 伸ばすと後ろの文節の先頭を取り込み、残りを未変換へ戻して変換し直す。Undoで一操作として戻る。 */
+    @Test
+    fun expandingSegmentTakesNextGraphemeAndUndoRestores() {
+        val driver = typedSentence()
+        driver.focus(0)
+        val before = driver.core.segments
+
+        driver.resize(1)
+        assertEquals(listOf("きょうはて", "んきが", "いいですね"), readings(driver.core))
+        assertEquals(SegmentState.CHOSEN, driver.core.segments[0].state)
+        assertEquals(sentence, driver.core.reading)
+        assertEquals(driver.core.display, driver.editor.composing)
+
+        driver.undo()
+        assertEquals(before.map { it.reading to it.surface }, driver.core.segments.map { it.reading to it.surface })
+    }
+
+    /** 1書記素の文節は縮めず、末尾の文節は伸ばさず、読点と入力カーソルをまたいで伸ばさない。 */
+    @Test
+    fun resizeStopsAtLimitsCommaAndCursor() {
+        val driver = LiveSessionDriver().type("か")
+        assertEquals(LiveUpdate.NO_CHANGE, driver.core.resizeFocusedSegment(-1))
+        assertEquals(LiveUpdate.NO_CHANGE, driver.core.resizeFocusedSegment(1))
+
+        val comma = typedSentence().type("、")
+        comma.focus(2)
+        assertEquals(LiveUpdate.NO_CHANGE, comma.core.resizeFocusedSegment(1))
+
+        val cursor = typedSentence()
+        cursor.handle(cursor.core.moveCursorTo(8))
+        cursor.focus(1)
+        assertEquals(LiveUpdate.NO_CHANGE, cursor.core.resizeFocusedSegment(1))
+        assertEquals(listOf("きょうは", "てんきが", "いいですね"), readings(cursor.core))
+    }
+
+    /** 区切りを決めた範囲を分けた結果と、伸縮より前の要求への結果は捨てる。 */
+    @Test
+    fun resultIgnoringFixedRangeOrOlderThanResizeIsRejected() {
+        val driver = typedSentence()
+        driver.focus(1)
+        driver.deliverImmediately = false
+        driver.type("よ")
+        val beforeResize = driver.pending.last()
+        driver.focus(1)
+        val request = assertNotNullAndGet(driver.resize(-1).request)
+
+        assertEquals(RejectReason.REVISION_MISMATCH, driver.deliver(beforeResize).rejection)
+        val valid = driver.converter.convert(request)!!
+        val split = valid.copy(
+            segments = valid.segments.flatMap {
+                if (it.reading == "てんき") listOf(ResultSegment("てん", "点"), ResultSegment("き", "木")) else listOf(it)
+            },
+        )
+        assertEquals(RejectReason.CROSSES_FIXED, driver.core.onConversionResult(split).rejection)
+        assertEquals(
+            RejectReason.PROTECTED_MISMATCH,
+            driver.core.onConversionResult(valid.copy(identity = valid.identity.copy(fixedRanges = emptyList()))).rejection,
+        )
+        assertNull(driver.core.onConversionResult(valid).rejection)
+        assertEquals("天気", driver.core.segments[1].surface)
+    }
+
     /** nullでないことを確かめ、その値を返す。 */
     private fun <T : Any> assertNotNullAndGet(value: T?): T {
         assertNotNull(value)

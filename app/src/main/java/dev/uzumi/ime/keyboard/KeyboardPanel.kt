@@ -48,6 +48,10 @@ class KeyboardPanel(
     private var kanaSpaceKeyView: KeyView? = null
     private var isComposing = false
 
+    // ←→キー（移動量とキーの組）。文節を伸縮できる間だけ、長押しを伸縮に切り替える。
+    private val arrowKeyViews = mutableListOf<Pair<Int, KeyView>>()
+    private var isSegmentResizable = false
+
     // かな配列へ戻るキー。password欄ではかな入力を使わないため非表示にする。
     private val kanaSwitchKeyViews = mutableListOf<KeyView>()
 
@@ -118,6 +122,23 @@ class KeyboardPanel(
         isComposing = composing
         kanaNumberKeyView?.replaceSpec(KeyboardLayoutData.kanaNumberKey(composing))
         kanaSpaceKeyView?.replaceSpec(KeyboardLayoutData.kanaSpaceKey(composing))
+    }
+
+    /**
+     * 文節の区切りを伸縮できる状態（変換中）かを受け取り、←→キーの長押しを伸縮とカーソルの連続移動で切り替える。
+     * IMEは表示を更新するたびに呼ぶ。
+     */
+    fun setSegmentResizable(resizable: Boolean) {
+        if (resizable == isSegmentResizable) return
+        isSegmentResizable = resizable
+        arrowKeyViews.forEach { (delta, key) -> key.replaceSpec(KeyboardLayoutData.arrowKey(delta, resizable)) }
+    }
+
+    /** ←→キーを作り、長押しの切替対象へ登録する。 */
+    private fun createArrowKey(delta: Int): KeyView {
+        val key = createKey(KeyboardLayoutData.arrowKey(delta, isSegmentResizable), 1f)
+        arrowKeyViews += delta to key
+        return key
     }
 
     /**
@@ -283,11 +304,11 @@ class KeyboardPanel(
 
         // Row 1: [←] [た] [な] [は] [→]
         val row1 = createRow(rowHeight).apply {
-            addView(createKey(KeySpec.Action(KeyboardAction.MoveCursor(-1), "←"), 1f))
+            addView(createArrowKey(-1))
             addView(createKey(KeySpec.Kana(KanaKeyType.TA), 1f))
             addView(createKey(KeySpec.Kana(KanaKeyType.NA), 1f))
             addView(createKey(KeySpec.Kana(KanaKeyType.HA), 1f))
-            addView(createKey(KeySpec.Action(KeyboardAction.MoveCursor(1), "→"), 1f))
+            addView(createArrowKey(1))
         }
 
         // Row 2: [123 / 入力中はカナ] [ま] [や] [ら] [空白 / 入力中は変換]
@@ -368,8 +389,8 @@ class KeyboardPanel(
         row4.addView(createKey(KeySpec.SimpleText(","), 1f))
         row4.addView(createKey(KeySpec.Action(KeyboardAction.Space, "space"), 2f))
         row4.addView(createKey(KeySpec.SimpleText("."), 1f))
-        row4.addView(createKey(KeySpec.Action(KeyboardAction.MoveCursor(-1), "←"), 1f))
-        row4.addView(createKey(KeySpec.Action(KeyboardAction.MoveCursor(1), "→"), 1f))
+        row4.addView(createArrowKey(-1))
+        row4.addView(createArrowKey(1))
         val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1.5f)
         enterKeyViews.add(enterKey)
         row4.addView(enterKey)

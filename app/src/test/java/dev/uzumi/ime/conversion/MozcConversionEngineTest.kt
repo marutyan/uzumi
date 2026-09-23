@@ -296,6 +296,30 @@ class MozcConversionEngineTest {
         )
     }
 
+    /**
+     * 明示変換で先頭文節の書記素数を指定すると、Shift+左・右で先頭文節の幅を合わせてから候補を集める。
+     */
+    @Test
+    fun convertWithHeadLengthResizesHeadSegment() {
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        val shrunk = engine.convert(sessionId = 5, reading = "きょうはいい", headLength = 3)!!
+        assertEquals(listOf(ConversionSegment("きょう", "今日"), ConversionSegment("はいい", "はいい")), shrunk.segments)
+        assertEquals(listOf("今日", "京", "予測"), shrunk.headCandidates.filter { it.reading == "きょう" }.map { it.value })
+
+        native.inputs.clear()
+        val expanded = engine.convert(sessionId = 5, reading = "きょうはいい", headLength = 5)!!
+        assertEquals(listOf("きょうはい", "い"), expanded.segments.map { it.reading })
+        assertEquals(
+            1,
+            native.inputs.count {
+                it.key.specialKey == KeyEvent.SpecialKey.RIGHT && KeyEvent.ModifierKey.SHIFT in it.key.modifierKeysList
+            },
+        )
+    }
+
     /** 学習は区切りを文節の幅の伸縮で合わせ、表記を候補から選んでから全体を確定する。 */
     @Test
     fun learnSegmentsAlignsBoundariesAndSurfacesBeforeSubmitting() {

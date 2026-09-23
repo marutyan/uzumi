@@ -251,7 +251,7 @@ class ConversionWorker(
             return
         }
         lastConverted.remove(request.sessionEpoch)
-        val conversion = runCatching { engine.convert(sessionId, request.reading) }.getOrNull()
+        val conversion = runCatching { engine.convert(sessionId, request.reading, request.headLength) }.getOrNull()
         if (conversion == null) {
             onOutcome(ConversionOutcome.Failed(request))
             return
@@ -294,6 +294,16 @@ class ConversionWorker(
             learnedSurfaces = learnedSurfaces(request.learningAllowed),
             // 部分範囲の先頭からの読みに一致する句で区切りを合わせる。学習禁止欄では参照しない。
             learnedPhrases = learnedPhrases(request.learningAllowed),
+            // ユーザーが伸縮で区切りを決めた読みは、Mozcの文節の幅を合わせて一文節として変換する。
+            convertFixed = { reading ->
+                if (isAsciiOnly(reading)) {
+                    ResultSegment(reading, reading)
+                } else {
+                    engine.convertSegment(sessionId, "", reading, "")?.let {
+                        ResultSegment(reading, it.value, it.candidates, candidatesComplete = true)
+                    }
+                }
+            },
         )
         val result = runCatching { converter.convert(request) }.getOrNull() ?: return
         onLiveResult(sessionEpoch, result)

@@ -14,8 +14,8 @@ enum class OperationKind {
     COMMIT,
 
     /**
-     * 表示や入力を直す操作。削除、カーソル・文節の移動、第一候補以外の候補選択、元に戻す、末尾への復帰、
-     * カナへの切り替え、ライブ変換中の変換キー（次の候補への切り替え）。
+     * 表示や入力を直す操作。削除、カーソル・文節の移動、文節の区切りの伸縮、第一候補以外の候補選択、元に戻す、
+     * 末尾への復帰、カナへの切り替え、ライブ変換中の変換キー（次の候補への切り替え）。
      */
     CORRECTION,
 
@@ -66,6 +66,7 @@ object OperationClassifier {
         KeyboardAction.Delete,
         KeyboardAction.DeleteToLineStart,
         is KeyboardAction.MoveCursor,
+        is KeyboardAction.ResizeSegment,
         KeyboardAction.ToKatakana,
         -> OperationKind.CORRECTION
         KeyboardAction.Enter -> OperationKind.TERMINATOR

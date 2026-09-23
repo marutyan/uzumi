@@ -291,6 +291,8 @@ class UzumiInputMethodService : InputMethodService() {
             KeyboardAction.TransformKana -> current.transformKana()
             KeyboardAction.ToKatakana -> current.toKatakana()
             KeyboardAction.DeleteToLineStart -> current.deleteToLineStart()
+            // 変換中の←→の長押しで、文節の区切りを一文字ずつ縮める・伸ばす
+            is KeyboardAction.ResizeSegment -> current.resizeSegment(action.delta)
         }
         scheduleConversionTimeout(current)
         refreshCandidates()
@@ -346,6 +348,7 @@ class UzumiInputMethodService : InputMethodService() {
      */
     private fun refreshCandidates() {
         keyboardPanel?.setComposing(session?.hasComposition == true)
+        keyboardPanel?.setSegmentResizable(session?.canResizeSegment == true)
         val row = candidateRow ?: return
         val views = barViews ?: return
         val leading = barLeading ?: return
