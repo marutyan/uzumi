@@ -7,8 +7,6 @@ import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
-import android.view.View
-import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
@@ -18,7 +16,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 
 /**
- * IMEの有効化・切替導線と、導入直後に入力を試せる欄を表示する。
+ * IMEの有効化・切替導線、ユーザー辞書の管理画面への導線と、導入直後に入力を試せる欄を表示する。
  */
 class MainActivity : Activity() {
     /** 設定ボタンと試用欄を、追加UI依存なしで構築する。 */
@@ -55,6 +53,12 @@ class MainActivity : Activity() {
                 getSystemService(InputMethodManager::class.java).showInputMethodPicker()
             }
         })
+        content.addView(Button(this).apply {
+            text = getString(R.string.open_user_dictionary)
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, UserDictionaryActivity::class.java))
+            }
+        })
         content.addView(TextView(this).apply {
             text = getString(R.string.trial_input_title)
             textSize = 20f
@@ -74,23 +78,5 @@ class MainActivity : Activity() {
         }
         applySystemInsets(scrollView)
         setContentView(scrollView)
-    }
-
-    /** システムバー、ディスプレイカットアウト、IME領域のInsetsを反映し重なりを防ぐ。 */
-    private fun applySystemInsets(view: View) {
-        view.setOnApplyWindowInsetsListener { targetView, insets ->
-            val systemBars = insets.getInsets(
-                WindowInsets.Type.systemBars() or
-                    WindowInsets.Type.displayCutout() or
-                    WindowInsets.Type.ime()
-            )
-            targetView.setPadding(
-                systemBars.left,
-                systemBars.top,
-                systemBars.right,
-                systemBars.bottom
-            )
-            insets
-        }
     }
 }
