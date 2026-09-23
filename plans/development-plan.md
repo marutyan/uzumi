@@ -2,7 +2,7 @@
 
 ## 現在地
 
-Phase 0はPR #1で完了し、2026-09-21のユーザー指示でPhase 1へ着手。入力基盤とキーUIはAPK生成・単体テスト49件・lint・独立レビューを経て、2026-09-22に[PR #2](https://github.com/marutyan/uzumi/pull/2)でmainへ統合した（`a4dddf2`）。空白確定時の遅延通知による文字欠落も修正済み。現在は`validation/pixel-input`で、Pixel 10 Proの試用画面で見つかった画面端の重なりとカーソル編集の誤りを修正し、[実機で再確認](../docs/phase1-device-validation.md)した。50件の単体テスト、APK生成、lint、独立レビューは成功。QWERTYと数字を含む基本入力は試用欄で確認したが、別アプリや機密欄との互換性・性能は未検証であり、漢字変換とユーザー辞書を含むPhase 1全体の完成ではない。
+Phase 0はPR #1で完了し、2026-09-21のユーザー指示でPhase 1へ着手。入力基盤とキーUIはAPK生成・単体テスト49件・lint・独立レビューを経て、2026-09-22に[PR #2](https://github.com/marutyan/uzumi/pull/2)でmainへ統合した（`a4dddf2`）。Pixel 10 Proの試用画面で見つかった画面端の重なりとカーソル編集の誤りは[実機で再確認](../docs/phase1-device-validation.md)し、50件の単体テスト、APK生成、lint、独立レビューを経て[PR #3](https://github.com/marutyan/uzumi/pull/3)でmainへ統合した。Phase 1cではMozcの[ローカルビルド試作](../docs/mozc-build-probe.md)が成功した。QWERTYと数字を含む基本入力は試用欄で確認したが、別アプリや機密欄との互換性・性能は未検証であり、漢字変換とユーザー辞書を含むPhase 1全体の完成ではない。
 
 | 作業 | 状態 | 成果物・証拠 |
 |---|---|---|
@@ -14,7 +14,7 @@ Phase 0はPR #1で完了し、2026-09-21のユーザー指示でPhase 1へ着手
 | 独立レビューと文書検証 | done | 2026-09-20、7文書の要求/API保証/license区分/状態/MVP整合を確認し合格。Android 17メモリ制限の指摘を修正して再確認。相対リンク・表列数・fence・git diff --cached --checkも合格 |
 | Phase 1a 入力基盤 | in_progress | 50単体テストとPixel試用欄の基本編集は合格。別アプリ・機密欄・回転等の互換試験は未実施 |
 | Phase 1b キーUI | in_progress | 12-key、英語QWERTY、数字の試用欄入力と最下段操作をPixelで確認。記号の網羅・長押し・TalkBackは未実施 |
-| Phase 1c 漢字変換・辞書 | in_progress | [JNI・辞書資産・追加導入の確認](../docs/mozc-integration-plan.md)完了。native buildと組込みは未実施 |
+| Phase 1c 漢字変換・辞書 | in_progress | [Mozcのnative・辞書・Java liteのローカルビルド](../docs/mozc-build-probe.md)成功。配布資産の監査・NOTICEは未完了。APK組込み・端末変換・ユーザー辞書は未実施 |
 | Phase 2以降 | pending | Phase 1の受入条件を満たしてから開始 |
 
 ## 二つの到達点
@@ -61,11 +61,10 @@ Android 17の実機では`adb shell am memory-limiter status`で制限状態を�
 - Themeはversionを持つデータとし、外観と入力挙動の設定を分離する。背景画像はファイル選択を使い、bitmapサイズ制限と縮小を行う。fontやblur等は効果と描画コストを確認して段階導入する。
 - 常時toolbar一行は初期既定にしない案とする。候補行の入口からパネルを開き、Inline Suggestions表示時は高さと訂正への戻りやすさを測る。発見可能性を実機で検証して確定する。
 
-## 実装着手前の判断と次の一手
+## 次の一手
 
-1. Phase 0レビュー結果を確認し、MVPの採用範囲と暫定構成を合意する。
-2. 常用端末・評価端末を特定する。なければ性能選定を保留してAPI互換試作から始める。
-3. JDK/SDK/NDK等の既存環境を確認し、必要な導入だけ範囲を示して承認を得る。
-4. 変換器のlicense固定とAndroid組込み試作を行い、Phase 1cの採用を決める。学習/重い外部実行は別途条件を合意する。
+1. `mozc.data`の入力資産、郵便番号データ、nativeの実リンク閉包、Java lite runtimeを棚卸しし、APK同梱用のNOTICEを確定する。
+2. 配布条件を満たした資産と最小JNIブリッジを接続し、Pixel 10 Proで既知のかな漢字変換、辞書不在fallback、session破棄を確認する。
+3. Phase 1a/1bの未実施互換試験と、Phase 1cのユーザー辞書を進める。性能選定の実験条件は実行前に固定する。
 
 本計画の検証基準・性能値は提案であり、まだ測定を実施した研究条件ではない。実験開始前に課題集合、比較条件、測定方法と合格基準を固定し、実行後に都合よく変えない。
