@@ -635,6 +635,8 @@ class EditorSessionTest {
         val state = session.liveCandidateState()!!
         assertEquals("天気が", state.currentValue)
         assertFalse(state.focusAtInput)
+        // 候補バーに、どの文節を直しているかを読みで示す
+        assertEquals("てんきが", state.focusedReading)
         assertEquals(DisplaySpan(spans.last()!!.segmentId, 3, 6, spans.last()!!.state, true, true), spans.last())
 
         assertTrue(session.selectLiveCandidate(state.choices.first { it.value == "転機が" }))

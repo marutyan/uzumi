@@ -16,4 +16,7 @@
     <color name="kb_on_popup">#FF10203A</color>
     <color name="kb_danger">#FFF2B8B5</color>
     <color name="kb_on_danger">#FF601410</color>
+    <!-- 候補バーの背景と、候補一覧の区切り線 -->
+    <color name="kb_bar">#FF1E2126</color>
+    <color name="kb_divider">#FF3A3F47</color>
 </resources>

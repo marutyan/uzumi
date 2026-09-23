@@ -19,4 +19,7 @@
     <!-- 削除キーの左ドラッグで、離すと行頭まで消える状態の案内 -->
     <color name="kb_danger">#FFB3261E</color>
     <color name="kb_on_danger">#FFFFFFFF</color>
+    <!-- 候補バーの背景と、候補一覧の区切り線 -->
+    <color name="kb_bar">#FFF3F4F6</color>
+    <color name="kb_divider">#FFD0D5DB</color>
 </resources>

@@ -623,6 +623,7 @@ class EditorSession(
             canUndo = core.canUndo,
             canFocusPrevious = segments.take(focusedIndex.coerceAtLeast(0)).any(::isFocusTarget),
             focusAtInput = core.isFocusAtInput,
+            focusedReading = focused?.reading,
         )
     }
 

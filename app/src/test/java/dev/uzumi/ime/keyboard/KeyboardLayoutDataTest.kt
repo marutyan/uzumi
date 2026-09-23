@@ -306,6 +306,9 @@ class KeyboardLayoutDataTest {
                 "kb_on_accent" to "kb_accent",
                 "kb_on_popup" to "kb_popup",
                 "kb_on_danger" to "kb_danger",
+                "kb_text" to "kb_bar",
+                "kb_text_secondary" to "kb_bar",
+                "kb_accent" to "kb_bar",
             ).forEach { (fg, bg) ->
                 val ratio = contrastRatio(palette.getValue(fg), palette.getValue(bg))
                 assertTrue("$fg / $bg のコントラスト比が不足: $ratio", ratio >= 4.5)
