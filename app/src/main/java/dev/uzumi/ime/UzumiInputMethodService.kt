@@ -33,6 +33,7 @@ import dev.uzumi.ime.keyboard.KeyboardAction
 import dev.uzumi.ime.keyboard.KeyboardPanel
 import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.learning.LearningStores
+import dev.uzumi.ime.live.CandidateResult
 import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.LiveConversionCore
@@ -87,6 +88,7 @@ class UzumiInputMethodService : InputMethodService() {
             },
             onOutcome = { outcome -> mainHandler.post { deliverConversion(outcome) } },
             onLiveResult = { sessionEpoch, result -> mainHandler.post { deliverLiveResult(sessionEpoch, result) } },
+            onCandidateResult = { sessionEpoch, result -> mainHandler.post { deliverCandidateResult(sessionEpoch, result) } },
             userDictionary = { UserDictionaries.get(this) },
             learningStore = { LearningStores.get(this) },
         )
@@ -308,6 +310,13 @@ class UzumiInputMethodService : InputMethodService() {
         if (current.applyLiveResult(result)) refreshCandidates()
     }
 
+    /** 取り直した文節の候補を、同じ編集セッションが照合できる場合だけ反映する。 */
+    private fun deliverCandidateResult(sessionEpoch: Long, result: CandidateResult) {
+        val current = session ?: return
+        if (current.sessionEpoch != sessionEpoch) return
+        if (current.applyLiveCandidates(result)) refreshCandidates()
+    }
+
     /** 訂正中のsegmentの表示範囲へ背景色を付け、どのsegmentを直しているかをEditor上で示す。 */
     private fun highlightSegment(text: String, span: DisplaySpan?): CharSequence {
         if (span == null || span.start >= span.end || span.end > text.length) return text
@@ -373,7 +382,13 @@ class UzumiInputMethodService : InputMethodService() {
         trailing.addView(views.divider(), 0)
         trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
             evaluation.record(OperationKind.OTHER)
-            if (grid?.isShowing == true) grid.hide() else showCandidateGrid(current, entries)
+            if (grid?.isShowing == true) {
+                grid.hide()
+            } else {
+                showCandidateGrid(current, entries)
+                // ライブ変換では、一覧を開いた文節の候補を明示変換と同じだけ取り直す。届いたら一覧を描き直す。
+                if (current?.isLiveMode == true && session === current) current.requestLiveCandidates()
+            }
             refreshCandidates()
         })
         // 一覧を開いたまま候補が変わった場合は、一覧も新しい候補で描き直す

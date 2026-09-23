@@ -10,6 +10,8 @@ import dev.uzumi.ime.conversion.ConversionSegment
 import dev.uzumi.ime.conversion.LearnedSegment
 import dev.uzumi.ime.conversion.LiveConversionClient
 import dev.uzumi.ime.evaluation.EvaluationCounter
+import dev.uzumi.ime.live.CandidateRequest
+import dev.uzumi.ime.live.CandidateResult
 import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.FakeLiveConverter
 import dev.uzumi.ime.live.LiveConversionCore
@@ -968,6 +970,33 @@ class EditorSessionTest {
         assertTrue(session.canUndoLineDelete)
     }
 
+    /**
+     * ←で過去の文節へ移ると、その文節の候補の取り直しを依頼し、届いた候補を候補バーに加える。
+     * 候補一覧を開くときは末尾入力位置の文節の候補も依頼する。
+     */
+    @Test
+    fun liveFocusRequestsSegmentCandidatesAndShowsThem() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        typeLive(session, client, "きょうはてんきが")
+        assertTrue(client.candidateRequests.isEmpty())
+
+        assertTrue(session.requestLiveCandidates())
+        assertEquals("てんきが", client.candidateRequests.single().reading)
+
+        assertTrue(session.moveLiveFocus(-1))
+        val request = client.candidateRequests.last()
+        assertEquals("きょうは", request.reading)
+        assertEquals("てんきが", request.following)
+        assertTrue(session.applyLiveCandidates(CandidateResult(request, listOf("今日は", "教派"))))
+        val choices = session.liveCandidateState()!!.choices
+        assertTrue("教派" in choices.map { it.value })
+
+        assertTrue(session.selectLiveCandidate(choices.first { it.value == "教派" }))
+        assertEquals("教派天気が", connection.text)
+    }
+
     /** ライブ変換の編集セッションを作る。変換要求はclientへ記録され、テストが結果を返す。 */
     private fun liveSession(
         connection: EditorConnectionPort,
@@ -1060,6 +1089,13 @@ private class FakeLiveClient : LiveConversionClient {
 
     override fun learnCommitted(sessionEpoch: Long, units: List<List<LearnedSegment>>) {
         learned += units
+    }
+
+    // 受け取った候補の取り直し要求。
+    val candidateRequests = mutableListOf<CandidateRequest>()
+
+    override fun requestSegmentCandidates(sessionEpoch: Long, request: CandidateRequest) {
+        candidateRequests += request
     }
 
     /** index番目の要求を変換した結果。 */

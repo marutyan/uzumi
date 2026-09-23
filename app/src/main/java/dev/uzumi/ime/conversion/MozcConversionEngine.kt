@@ -81,6 +81,33 @@ class MozcConversionEngine(
         return toConversion(sessionId, output)
     }
 
+    override fun convertSegment(sessionId: Long, preceding: String, reading: String, following: String): EngineSegment? {
+        if (reading.isEmpty()) return null
+        var output = composeAndConvert(sessionId, preceding + reading + following, requestSuggestion = false)
+            ?: return null
+        if (!output.hasPreedit()) return null
+        // 前の読みを文脈として一文節に合わせ、focusを対象の文節へ移す。
+        val index = if (preceding.isEmpty()) 0 else 1
+        if (preceding.isNotEmpty()) {
+            output = alignFocusedSegment(sessionId, output, 0, preceding) ?: return null
+            output = sendKey(sessionId, KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.RIGHT)) ?: return null
+        }
+        output = alignFocusedSegment(sessionId, output, index, reading) ?: return null
+        val keys = output.preedit.segmentList.map { it.key }
+        val value = output.preedit.getSegment(index).value
+        val words = output.allCandidateWords.candidatesList
+        val focusedId = words.getOrNull(output.allCandidateWords.focusedIndex)?.id
+        // 明示変換と同じく各候補を一時的に選び、文節の区切りが変わらない（対象の読みだけを置き換える）候補だけを残す。
+        val candidates = words.filter { it.hasValue() && it.value.isNotEmpty() }.mapNotNull { word ->
+            val selected = sendCommand(sessionId, SessionCommand.CommandType.SELECT_CANDIDATE, word.id)
+            word.value.takeIf { selected?.preedit?.segmentList?.map { it.key } == keys }
+        }
+        if (focusedId != null) {
+            sendCommand(sessionId, SessionCommand.CommandType.SELECT_CANDIDATE, focusedId) ?: return null
+        }
+        return EngineSegment(reading = reading, value = value, candidates = (listOf(value) + candidates).distinct())
+    }
+
     override fun convertSegments(sessionId: Long, reading: String): List<EngineSegment>? {
         var output = composeAndConvert(sessionId, reading, requestSuggestion = false) ?: return null
         if (!output.hasPreedit()) return null
@@ -197,11 +224,14 @@ class MozcConversionEngine(
     }
 
     /**
-     * 候補が文節の読みだけを置き換えるか。keyは読みが入力と異なる候補（予測など）にだけ付き、
-     * 複数の文節をまとめる候補はnum_segments_in_candidateが2以上になる。どちらもsegment境界を壊すため除く。
+     * 候補が文節の読みだけを置き換えるかを、候補の情報だけで安く判定する。
+     * Mozcは候補の自立語部分の読み（content_key、「講演に」なら「こうえん」）が文節の読みと違うとkeyへ入れる
+     * （engine/engine_output.ccのFillCandidateWord）。そのためkeyは普通の変換候補でも付き、文節の読みの接頭辞になる。
+     * 接頭辞でないkeyは読みが入力と異なる候補（予測など）として除き、num_segments_in_candidateが2以上の
+     * 複数の文節をまとめる候補も除く。どちらもsegment境界を壊すためである。
      */
     private fun replacesOnlySegment(word: CandidateWord, segmentReading: String): Boolean {
-        val sameReading = !word.hasKey() || word.key == segmentReading
+        val sameReading = !word.hasKey() || segmentReading.startsWith(word.key)
         return sameReading && word.numSegmentsInCandidate <= 1
     }
 

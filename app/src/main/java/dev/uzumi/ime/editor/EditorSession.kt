@@ -10,6 +10,8 @@ import dev.uzumi.ime.conversion.liveLearningUnits
 import dev.uzumi.ime.evaluation.EvaluationCounter
 import dev.uzumi.ime.evaluation.LiveChangeClassifier
 import dev.uzumi.ime.live.CandidateChoice
+import dev.uzumi.ime.live.CandidateRequest
+import dev.uzumi.ime.live.CandidateResult
 import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.EditorCommand
 import dev.uzumi.ime.live.EnterKind
@@ -652,7 +654,29 @@ class EditorSession(
             direction > 0 -> core.returnToInputPosition()
             else -> return false
         }
-        return update.handled && refreshLiveHighlight()
+        if (!update.handled) return false
+        update.candidateRequest?.let(::dispatchCandidateRequest)
+        return refreshLiveHighlight()
+    }
+
+    /**
+     * 候補バーの対象segmentの候補を、明示変換と同じ方法で取り直すよう依頼する。候補一覧を開いたときに呼ぶ。
+     * 取り直し済み、または依頼先が使えなければ何もしない。結果はapplyLiveCandidatesで後から反映する。
+     */
+    fun requestLiveCandidates(): Boolean {
+        val core = liveCore ?: return false
+        if (!active) return false
+        val update = core.requestFocusedCandidates()
+        update.candidateRequest?.let(::dispatchCandidateRequest)
+        return update.handled
+    }
+
+    /** workerから届いた取り直しの候補を、コアが要求時と同じ状態だと照合できた場合だけ反映する。 */
+    fun applyLiveCandidates(result: CandidateResult): Boolean {
+        val core = liveCore ?: return false
+        if (!active) return false
+        val update = core.onCandidateResult(result)
+        return update.handled && update.rejection == null
     }
 
     /** 候補バーの対象を末尾入力位置のsegmentへ戻す。 */
@@ -730,6 +754,7 @@ class EditorSession(
             }
         }
         update.request?.let(::dispatchLiveRequest)
+        update.candidateRequest?.let(::dispatchCandidateRequest)
         return true
     }
 
@@ -764,6 +789,12 @@ class EditorSession(
             return
         }
         kanaFallbackConverter.convert(request)?.let(::applyLiveResult)
+    }
+
+    /** 候補の取り直しを依頼する。エンジンが使えない間は、かな・カナ候補のほかに取り直す候補が無いため送らない。 */
+    private fun dispatchCandidateRequest(request: CandidateRequest) {
+        val client = liveClient ?: return
+        if (client.isAvailable) client.requestSegmentCandidates(sessionEpoch, request)
     }
 
     /** 確定したsegment列をエンジンへ学習させる。学習禁止欄とエンジンが使えない場合は送らない。 */
@@ -806,7 +837,9 @@ class EditorSession(
             return performLive { it.moveCursorTo(index) } ?: false
         }
         val span = core.displaySpans().firstOrNull { offset > it.start && offset < it.end } ?: return false
-        if (!core.focusSegment(span.segmentId).handled) return false
+        val update = core.focusSegment(span.segmentId)
+        if (!update.handled) return false
+        update.candidateRequest?.let(::dispatchCandidateRequest)
         return refreshLiveHighlight()
     }
 

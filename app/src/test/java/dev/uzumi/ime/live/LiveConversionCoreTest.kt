@@ -681,6 +681,87 @@ class LiveConversionCoreTest {
         assertTrue(driver.core.isFocusAtInput)
     }
 
+    /**
+     * 過去の文節へ注目すると、その文節の候補を取り直す要求が前後の読みを文脈にして出る。
+     * 届いた候補は表示もrevisionも変えずに候補バーへ加わり、そこから選べる。取り直した文節には再び要求しない。
+     */
+    @Test
+    fun focusingSegmentRequestsItsCandidatesAndResultAddsThem() {
+        val driver = typedSentence()
+        val revision = driver.core.revision
+        val update = driver.focus(1)
+        val request = assertNotNullAndGet(update.candidateRequest)
+        assertEquals("てんきが", request.reading)
+        assertEquals("きょうは", request.preceding)
+        assertEquals("いいですね", request.following)
+        assertEquals(driver.core.segments[1].id, request.segmentId)
+
+        val applied = driver.core.onCandidateResult(CandidateResult(request, listOf("天気が", "転記が", "添記が")))
+        assertNull(applied.rejection)
+        assertTrue(applied.commands.isEmpty())
+        assertEquals(revision, driver.core.revision)
+        assertEquals("今日は天気がいいですね", driver.core.display)
+        val choices = assertNotNullAndGet(driver.core.candidateBar()).choices.map { it.value }
+        assertEquals(listOf("天気が", "転記が", "添記が", "転機が", "てんきが"), choices)
+
+        driver.select("転記が")
+        assertEquals("今日は転記がいいですね", driver.core.display)
+        driver.returnToInput()
+        assertNull(driver.focus(1).candidateRequest)
+    }
+
+    /** 候補を取り直している間に読みや文節が変わった結果は、古いものとして捨てる。 */
+    @Test
+    fun staleCandidateResultIsRejected() {
+        val driver = typedSentence()
+        val request = assertNotNullAndGet(driver.focus(1).candidateRequest)
+        val result = CandidateResult(request, listOf("転記が"))
+        val cases = listOf(
+            RejectReason.EPOCH_MISMATCH to request.copy(sessionEpoch = request.sessionEpoch - 1),
+            RejectReason.GENERATION_MISMATCH to request.copy(converterGeneration = 99),
+            RejectReason.STALE_CANDIDATE to request.copy(segmentId = 9_999),
+            RejectReason.STALE_CANDIDATE to request.copy(readingEnd = request.readingEnd + 1),
+        )
+        for ((reason, changed) in cases) {
+            assertEquals(reason, driver.core.onCandidateResult(result.copy(request = changed)).rejection)
+        }
+
+        driver.type("よ")
+        assertEquals(RejectReason.REVISION_MISMATCH, driver.core.onCandidateResult(result).rejection)
+        assertFalse("転記が" in driver.core.segments[1].candidates)
+    }
+
+    /** 候補一覧を開いたときは、末尾入力位置の文節の候補も取り直す。未変換の文節と読点には要求しない。 */
+    @Test
+    fun openingCandidateListRequestsCandidatesOfFocusedSegment() {
+        val driver = typedSentence()
+        val request = assertNotNullAndGet(driver.core.requestFocusedCandidates().candidateRequest)
+        assertEquals("いいですね", request.reading)
+        assertEquals("てんきが", request.preceding)
+        assertEquals("", request.following)
+
+        val raw = heldDriver().type("よい")
+        assertNull(raw.core.requestFocusedCandidates().candidateRequest)
+        val comma = typedSentence().type("、")
+        assertNull(comma.core.requestFocusedCandidates().candidateRequest)
+    }
+
+    /** 取り直した候補は、同じ読み範囲・同じ表記のまま変換し直されても残る。 */
+    @Test
+    fun completedCandidatesSurviveReconversionWithSameSurface() {
+        val driver = heldDriver().type("よい")
+        driver.deliver(driver.pending.last())
+        val request = assertNotNullAndGet(driver.core.requestFocusedCandidates().candidateRequest)
+        driver.core.onCandidateResult(CandidateResult(request, listOf("良い", "善い")))
+        assertTrue(driver.core.segments.single().candidatesComplete)
+
+        val reconversion = assertNotNullAndGet(driver.core.setConverterGeneration(1).request)
+        assertNull(driver.deliver(reconversion).rejection)
+        assertEquals("良い", driver.core.display)
+        assertTrue("善い" in driver.core.segments.single().candidates)
+        assertTrue(driver.core.segments.single().candidatesComplete)
+    }
+
     /** nullでないことを確かめ、その値を返す。 */
     private fun <T : Any> assertNotNullAndGet(value: T?): T {
         assertNotNull(value)

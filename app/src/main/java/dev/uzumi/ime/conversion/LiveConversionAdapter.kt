@@ -30,12 +30,7 @@ class SegmentedLiveConverter(
     private val learnedPhrases: ((String) -> List<String>)? = null,
 ) : LiveConverter {
     // 読みに完全一致する学習語と句の表記を合わせて引く。どちらも無ければnullで、学習語を合成しない。
-    private val exactSurfaces: ((String) -> List<String>)? =
-        if (learnedSurfaces == null && learnedPhrases == null) {
-            null
-        } else {
-            { reading -> (learnedSurfaces?.invoke(reading).orEmpty() + learnedPhrases?.invoke(reading).orEmpty()).distinct() }
-        }
+    private val exactSurfaces: ((String) -> List<String>)? = combineExactSurfaces(learnedSurfaces, learnedPhrases)
 
     override fun convert(request: LiveRequest): LiveResult? {
         val identity = request.identity
@@ -102,6 +97,34 @@ fun toLiveSegments(chunk: String, segments: List<EngineSegment>): List<ResultSeg
     }
     val joined = segments.joinToString(separator = "") { it.value }
     return listOf(ResultSegment(chunk, joined, listOf(joined, chunk).distinct()))
+}
+
+/**
+ * 読みに完全一致する学習語と学習した句の表記を、学習語を先にして合わせて引く関数を作る。
+ * ライブ変換の部分範囲と、注目したsegmentの候補の取り直しで同じ規則を使うために一か所へ置く。どちらも無ければnull。
+ */
+fun combineExactSurfaces(
+    learnedSurfaces: ((String) -> List<String>)?,
+    learnedPhrases: ((String) -> List<String>)?,
+): ((String) -> List<String>)? {
+    if (learnedSurfaces == null && learnedPhrases == null) return null
+    return { reading -> (learnedSurfaces?.invoke(reading).orEmpty() + learnedPhrases?.invoke(reading).orEmpty()).distinct() }
+}
+
+/**
+ * 注目したsegmentに取り直した候補へ、ライブ変換の部分範囲と同じ順（ユーザー辞書 → 学習 → エンジン）で
+ * 登録語と学習語を合成し、候補の表記だけを返す。exactSurfacesは読みに完全一致する学習語と句の表記を返す。
+ */
+fun mergeSegmentCandidates(
+    reading: String,
+    engineCandidates: List<String>,
+    userDictionary: UserDictionaryLookup?,
+    exactSurfaces: ((String) -> List<String>)?,
+): List<String> {
+    if (engineCandidates.isEmpty()) return emptyList()
+    val base = listOf(ResultSegment(reading, engineCandidates.first(), engineCandidates))
+    val learned = exactSurfaces?.let { mergeExactSurfaces(reading, base, it) } ?: base
+    return UserDictionaryCandidates.mergeLive(reading, learned, userDictionary).single().candidates
 }
 
 /**

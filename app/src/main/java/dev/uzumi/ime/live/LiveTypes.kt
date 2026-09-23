@@ -39,6 +39,8 @@ data class LiveSegment(
     val observations: Int,
     /** 最後に観測を数えた読みrevision。同じ入力への複数の結果を二重に数えないために持つ。 */
     val lastObservedReadingVersion: Long,
+    /** 候補を、明示変換と同じ方法で変換器から取り直したか。trueなら注目しても候補を求め直さない。 */
+    val candidatesComplete: Boolean = false,
 ) {
     /** 未変換の入力中segmentか。新しい読みを隣へ入力したときに結合してよい対象を表す。 */
     val isRaw: Boolean
@@ -112,6 +114,8 @@ data class ResultSegment(
     val reading: String,
     val surface: String,
     val candidates: List<String> = listOf(surface),
+    /** 候補を明示変換と同じ方法で取ったか。trueならコアは注目時に候補を求め直さない。 */
+    val candidatesComplete: Boolean = false,
 )
 
 /**
@@ -195,6 +199,8 @@ data class LiveUpdate(
     val commands: List<EditorCommand> = emptyList(),
     /** 新しく発行した変換要求。前の要求は結果が届いても捨てられる。 */
     val request: ConversionRequest? = null,
+    /** 注目したsegmentの候補を変換器へ取り直す要求。統合担当は変換要求と同じく別スレッドで処理する。 */
+    val candidateRequest: CandidateRequest? = null,
     /** 結果や候補のタップを捨てた場合の理由。 */
     val rejection: RejectReason? = null,
 ) {
@@ -223,6 +229,34 @@ data class CandidateChoice(
 data class CandidateBar(
     val segmentId: Long,
     val choices: List<CandidateChoice>,
+)
+
+/**
+ * 注目した一つのsegmentの候補を、明示変換と同じ方法で変換器へ取り直す要求。
+ * 自動変換は速さのため候補を簡単に集めるだけなので、ユーザーが注目したsegmentだけを遅れて取り直す。
+ * 結果は表示時と同じepoch・revision・segmentに一致する場合だけ適用する。
+ */
+data class CandidateRequest(
+    val sessionEpoch: Long,
+    val revision: Long,
+    val converterGeneration: Long,
+    val segmentId: Long,
+    val readingStart: Int,
+    val readingEnd: Int,
+    /** 対象segmentの読み。 */
+    val reading: String,
+    /** 直前のsegmentの読み。変換器が文脈として一緒に変換する。句読点や先頭では空。 */
+    val preceding: String,
+    /** 直後のsegmentの読み。変換器が文脈として一緒に変換する。句読点や末尾では空。 */
+    val following: String,
+    /** falseなら変換器は学習・履歴を使わない。 */
+    val learningAllowed: Boolean,
+)
+
+/** [CandidateRequest]への結果。candidatesは対象segmentの読みだけを置き換える候補で、先頭ほど優先する。 */
+data class CandidateResult(
+    val request: CandidateRequest,
+    val candidates: List<String>,
 )
 
 /**

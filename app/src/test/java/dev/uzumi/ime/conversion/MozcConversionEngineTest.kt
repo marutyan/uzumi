@@ -235,6 +235,67 @@ class MozcConversionEngineTest {
         assertTrue(mozc.submitted.isEmpty())
     }
 
+    /**
+     * Mozcは自立語部分の読み（content_key）が文節の読みと違う候補にkeyを付ける。「講演に」のkey「こうえん」は
+     * 文節の読みの接頭辞なので、予測として除かずライブ変換の候補に残す（Phase 2cで「講演に」が出なかった原因）。
+     */
+    @Test
+    fun convertSegmentsKeepsCandidatesWhoseKeyIsTheirContentReading() {
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        val segments = engine.convertSegments(sessionId = 5, reading = "こうえんに")!!
+
+        assertEquals(listOf(EngineSegment("こうえんに", "公園に", listOf("公園に", "項園に", "講演に"))), segments)
+    }
+
+    /**
+     * 注目した文節の候補は、明示変換で同じ読みを先頭文節にしたときの候補と同じになる。
+     * どちらも各候補を一時的に選んで読みを確かめ、複数の文節をまとめる候補だけを除く。確定はしない。
+     */
+    @Test
+    fun convertSegmentCollectsSameCandidatesAsExplicitConversion() {
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        for ((reading, following) in listOf("こうえんに" to "", "きょうは" to "いい")) {
+            val explicit = engine.convert(sessionId = 5, reading = reading + following)!!
+                .headCandidates.filter { it.reading == reading }.map { it.value }
+            val live = engine.convertSegment(sessionId = 5, preceding = "", reading = reading, following = following)!!
+
+            assertEquals(explicit, live.candidates)
+            assertEquals(explicit.first(), live.value)
+        }
+        val lecture = engine.convertSegment(sessionId = 5, preceding = "", reading = "こうえんに", following = "")!!
+        assertEquals(listOf("公園に", "項園に", "講演に", "予測"), lecture.candidates)
+        assertFalse(native.inputs.any { it.command.type == SessionCommand.CommandType.SUBMIT })
+        assertTrue(mozc.submitted.isEmpty())
+    }
+
+    /** 前の読みを文脈にするときは、前を一文節に合わせてからfocusを移し、対象の文節の幅を合わせて候補を集める。 */
+    @Test
+    fun convertSegmentAlignsContextAndTargetSegments() {
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        val after = engine.convertSegment(sessionId = 5, preceding = "きょうは", reading = "いい", following = "")!!
+        assertEquals(EngineSegment("いい", "いい", listOf("いい", "良い", "予測")), after)
+        assertEquals(1, native.inputs.count { it.key.specialKey == KeyEvent.SpecialKey.RIGHT && it.key.modifierKeysCount == 0 })
+
+        native.inputs.clear()
+        val shrunk = engine.convertSegment(sessionId = 5, preceding = "", reading = "きょう", following = "はいい")!!
+        assertEquals(EngineSegment("きょう", "今日", listOf("今日", "京", "予測")), shrunk)
+        assertEquals(
+            1,
+            native.inputs.count {
+                it.key.specialKey == KeyEvent.SpecialKey.LEFT && KeyEvent.ModifierKey.SHIFT in it.key.modifierKeysList
+            },
+        )
+    }
+
     /** 学習は区切りを文節の幅の伸縮で合わせ、表記を候補から選んでから全体を確定する。 */
     @Test
     fun learnSegmentsAlignsBoundariesAndSurfacesBeforeSubmitting() {
@@ -307,15 +368,20 @@ private class StatefulMozc {
     val submitted = mutableListOf<String>()
     private val composition = StringBuilder()
     private val keys = mutableListOf<String>()
+    // 文節ごとに選んでいる候補のID。
     private val selected = mutableListOf<Int>()
     private var focus = 0
     private var converting = false
 
-    /** 読みごとの候補。載っていない読みは読みそのものだけを候補にする。 */
+    /**
+     * 読みごとの候補（表記と自立語部分の読み）。自立語部分の読みは、実際のMozcと同じく文節の読みと違う場合だけ
+     * CandidateWord.keyへ入る。載っていない読みは読みそのものだけを候補にする。
+     */
     private val dictionary = mapOf(
-        "きょうは" to listOf("今日は", "京は"),
-        "いい" to listOf("いい", "良い"),
-        "きょう" to listOf("今日", "京"),
+        "きょうは" to listOf("今日は" to "きょう", "京は" to "きょう"),
+        "いい" to listOf("いい" to null, "良い" to null),
+        "きょう" to listOf("今日" to null, "京" to null),
+        "こうえんに" to listOf("公園に" to "こうえん", "項園に" to null, "講演に" to "こうえん"),
     )
 
     /** Inputを一つ処理し、その時点のOutputを返す。 */
@@ -327,10 +393,9 @@ private class StatefulMozc {
             }
 
             input.type == Input.CommandType.SEND_KEY -> handleSpecialKey(input.key)
-            input.command.type == SessionCommand.CommandType.SELECT_CANDIDATE ->
-                selected[focus] = candidatesOf(keys[focus]).indexOfFirst { it.second == input.command.id }
+            input.command.type == SessionCommand.CommandType.SELECT_CANDIDATE -> selected[focus] = input.command.id
             input.command.type == SessionCommand.CommandType.SUBMIT -> {
-                submitted += keys.indices.joinToString("") { candidatesOf(keys[it])[selected[it]].first }
+                submitted += preeditSegments().joinToString("") { it.second }
                 clear()
             }
 
@@ -360,6 +425,15 @@ private class StatefulMozc {
             }
 
             key.specialKey == KeyEvent.SpecialKey.RIGHT && !shift -> focus = (focus + 1) % keys.size
+            key.specialKey == KeyEvent.SpecialKey.RIGHT && shift && focus + 1 < keys.size -> {
+                keys[focus] = keys[focus] + keys[focus + 1].first()
+                keys[focus + 1] = keys[focus + 1].drop(1)
+                if (keys[focus + 1].isEmpty()) {
+                    keys.removeAt(focus + 1)
+                    selected.removeAt(focus + 1)
+                }
+                for (index in focus until selected.size) selected[index] = 0
+            }
             key.specialKey == KeyEvent.SpecialKey.LEFT && shift -> {
                 val current = keys[focus]
                 keys[focus] = current.dropLast(1)
@@ -376,7 +450,33 @@ private class StatefulMozc {
 
     /** 読みの候補を、表記とIDの組で返す。 */
     private fun candidatesOf(key: String): List<Pair<String, Int>> {
-        return (dictionary[key] ?: listOf(key)).mapIndexed { index, value -> value to index }
+        return (dictionary[key]?.map { it.first } ?: listOf(key)).mapIndexed { index, value -> value to index }
+    }
+
+    /** 読みの候補の自立語部分の読み。文節の読みと同じならnull。 */
+    private fun contentKeyOf(key: String, id: Int): String? = dictionary[key]?.getOrNull(id)?.second
+
+    /** index番目の文節で選んでいる候補の表記。 */
+    private fun selectedValue(index: Int): String = when (val id = selected[index]) {
+        PREDICTION_ID -> "予測"
+        MERGED_ID -> "連結"
+        else -> candidatesOf(keys[index])[id].first
+    }
+
+    /** 現在のpreeditの文節（読み、表記）。二つの文節をまとめる候補を選んだ文節は、次の文節と一つにまとまる。 */
+    private fun preeditSegments(): List<Pair<String, String>> {
+        val segments = mutableListOf<Pair<String, String>>()
+        var index = 0
+        while (index < keys.size) {
+            if (selected[index] == MERGED_ID && index + 1 < keys.size) {
+                segments += keys[index] + keys[index + 1] to "連結"
+                index += 2
+            } else {
+                segments += keys[index] to selectedValue(index)
+                index += 1
+            }
+        }
+        return segments
     }
 
     /** 変換状態をすべて捨てる。 */
@@ -405,8 +505,7 @@ private class StatefulMozc {
             return builder.build()
         }
         val preedit = Preedit.newBuilder().setCursor(0)
-        keys.forEachIndexed { index, key ->
-            val value = candidatesOf(key)[selected[index]].first
+        preeditSegments().forEachIndexed { index, (key, value) ->
             preedit.addSegment(
                 Preedit.Segment.newBuilder()
                     .setKey(key)
@@ -417,13 +516,28 @@ private class StatefulMozc {
                     ),
             )
         }
-        val words = CandidateList.newBuilder().setFocusedIndex(selected[focus])
-        candidatesOf(keys[focus]).forEach { (value, id) ->
-            words.addCandidates(CandidateWord.newBuilder().setId(id).setValue(value).setNumSegmentsInCandidate(1))
+        val candidates = candidatesOf(keys[focus])
+        val words = CandidateList.newBuilder().setFocusedIndex(candidates.indexOfFirst { it.second == selected[focus] }.coerceAtLeast(0))
+        candidates.forEach { (value, id) ->
+            val word = CandidateWord.newBuilder().setId(id).setValue(value).setNumSegmentsInCandidate(1)
+            contentKeyOf(keys[focus], id)?.let(word::setKey)
+            words.addCandidates(word)
         }
-        // 読みが異なる予測候補と、二つの文節をまとめる候補。どちらもライブ変換の候補から除かれるべきもの。
-        words.addCandidates(CandidateWord.newBuilder().setId(90).setKey(keys[focus] + "ね").setValue("予測"))
-        words.addCandidates(CandidateWord.newBuilder().setId(91).setValue("連結").setNumSegmentsInCandidate(2))
+        // 読みが入力と異なるkeyを持つ候補（予測など）。候補の情報だけで安く集めるライブ変換の自動変換では除く。
+        // 選んでも文節の読みは変わらないため、選んで確かめる明示変換と注目した文節の取り直しでは残る。
+        words.addCandidates(CandidateWord.newBuilder().setId(PREDICTION_ID).setKey(keys[focus] + "ね").setValue("予測"))
+        // 次の文節とまとめる候補。選ぶと文節の区切りが変わるため、ライブ変換の候補からは除かれる。
+        if (focus + 1 < keys.size) {
+            words.addCandidates(CandidateWord.newBuilder().setId(MERGED_ID).setValue("連結").setNumSegmentsInCandidate(2))
+        }
         return builder.setPreedit(preedit).setAllCandidateWords(words).build()
+    }
+
+    private companion object {
+        /** 読みが異なるkeyを持つ候補のID。 */
+        const val PREDICTION_ID = 90
+
+        /** 次の文節とまとめる候補のID。 */
+        const val MERGED_ID = 91
     }
 }

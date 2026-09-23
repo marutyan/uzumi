@@ -33,6 +33,13 @@ interface ConversionEngine {
     fun convertSegments(sessionId: Long, reading: String): List<EngineSegment>?
 
     /**
+     * ライブ変換の一segmentを、前後の読みを文脈にして必ず一文節として変換し、その文節の表記と候補を返す。
+     * 候補は明示変換と同じく、各候補を一時的に選んで文節の読みが変わらないものだけを集める。確定はせず、学習もさせない。
+     * 読みを一文節に合わせられなければnull。
+     */
+    fun convertSegment(sessionId: Long, preceding: String, reading: String, following: String): EngineSegment?
+
+    /**
      * 読みを変換し、segmentsと同じ区切りと表記へ合わせてから全体を確定し、エンジンへ学習させる。
      * 区切りか表記を合わせられなければ確定せずに取り消し、falseを返す。
      */
