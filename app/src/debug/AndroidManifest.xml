@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 互換試験用の画面はdebugビルドだけに入れる。IMEと別processにしてInputConnectionをプロセス間で試す。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name=".compat.CompatEditTextActivity"
+            android:exported="true"
+            android:label="@string/compat_edittext_title"
+            android:process=":compat"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".compat.CompatWebViewActivity"
+            android:exported="true"
+            android:label="@string/compat_webview_title"
+            android:process=":compat"
+            android:windowSoftInputMode="adjustResize" />
+    </application>
+</manifest>

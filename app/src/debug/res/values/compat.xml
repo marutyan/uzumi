@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 互換試験用の画面の文言とuiautomatorで欄を特定するためのID。debugビルドだけに入る。 -->
+<resources>
+    <string name="compat_edittext_title">互換試験（EditText）</string>
+    <string name="compat_webview_title">互換試験（WebView）</string>
+    <string name="compat_action_log">action %1$s id=%2$d #%3$d</string>
+    <string name="compat_masked_echo">masked=[%1$s] pin=[%2$s]</string>
+    <item name="compat_log" type="id" />
+    <item name="compat_masked_echo" type="id" />
+    <item name="compat_search" type="id" />
+    <item name="compat_send" type="id" />
+    <item name="compat_next" type="id" />
+    <item name="compat_done" type="id" />
+    <item name="compat_multi" type="id" />
+    <item name="compat_number" type="id" />
+    <item name="compat_phone" type="id" />
+    <item name="compat_email" type="id" />
+    <item name="compat_url" type="id" />
+    <item name="compat_password" type="id" />
+    <item name="compat_pin" type="id" />
+    <item name="compat_nolearn" type="id" />
+    <item name="compat_webview" type="id" />
+</resources>
