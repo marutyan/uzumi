@@ -26,6 +26,7 @@ import dev.uzumi.ime.editor.EditorSession
 import dev.uzumi.ime.editor.InputFieldPolicy
 import dev.uzumi.ime.keyboard.KeyboardAction
 import dev.uzumi.ime.keyboard.KeyboardPanel
+import dev.uzumi.ime.learning.LearningStores
 import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.LiveConversionCore
@@ -77,6 +78,7 @@ class UzumiInputMethodService : InputMethodService() {
             onOutcome = { outcome -> mainHandler.post { deliverConversion(outcome) } },
             onLiveResult = { sessionEpoch, result -> mainHandler.post { deliverLiveResult(sessionEpoch, result) } },
             userDictionary = { UserDictionaries.get(this) },
+            learningStore = { LearningStores.get(this) },
         )
         conversionExecutor = executor
         conversionWorker = worker

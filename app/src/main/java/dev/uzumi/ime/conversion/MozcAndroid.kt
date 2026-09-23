@@ -43,6 +43,14 @@ class MozcDataInstaller(private val context: Context) {
     /** Mozcの学習履歴や設定を置くprofileの場所。バックアップ対象外の領域に置く。 */
     fun profileDirectory(): File = File(directory, "profile")
 
+    /**
+     * Mozcが確定から学習した内容（文節履歴、文節区切りの履歴、予測の履歴）のファイルを消す。
+     * Mozcを読み込んだprocessでは内容がメモリにも残るため、変換エンジンが動いていないときだけ使う。
+     */
+    fun clearLearningFiles() {
+        LEARNING_FILE_NAMES.forEach { File(profileDirectory(), it).delete() }
+    }
+
     /** 辞書fileを用意して返す。APKに辞書が無ければ古い展開物を消してnullを返す。 */
     fun install(): File? {
         val target = File(directory, DATA_FILE_NAME)
@@ -78,5 +86,8 @@ class MozcDataInstaller(private val context: Context) {
 
         /** 展開先の辞書file名。 */
         const val DATA_FILE_NAME = "mozc.data"
+
+        /** Mozcがprofileへ保存する学習のファイル名（rewriterとpredictorの`user://`の名前）。 */
+        val LEARNING_FILE_NAMES = listOf("segment.db", "boundary.db", "history.db", ".history.db")
     }
 }

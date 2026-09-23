@@ -205,6 +205,13 @@ class MozcConversionEngine(
         return sameReading && word.numSegmentsInCandidate <= 1
     }
 
+    /** 文節履歴（CLEAR_USER_HISTORY）と予測の履歴（CLEAR_USER_PREDICTION）を、Mozcのメモリと保存ファイルから消す。 */
+    override fun clearLearning(): Boolean {
+        val history = eval(Input.newBuilder().setType(Input.CommandType.CLEAR_USER_HISTORY)) != null
+        val prediction = eval(Input.newBuilder().setType(Input.CommandType.CLEAR_USER_PREDICTION)) != null
+        return history && prediction
+    }
+
     override fun commitCandidate(sessionId: Long, candidateId: Int): Boolean {
         val output = sendCommand(sessionId, SessionCommand.CommandType.SUBMIT_CANDIDATE, candidateId)
         return output?.consumed == true
