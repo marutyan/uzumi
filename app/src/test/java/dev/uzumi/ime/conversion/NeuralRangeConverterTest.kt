@@ -83,6 +83,34 @@ class NeuralRangeConverterTest {
         )
     }
 
+    /**
+     * かなの読みから生まれた数字の表記は、同じ読みに重なる辞書の文節の候補にある場合だけ使う。
+     * 辞書にない数字（「じゅうじ」から「11時」、「にせんにじゅうろくねん」から「1999年」）は辞書の結果へ戻し、
+     * 辞書が使えなければ数字を含む出力は確かめられないため読みのまま表示する。
+     */
+    @Test
+    fun digitsGeneratedFromKanaNeedDictionaryCandidate() {
+        val withDictionary = { output: String -> NeuralRangeConverter(model = { _, _ -> output }, dictionary = ::lexiconSegments) }
+        val withoutDictionary = { output: String -> NeuralRangeConverter(model = { _, _ -> output }, dictionary = { null }) }
+
+        assertEquals(lexiconSegments("じゅうじ"), withDictionary("11時").convert("じゅうじ"))
+        assertEquals(lexiconSegments("にせんにじゅうろくねん"), withDictionary("1999年").convert("にせんにじゅうろくねん"))
+        assertEquals(listOf(ResultSegment("じゅうじ", "じゅうじ")), withoutDictionary("10時").convert("じゅうじ"))
+        assertEquals(listOf(ResultSegment("じゅうじ", "じゅうじ")), withoutDictionary("11時").convert("じゅうじ"))
+
+        // 辞書の候補にある数字は、文節をまたいで連結した候補（「10」＋「時」）でも一segmentの候補でも使う。
+        assertEquals(listOf("10時"), withDictionary("10時").convert("じゅうじ").map { it.surface }.take(1))
+        assertEquals(listOf("2026年"), withDictionary("2026年").convert("にせんにじゅうろくねん").map { it.surface })
+    }
+
+    /** 漢字の読みは確かめないため、読みに合わない漢字語は捨てられない（設計上の限界を固定する）。 */
+    @Test
+    fun kanjiReadingIsNotVerified() {
+        val converter = NeuralRangeConverter(model = fixedModel("でんしゃがおくれる" to "電車が遅延"), dictionary = ::lexiconSegments)
+
+        assertEquals(listOf("電車", "が", "遅延"), converter.convert("でんしゃがおくれる").map { it.surface })
+    }
+
     /** 読みへの割り当てが一つに決まらない出力は、内部で切らずにかなの連なり全体を一segmentにする。 */
     @Test
     fun ambiguousAlignmentKeepsWholeRun() {
@@ -136,7 +164,8 @@ class NeuralRangeConverterTest {
             "でんしゃ" to listOf("電車"),
             "が" to listOf("が", "蛾"),
             "おくれる" to listOf("遅れる", "送れる"),
-            "じゅう" to listOf("十", "銃"),
+            "じゅう" to listOf("十", "10", "銃"),
+            "にせんにじゅうろくねん" to listOf("2026年", "二千二十六年"),
             "じ" to listOf("時", "字"),
             "から" to listOf("から", "空"),
             "か" to listOf("蚊", "か"),

@@ -16,8 +16,9 @@ fun interface NeuralKanaKanjiModel {
 /**
  * ニューラルで直接変換し、辞書で補う部分範囲の変換器。`SegmentedLiveConverter`の`convertRange`へ差し込んで使い、
  * 保護範囲・カーソルでの分割とユーザー辞書・学習語の合成は既存の規則に任せる。
- * かなの連なりだけをモデルへ渡し、数字・英字・記号は入力のまま表示する。モデルの出力は読みに対応づけてから
- * 辞書の文節へ切り分け、対応づけられない出力（読みに無い語の生成など）は捨てて辞書の結果を表示する。
+ * かなの連なりだけをモデルへ渡し、数字・英字・記号は入力のまま表示する。モデルの出力は、かなの並びが読みと合うか、
+ * かなの読みから生まれた数字・英字が辞書の候補にあるかを確かめてから辞書の文節へ切り分け、合わなければ辞書の結果を表示する。
+ * 漢字の読みは確かめないため、読みに合わない漢字語（例：「おくれる」から「遅延」）は捨てられない。
  */
 class NeuralRangeConverter(
     private val model: NeuralKanaKanjiModel,
@@ -46,7 +47,9 @@ class NeuralRangeConverter(
                 segments.joinToString(separator = "") { it.reading } == reading
         }
         val output = runCatching { model.convert(reading, leftContext) }.getOrNull()
-        val cuts = output?.takeIf(::isAcceptableOutput)?.let { alignToReading(reading, it) }
+        val cuts = output?.takeIf(::isAcceptableOutput)
+            ?.let { alignToReading(reading, it) }
+            ?.takeIf { hasDictionaryBackedDigitsAndLetters(output, it, dictionarySegments) }
         return when {
             output != null && cuts != null -> splitByDictionary(reading, output, cuts, dictionarySegments)
             dictionarySegments != null -> dictionarySegments
@@ -132,6 +135,56 @@ private fun toHiragana(cluster: String): String = buildString {
 private fun isAcceptableOutput(output: String): Boolean =
     output.isNotEmpty() &&
         output.codePoints().noneMatch { it < 0x20 || it == 0x7F || it == 0xFFFD || it in 0xEE00..0xEE0F }
+
+/** 数字（全角を含む）または英字（全角を含む）の書記素か。モデルがかなの読みから作ってよいかを辞書で確かめる対象を表す。 */
+private fun isDigitOrLetterCluster(cluster: String): Boolean =
+    cluster.codePoints().anyMatch {
+        Character.isDigit(it) ||
+            it in 'A'.code..'Z'.code ||
+            it in 'a'.code..'z'.code ||
+            it in 0xFF21..0xFF3A ||
+            it in 0xFF41..0xFF5A
+    }
+
+// 数字・英字の検査で、重なる辞書の文節の候補を連結して作る組み合わせの上限。長い読みで計算が膨らむのを防ぐ。
+private const val MAX_CANDIDATE_COMBINATIONS = 256
+
+/**
+ * 読みに対応づけた出力のうち、数字・英字を含む連なりが、同じ読みの範囲に重なる辞書の文節の候補（各文節の候補を一つずつ
+ * 連結したもの）に含まれるかを確かめる。辞書が使えなければ確かめられないため、数字・英字を含む出力は使わない。
+ * かなの位置の照合だけでは、「じゅうじ」から「11時」のような読みに合わない数字を捨てられないため必要になる。
+ * cutsは`alignToReading`の返り値で、隣り合う二点の間が出力の一つの連なりと、それに対応する読みの範囲を表す。
+ */
+private fun hasDictionaryBackedDigitsAndLetters(
+    output: String,
+    cuts: Map<Int, Int>,
+    dictionarySegments: List<ResultSegment>?,
+): Boolean {
+    val outputClusters = GraphemeClusters.split(output)
+    if (outputClusters.none(::isDigitOrLetterCluster)) return true
+    if (dictionarySegments == null) return false
+    // 辞書の各文節の読みの範囲（書記素位置の[start, end)）。
+    val ranges = mutableListOf<IntRange>()
+    var position = 0
+    for (segment in dictionarySegments) {
+        val length = GraphemeClusters.split(segment.reading).size
+        ranges += position until position + length
+        position += length
+    }
+    val points = cuts.entries.sortedBy { it.key }
+    return points.zipWithNext().all { (start, end) ->
+        val piece = outputClusters.subList(start.value, end.value).joinToString(separator = "")
+        if (GraphemeClusters.split(piece).none(::isDigitOrLetterCluster)) return@all true
+        val overlapping = dictionarySegments.indices.filter { ranges[it].first < end.key && ranges[it].last + 1 > start.key }
+        var combinations = listOf("")
+        for (index in overlapping) {
+            val segment = dictionarySegments[index]
+            val candidates = (listOf(segment.surface) + segment.candidates).distinct()
+            combinations = combinations.flatMap { prefix -> candidates.map { prefix + it } }.take(MAX_CANDIDATE_COMBINATIONS)
+        }
+        combinations.any { piece in it }
+    }
+}
 
 /**
  * モデルの出力を読みに対応づけ、読みと表記を同じ位置で切れる点（読みの書記素位置 → 出力の書記素位置）を返す。
