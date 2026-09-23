@@ -3,7 +3,6 @@ package dev.uzumi.ime.keyboard
 import android.annotation.SuppressLint
 import android.content.Context
 import android.view.View
-import android.view.ViewGroup
 import android.widget.LinearLayout
 
 /**
@@ -11,12 +10,16 @@ import android.widget.LinearLayout
  *
  * @param context コンテキスト
  * @param onAction キーボード操作イベントを通知するコールバック
+ * @param lineDeleteLength 削除キーの左ドラッグで消える、カーソルから行頭までの文字数を返す。分からなければnull
+ * @param preferences 設定画面で選んだ高さ・拡大表示・振動・キー音・削除の左ドラッグ
  */
 // 必須コールバックを伴うプログラム生成専用Viewであり、XMLからは生成しない。
 @SuppressLint("ViewConstructor")
 class KeyboardPanel(
     context: Context,
     private val onAction: (KeyboardAction) -> Unit,
+    private val lineDeleteLength: () -> Int? = { null },
+    private val preferences: KeyboardPreferences = KeyboardPreferences(),
 ) : LinearLayout(context) {
 
     private val density = context.resources.displayMetrics.density
@@ -38,12 +41,23 @@ class KeyboardPanel(
 
     private var numericSwitchKey: KeyView? = null
 
+    // 入力中かどうかで役割が変わる12キーのキー。「123」と「カナ」、「空白」と「変換」を切り替える。
+    private var kanaNumberKeyView: KeyView? = null
+    private var kanaSpaceKeyView: KeyView? = null
+    private var isComposing = false
+
     // かな配列へ戻るキー。password欄ではかな入力を使わないため非表示にする。
     private val kanaSwitchKeyViews = mutableListOf<KeyView>()
 
     // 記号面で表示中のページ番号。KeyboardLayoutData.SYMBOL_PAGESの添字。
     private var symbolPageIndex = 0
     private val symbolPageContainers = mutableListOf<LinearLayout>()
+
+    // 押したキーの拡大表示。password欄では入力した文字を画面に大きく出さないため使わない。
+    private val keyPreview = KeyPreviewPopup(this, KeyboardColors.from(context))
+
+    // 削除キーの左ドラッグ中に、離すと消える範囲を示す案内。
+    private val deleteDragHint = DeleteDragHint(this, KeyboardColors.from(context))
 
     private lateinit var kanaContainer: LinearLayout
     private lateinit var qwertyContainer: LinearLayout
@@ -52,8 +66,8 @@ class KeyboardPanel(
 
     init {
         orientation = VERTICAL
-        setBackgroundColor(0xFFD7DADC.toInt())
-        val pad = (3f * density).toInt()
+        setBackgroundColor(KeyboardColors.from(context).keyboardBackground)
+        val pad = (KeyboardDimens.PANEL_PADDING_DP * density).toInt()
         setPadding(pad, pad, pad, pad)
 
         initLayouts()
@@ -94,10 +108,23 @@ class KeyboardPanel(
     }
 
     /**
+     * 入力中（未確定の読みやライブ変換の表示がある）かどうかを受け取り、12キーの「123」「空白」を
+     * 入力中だけ「カナ」「変換」に切り替える。IMEは表示を更新するたびに呼ぶ。
+     */
+    fun setComposing(composing: Boolean) {
+        if (composing == isComposing) return
+        isComposing = composing
+        kanaNumberKeyView?.replaceSpec(KeyboardLayoutData.kanaNumberKey(composing))
+        kanaSpaceKeyView?.replaceSpec(KeyboardLayoutData.kanaSpaceKey(composing))
+    }
+
+    /**
      * 保留中のタッチ入力、フリック判定、リピート処理等を直ちに中断する。
      */
     fun cancelPendingInput() {
         allKeyViews.forEach { it.cancelPendingInput() }
+        keyPreview.hide()
+        deleteDragHint.hide()
     }
 
     override fun onDetachedFromWindow() {
@@ -233,7 +260,7 @@ class KeyboardPanel(
     }
 
     /**
-     * 12キーかなレイアウトを構築する（5列×4行）。
+     * 12キーかなレイアウトを構築する（5列×4行、5列とも同じ幅）。キーの並びはSimejiに合わせる。
      */
     private fun buildKanaLayout(): LinearLayout {
         val container = LinearLayout(context).apply {
@@ -241,52 +268,46 @@ class KeyboardPanel(
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         }
 
-        val rowHeight = (52f * density).toInt()
+        val rowHeight = rowHeightPx(preferences.rowHeightDp)
 
-        // Row 0: [切替: 英字] [あ] [か] [さ] [削除]
+        // Row 0: [記号] [あ] [か] [さ] [削除]
         val row0 = createRow(rowHeight).apply {
-            addView(createKey(KeySpec.ModeSwitch("あ/A", KeyboardMode.QWERTY), 1.0f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.A), 1.2f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.KA), 1.2f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.SA), 1.2f))
-            addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.0f))
+            addView(createKey(KeySpec.ModeSwitch("記号", KeyboardMode.SYMBOL), 1f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.A), 1f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.KA), 1f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.SA), 1f))
+            addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1f))
         }
 
-        // Row 1: [カーソル←] [た] [な] [は] [変換]
+        // Row 1: [←] [た] [な] [は] [→]
         val row1 = createRow(rowHeight).apply {
-            addView(createKey(KeySpec.Action(KeyboardAction.MoveCursor(-1), "◀"), 1.0f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.TA), 1.2f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.NA), 1.2f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.HA), 1.2f))
-            addView(createKey(KeySpec.Action(KeyboardAction.Convert, "変換"), 1.0f))
+            addView(createKey(KeySpec.Action(KeyboardAction.MoveCursor(-1), "←"), 1f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.TA), 1f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.NA), 1f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.HA), 1f))
+            addView(createKey(KeySpec.Action(KeyboardAction.MoveCursor(1), "→"), 1f))
         }
 
-        // Row 2: [カーソル→] [ま] [や] [ら] [空白]
+        // Row 2: [123 / 入力中はカナ] [ま] [や] [ら] [空白 / 入力中は変換]
         val row2 = createRow(rowHeight).apply {
-            addView(createKey(KeySpec.Action(KeyboardAction.MoveCursor(1), "▶"), 1.0f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.MA), 1.2f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.YA), 1.2f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.RA), 1.2f))
-            addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 1.0f))
+            val numberKey = createKey(KeyboardLayoutData.kanaNumberKey(isComposing), 1f)
+            kanaNumberKeyView = numberKey
+            addView(numberKey)
+            addView(createKey(KeySpec.Kana(KanaKeyType.MA), 1f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.YA), 1f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.RA), 1f))
+            val spaceKey = createKey(KeyboardLayoutData.kanaSpaceKey(isComposing), 1f)
+            kanaSpaceKeyView = spaceKey
+            addView(spaceKey)
         }
 
-        // Row 3: [数字切替（長押しで記号面）] [記号] [わ] [小゛゜] [Enter]
+        // Row 3: [あA] [小゛゜] [わ] [、。] [Enter]
         val row3 = createRow(rowHeight).apply {
-            addView(
-                createKey(
-                    KeySpec.ModeSwitch(
-                        label = "123",
-                        targetMode = KeyboardMode.NUMERIC,
-                        longPressTarget = KeyboardMode.SYMBOL,
-                        longPressLabel = "記号",
-                    ),
-                    1.0f,
-                ),
-            )
-            addView(createKey(KeySpec.Action(KeyboardAction.TransformKana, "小゛゜"), 1.2f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.WA), 1.2f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.PUNCT), 1.2f))
-            val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1.0f)
+            addView(createKey(KeySpec.ModeSwitch("あA", KeyboardMode.QWERTY), 1f))
+            addView(createKey(KeySpec.Action(KeyboardAction.TransformKana, "小゛゜"), 1f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.WA), 1f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.PUNCT), 1f))
+            val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1f)
             enterKeyViews.add(enterKey)
             addView(enterKey)
         }
@@ -299,7 +320,7 @@ class KeyboardPanel(
     }
 
     /**
-     * 英語QWERTYレイアウトを構築する（4行構成）。
+     * 英語QWERTYレイアウトを構築する（数字行を含む5行）。行の並びは[KeyboardLayoutData.QWERTY_ROWS]に従う。
      */
     private fun buildQwertyLayout(): LinearLayout {
         val container = LinearLayout(context).apply {
@@ -307,71 +328,58 @@ class KeyboardPanel(
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         }
 
-        val rowHeight = (48f * density).toInt()
+        val rowHeight = rowHeightPx(preferences.qwertyRowHeightDp)
+        val (digits, upper, middle, lower) = KeyboardLayoutData.QWERTY_ROWS
 
-        // Row 0: q w e r t y u i o p
-        val row0Keys = listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p")
-        val row0 = createRow(rowHeight)
-        row0Keys.forEach { char ->
-            val key = createKey(qwertyLetterSpec(char), 1.0f)
-            qwertyKeyViews.add(key)
-            row0.addView(key)
+        // Row 0〜2: 数字、q〜p、a〜l と '（各10キー）
+        listOf(digits, upper, middle).forEach { chars ->
+            val row = createRow(rowHeight)
+            chars.forEach { char -> row.addView(createQwertyKey(char)) }
+            container.addView(row)
         }
 
-        // Row 1: a s d f g h j k l (左右に0.5ウェイトの余白)
-        val row1Keys = listOf("a", "s", "d", "f", "g", "h", "j", "k", "l")
-        val row1 = createRow(rowHeight)
-        row1.addView(createSpacer(0.5f))
-        row1Keys.forEach { char ->
-            val key = createKey(qwertyLetterSpec(char), 1.0f)
-            qwertyKeyViews.add(key)
-            row1.addView(key)
-        }
-        row1.addView(createSpacer(0.5f))
-
-        // Row 2: [Shift] z x c v b n m [Delete]
-        val row2Keys = listOf("z", "x", "c", "v", "b", "n", "m")
-        val row2 = createRow(rowHeight)
-        val shiftKey = createKey(KeySpec.Shift("⇧"), 1.5f)
-        shiftKeyViews.add(shiftKey)
-        row2.addView(shiftKey)
-
-        row2Keys.forEach { char ->
-            val key = createKey(qwertyLetterSpec(char), 1.0f)
-            qwertyKeyViews.add(key)
-            row2.addView(key)
-        }
-
-        val delKey = createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.5f)
-        row2.addView(delKey)
-
-        // Row 3: [かな] [数字] [記号] [,] [Space] [.] [Enter]
-        // かな配列を経由せずに数字・記号へ切り替えられるよう、切替先ごとにキーを分ける
+        // Row 3: [123（長押しで記号面）] z x c v b n m [削除]
         val row3 = createRow(rowHeight)
-        val kanaKey = createKey(KeySpec.ModeSwitch("あ", KeyboardMode.KANA), 1.1f)
-        kanaSwitchKeyViews.add(kanaKey)
-        row3.addView(kanaKey)
-        row3.addView(createKey(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), 1.1f))
-        row3.addView(createKey(KeySpec.ModeSwitch("記号", KeyboardMode.SYMBOL), 1.1f))
-
-        val commaKey = createKey(KeySpec.SimpleText(","), 0.9f)
-        row3.addView(commaKey)
-
-        val spaceKey = createKey(KeySpec.Action(KeyboardAction.Space, "Space"), 2.6f)
-        row3.addView(spaceKey)
-
-        val periodKey = createKey(KeySpec.SimpleText("."), 0.9f)
-        row3.addView(periodKey)
-
-        val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1.8f)
-        enterKeyViews.add(enterKey)
-        row3.addView(enterKey)
-
-        container.addView(row0)
-        container.addView(row1)
-        container.addView(row2)
+        row3.addView(
+            createKey(
+                KeySpec.ModeSwitch(
+                    label = "123",
+                    targetMode = KeyboardMode.NUMERIC,
+                    longPressTarget = KeyboardMode.SYMBOL,
+                    longPressLabel = "記号",
+                ),
+                1.5f,
+            ),
+        )
+        lower.forEach { char -> row3.addView(createQwertyKey(char)) }
+        row3.addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.5f))
         container.addView(row3)
+
+        // Row 4: [あ] [Shift] [,] [Space] [.] [←] [→] [Enter]
+        val row4 = createRow(rowHeight)
+        val kanaKey = createKey(KeySpec.ModeSwitch("あ", KeyboardMode.KANA), 1.5f)
+        kanaSwitchKeyViews.add(kanaKey)
+        row4.addView(kanaKey)
+        val shiftKey = createKey(KeySpec.Shift("⇧"), 1f)
+        shiftKeyViews.add(shiftKey)
+        row4.addView(shiftKey)
+        row4.addView(createKey(KeySpec.SimpleText(","), 1f))
+        row4.addView(createKey(KeySpec.Action(KeyboardAction.Space, "space"), 2f))
+        row4.addView(createKey(KeySpec.SimpleText("."), 1f))
+        row4.addView(createKey(KeySpec.Action(KeyboardAction.MoveCursor(-1), "←"), 1f))
+        row4.addView(createKey(KeySpec.Action(KeyboardAction.MoveCursor(1), "→"), 1f))
+        val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1.5f)
+        enterKeyViews.add(enterKey)
+        row4.addView(enterKey)
+        container.addView(row4)
         return container
+    }
+
+    /** QWERTYの文字キーを一つ作り、Shift表示の同期対象へ登録する。 */
+    private fun createQwertyKey(char: Char): KeyView {
+        val key = createKey(qwertyLetterSpec(char.toString()), 1f)
+        qwertyKeyViews.add(key)
+        return key
     }
 
     /**
@@ -383,7 +391,7 @@ class KeyboardPanel(
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         }
 
-        val rowHeight = (52f * density).toInt()
+        val rowHeight = rowHeightPx(preferences.rowHeightDp)
 
         // Row 0: [1] [2] [3] [/] [削除]
         val row0 = createRow(rowHeight).apply {
@@ -443,7 +451,7 @@ class KeyboardPanel(
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         }
 
-        val rowHeight = (48f * density).toInt()
+        val rowHeight = rowHeightPx(preferences.rowHeightDp)
         val pages = KeyboardLayoutData.SYMBOL_PAGES
 
         pages.forEachIndexed { index, page ->
@@ -508,12 +516,12 @@ class KeyboardPanel(
     private fun createRow(heightPx: Int): LinearLayout {
         return LinearLayout(context).apply {
             orientation = HORIZONTAL
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, heightPx).apply {
-                val marginV = (1.5f * density).toInt()
-                setMargins(0, marginV, 0, marginV)
-            }
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, heightPx)
         }
     }
+
+    /** dpの行の高さをpxへ直す。タップ領域の下限48dpを下回らないようにする。 */
+    private fun rowHeightPx(heightDp: Float): Int = (maxOf(heightDp, MIN_TOUCH_DP) * density).toInt()
 
     /**
      * キー定義（KeySpec）とウェイトからKeyViewを生成し、共通設定とイベントコールバックを結線する。
@@ -522,11 +530,9 @@ class KeyboardPanel(
      */
     private fun createKey(spec: KeySpec, weight: Float): KeyView {
         val keyView = KeyView(context).apply {
-            layoutParams = LayoutParams(0, LayoutParams.MATCH_PARENT, weight).apply {
-                val marginH = (1.5f * density).toInt()
-                setMargins(marginH, 0, marginH, 0)
-            }
-            minimumHeight = (48f * density).toInt()
+            // 余白を付けず、見た目の隙間はKeyViewが内側へ縮めて描く。隙間を押しても隣のキーが反応する。
+            layoutParams = LayoutParams(0, LayoutParams.MATCH_PARENT, weight)
+            minimumHeight = (MIN_TOUCH_DP * density).toInt()
             setKeySpec(
                 spec = spec,
                 onAction = { dispatchAction(it) },
@@ -541,23 +547,25 @@ class KeyboardPanel(
                 },
                 onShiftToggle = { toggleShift() },
                 onPageSwitch = { showNextSymbolPage() },
+                onPreview = { key, text ->
+                    if (text == null || isPasswordField || !preferences.keyPreview) keyPreview.hide() else keyPreview.show(key, text)
+                },
+                onDeleteDrag = { key, state ->
+                    // 文字数は閾値を超えたときだけ問い合わせ、ドラッグ中の毎回の問い合わせを避ける
+                    val length = if (state == DeleteDragState.ARMED) lineDeleteLength() else null
+                    deleteDragHint.show(key, state, length)
+                },
             )
         }
+        keyView.applyPreferences(preferences)
         allKeyViews.add(keyView)
         return keyView
     }
 
-    /**
-     * 指定ウェイトを持つ透明なスペーサーViewを生成する。
-     * QWERTYの2行目などキー数が少ない行の左右に適切な空白を配置し、キー配置のセンタリングと押しやすさを整える役割を担う。
-     */
-    private fun createSpacer(weight: Float): View {
-        return View(context).apply {
-            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, weight)
-        }
-    }
-
     companion object {
         private const val DOUBLE_TAP_TIMEOUT_MS = 350L
+
+        /** タップ領域の高さの下限（dp）。 */
+        private const val MIN_TOUCH_DP = 48f
     }
 }

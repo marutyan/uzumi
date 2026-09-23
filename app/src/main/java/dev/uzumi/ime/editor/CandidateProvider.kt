@@ -32,6 +32,8 @@ data class LiveCandidateState(
     val canFocusPrevious: Boolean,
     // 対象が末尾入力位置のsegmentか。falseなら過去segmentを訂正中。
     val focusAtInput: Boolean,
+    // 対象segmentの読み。過去segmentを訂正中に、どの文節を直しているかを候補バーへ示すために使う。
+    val focusedReading: String? = null,
 )
 
 /**

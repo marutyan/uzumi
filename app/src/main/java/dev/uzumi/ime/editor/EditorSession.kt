@@ -96,6 +96,15 @@ class EditorSession(
     val isLiveMode: Boolean
         get() = liveCore != null
 
+    /**
+     * 未確定の読み（ライブ変換では変換中の表示）があるか。キーボードが「カナ」「変換」へ切り替えるために使う。
+     */
+    val hasComposition: Boolean
+        get() = active && (liveCore?.display?.isNotEmpty() ?: !buffer.isEmpty)
+
+    // 削除キーの左ドラッグで消した文字列。「元に戻す」で使い、ほかの操作や一致しない周辺文字列で捨てる。
+    private var lineDeletion: LineDeletion? = null
+
     /** 応答を待っている変換要求。UIが時間超過を判定するために使う。 */
     val pendingConversionRequest: ConversionRequest?
         get() = pendingConversion
@@ -158,6 +167,96 @@ class EditorSession(
             return false
         }
         return deleteOutsideComposition()
+    }
+
+    /**
+     * 削除キーの左ドラッグで消える文字数（書記素）を返す。入力中なら未確定の表示全体、それ以外はカーソルから行頭まで。
+     * 範囲選択中や周辺文字列を読めない場合はnull。
+     */
+    fun lineDeleteLength(): Int? {
+        if (!active) return null
+        if (hasComposition) return GraphemeClusters.split(ownedDisplay).size
+        if (selectionStart != null && selectionStart != selectionEnd) return null
+        val before = connection.textBeforeCursor(LINE_DELETE_MAX_CHARS)?.toString() ?: return null
+        return GraphemeClusters.split(lineDeleteTarget(before)).size
+    }
+
+    /**
+     * カーソルから同じ行の行頭までを一度に消す（Simejiの削除キーの左ドラッグ）。入力中なら未確定の読みだけを消す。
+     * 行頭にいる場合は直前の改行一つを消す。消した文字列は、機密欄・学習禁止欄を除いて「元に戻す」のために覚える。
+     */
+    fun deleteToLineStart(): Boolean {
+        lineDeletion = null
+        if (!active) return false
+        if (hasComposition) {
+            val reading = liveCore?.segments?.joinToString("") { it.reading } ?: buffer.reading
+            if (!clearComposition()) return false
+            rememberLineDeletion(reading, fromComposition = true)
+            return true
+        }
+        if (selectionStart != null && selectionEnd != null && selectionStart != selectionEnd) {
+            return deleteOutsideComposition()
+        }
+        val before = connection.textBeforeCursor(LINE_DELETE_MAX_CHARS)?.toString() ?: return false
+        val target = lineDeleteTarget(before)
+        if (target.isEmpty()) return false
+        if (!connection.deleteSurroundingText(target.length, 0)) return false
+        // hostの選択通知より先に次の操作が来ても、消した後のカーソル位置を使う
+        selectionEnd?.let { end -> (end - target.length).coerceAtLeast(0).let { selectionStart = it; selectionEnd = it } }
+        rememberLineDeletion(target, fromComposition = false)
+        return true
+    }
+
+    /** 左ドラッグで消した文字列を戻せるか。候補バーの「元に戻す」の表示に使う。 */
+    val canUndoLineDelete: Boolean
+        get() = active && lineDeletion != null
+
+    /**
+     * 左ドラッグで消した文字列を戻す。カーソルの前後の文字列が消した直後と同じで、範囲選択も入力中の読みも無い場合だけ戻す。
+     * 別の編集が入っていれば何もせず記録を捨て、利用者の別の文字列を壊さない。
+     */
+    fun undoLineDelete(): Boolean {
+        val record = lineDeletion ?: return false
+        lineDeletion = null
+        if (!active || hasComposition) return false
+        if (selectionStart != null && selectionStart != selectionEnd) return false
+        val before = connection.textBeforeCursor(LINE_DELETE_CONTEXT_CHARS)?.toString() ?: return false
+        val after = connection.textAfterCursor(LINE_DELETE_CONTEXT_CHARS)?.toString() ?: return false
+        if (before != record.before || after != record.after) return false
+        if (record.fromComposition) return inputText(record.removed)
+        val accepted = connection.commitText(record.removed, 1)
+        if (accepted) updateExternalSelectionAfterCommit(record.removed)
+        return accepted
+    }
+
+    /** 左ドラッグの「元に戻す」の記録を捨てる。ほかの操作をしたときに呼ぶ。 */
+    fun forgetLineDelete() {
+        lineDeletion = null
+    }
+
+    /** 消した文字列と、そのときのカーソルの前後の文字列を覚える。機密欄・学習禁止欄では覚えない。 */
+    private fun rememberLineDeletion(removed: String, fromComposition: Boolean) {
+        if (policy.isSensitive || removed.isEmpty()) return
+        val before = connection.textBeforeCursor(LINE_DELETE_CONTEXT_CHARS)?.toString() ?: return
+        val after = connection.textAfterCursor(LINE_DELETE_CONTEXT_CHARS)?.toString() ?: return
+        lineDeletion = LineDeletion(removed, before, after, fromComposition)
+    }
+
+    /** Editor上の未確定の表示を消し、内部のcompositionも捨てる。書込みに失敗したら接続を閉じる。 */
+    private fun clearComposition(): Boolean {
+        // 消した後のカーソルはcompositionの先頭になる
+        val start = compositionStart
+        if (!connection.setComposingText("", 1)) {
+            failClosed()
+            return false
+        }
+        discardCompositionWithoutEditorCall()
+        connection.finishComposingText()
+        if (start != null) {
+            selectionStart = start
+            selectionEnd = start
+        }
+        return true
     }
 
     /** compositionが無いときの削除。選択範囲、またはカーソル直前の一書記素を消す。 */
@@ -336,6 +435,24 @@ class EditorSession(
         return false
     }
 
+    /**
+     * 読みをカタカナにする。ライブ変換では対象の文節を、そのカタカナ表記の候補へ切り替える（候補に無ければ何もしない）。
+     * 明示変換では、変換結果を表示していない読みをカタカナ表記へ置き換える。
+     */
+    fun toKatakana(): Boolean {
+        if (!active) return false
+        val core = liveCore
+        if (core != null) {
+            val focused = core.focusedSegment ?: return false
+            val katakana = BasicCandidateProvider.toKatakana(focused.reading)
+            if (focused.surface == katakana) return true
+            val choice = core.candidateBar()?.choices?.firstOrNull { it.value == katakana } ?: return false
+            return selectLiveCandidate(choice)
+        }
+        if (buffer.isEmpty || pendingConversion != null || currentConversion() != null) return false
+        return applyCandidate(BasicCandidateProvider.toKatakana(buffer.reading))
+    }
+
     /** カーソル直前のかなを小文字・濁点・半濁点へ循環変換する。 */
     fun transformKana(): Boolean {
         if (!active || policy.isTypeNull) return false
@@ -483,6 +600,7 @@ class EditorSession(
     fun close() {
         if (!active) return
         active = false
+        lineDeletion = null
         buffer.clear()
         liveCore?.finishField()
         markCompositionChanged()
@@ -505,6 +623,7 @@ class EditorSession(
             canUndo = core.canUndo,
             canFocusPrevious = segments.take(focusedIndex.coerceAtLeast(0)).any(::isFocusTarget),
             focusAtInput = core.isFocusAtInput,
+            focusedReading = focused?.reading,
         )
     }
 
@@ -906,6 +1025,12 @@ class EditorSession(
     }
 
     private companion object {
+        /** 左ドラッグで行頭を探すときに読む、カーソル前の最大文字数。これより長い行はこの長さだけ消す。 */
+        const val LINE_DELETE_MAX_CHARS = 1_000
+
+        /** 「元に戻す」の前に一致を確かめる、カーソルの前後の文字数。 */
+        const val LINE_DELETE_CONTEXT_CHARS = 32
+
         /**
          * 遅延通知の照合に残す過去composition数の上限。ライブ変換では一打鍵で読みの表示と変換結果の表示の
          * 2回（カーソルが末尾以外なら位置の指定を加えて最大4回）書き込むため、明示変換で使っていた8では
@@ -950,4 +1075,24 @@ private data class CompositionGeometry(
         return candidatesEnd - candidatesStart == displayLength &&
             (start == null || start == candidatesStart)
     }
+}
+
+/**
+ * 削除キーの左ドラッグで消した文字列と、消した直後のカーソルの前後の文字列。「元に戻す」の前の照合に使う。
+ */
+private data class LineDeletion(
+    val removed: String,
+    val before: String,
+    val after: String,
+    // 入力中の読みを消した場合はtrue。戻すときは読みを入力し直す。
+    val fromComposition: Boolean,
+)
+
+/**
+ * カーソル前の文字列[before]から、左ドラッグで消す範囲を返す。同じ行の行頭までとし、行頭にいる場合は直前の改行一つとする。
+ */
+internal fun lineDeleteTarget(before: String): String {
+    if (before.isEmpty()) return ""
+    if (before.endsWith("\n")) return "\n"
+    return before.substring(before.lastIndexOf('\n') + 1)
 }

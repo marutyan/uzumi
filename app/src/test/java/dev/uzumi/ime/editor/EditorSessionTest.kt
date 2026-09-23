@@ -635,6 +635,8 @@ class EditorSessionTest {
         val state = session.liveCandidateState()!!
         assertEquals("天気が", state.currentValue)
         assertFalse(state.focusAtInput)
+        // 候補バーに、どの文節を直しているかを読みで示す
+        assertEquals("てんきが", state.focusedReading)
         assertEquals(DisplaySpan(spans.last()!!.segmentId, 3, 6, spans.last()!!.state, true, true), spans.last())
 
         assertTrue(session.selectLiveCandidate(state.choices.first { it.value == "転機が" }))
@@ -800,6 +802,129 @@ class EditorSessionTest {
         assertTrue(session.commitComposition())
         assertEquals(listOf("Uzumi"), connection.committedTexts)
         assertTrue(client.committedAll.isEmpty())
+    }
+
+    /** 12キーの「カナ」は、変換前の読みをカタカナにし、入力中の状態をキーボードへ伝えられる。 */
+    @Test
+    fun katakanaKeyReplacesReadingAndCompositionStateIsReported() {
+        val connection = FakeEditorConnection()
+        val session = EditorSession(connection, normalPolicy())
+        assertFalse(session.hasComposition)
+        assertFalse(session.toKatakana())
+
+        assertTrue(session.inputText("かな"))
+        assertTrue(session.hasComposition)
+        assertTrue(session.toKatakana())
+        assertEquals("カナ", session.compositionSnapshot().display)
+        assertTrue(session.commitComposition())
+        assertFalse(session.hasComposition)
+    }
+
+    /** ライブ変換の「カナ」は、カタカナ表記の候補が無い文節では表示を変えない。 */
+    @Test
+    fun liveKatakanaKeyKeepsDisplayWithoutKatakanaCandidate() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        assertFalse(session.hasComposition)
+        typeLive(session, client, "きょうは")
+        assertTrue(session.hasComposition)
+
+        assertFalse(session.toKatakana())
+        assertEquals("今日は", connection.text)
+    }
+
+    /** 左ドラッグで消す範囲は同じ行の行頭までで、行頭では直前の改行一つになる。 */
+    @Test
+    fun lineDeleteTargetStopsAtLineStart() {
+        assertEquals("持ち物は水筒", lineDeleteTarget("明日は駅前\n持ち物は水筒"))
+        assertEquals("\n", lineDeleteTarget("明日は駅前\n"))
+        assertEquals("明日は駅前", lineDeleteTarget("明日は駅前"))
+        assertEquals("", lineDeleteTarget(""))
+    }
+
+    /** 確定済みの行を消して元に戻せる。前後の文字列が変わっていれば戻さない。 */
+    @Test
+    fun deleteToLineStartAndUndoOnlyWhenSurroundingTextMatches() {
+        val text = "明日は駅前\n持ち物は水筒"
+        val connection = ModelEditorConnection(text = text, selectionStart = text.length, selectionEnd = text.length)
+        val session = EditorSession(connection, normalPolicy(), initialSelectionStart = text.length, initialSelectionEnd = text.length)
+        assertEquals(6, session.lineDeleteLength())
+
+        assertTrue(session.deleteToLineStart())
+        assertEquals("明日は駅前\n", connection.text)
+        assertTrue(session.canUndoLineDelete)
+        assertTrue(session.undoLineDelete())
+        assertEquals(text, connection.text)
+        assertFalse(session.canUndoLineDelete)
+
+        // 消した後に別の文字を入れた場合は、周りの文字列が一致しないため戻さない
+        assertTrue(session.deleteToLineStart())
+        connection.commitText("雨", 1)
+        assertFalse(session.undoLineDelete())
+        assertEquals("明日は駅前\n雨", connection.text)
+    }
+
+    /** 機密欄では消した文字列を覚えず、元に戻す入口を出さない。 */
+    @Test
+    fun deleteToLineStartKeepsNothingInSensitiveField() {
+        val connection = ModelEditorConnection(text = "secret", selectionStart = 6, selectionEnd = 6)
+        val policy = normalPolicy().copy(isPassword = true)
+        val session = EditorSession(connection, policy, initialSelectionStart = 6, initialSelectionEnd = 6)
+
+        assertTrue(session.deleteToLineStart())
+        assertEquals("", connection.text)
+        assertFalse(session.canUndoLineDelete)
+        assertFalse(session.undoLineDelete())
+    }
+
+    /** 設定で学習を止めても欄は機密ではないため、変換は学習禁止で送り、削除の「元に戻す」は使える。 */
+    @Test
+    fun learningDisabledBySettingIsNotTreatedAsSensitive() {
+        val policy = normalPolicy().copy(learningDisabledBySetting = true)
+        assertTrue(policy.suppressLearning)
+        assertFalse(policy.isSensitive)
+        val connection = ModelEditorConnection(text = "明日", selectionStart = 2, selectionEnd = 2)
+        val session = EditorSession(connection, policy, initialSelectionStart = 2, initialSelectionEnd = 2)
+        assertTrue(session.deleteToLineStart())
+        assertTrue(session.canUndoLineDelete)
+
+        val client = FakeLiveClient()
+        val live = liveSession(ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0), client, policy)
+        typeLive(live, client, "きょうは")
+        assertTrue(client.requests.none { it.second.learningAllowed })
+    }
+
+    /** 入力中の左ドラッグは未確定の読みだけを消し、元に戻すと読みを入力し直す。 */
+    @Test
+    fun deleteToLineStartClearsOnlyCompositionAndUndoRetypesReading() {
+        val connection = ModelEditorConnection(text = "明日\n", selectionStart = 3, selectionEnd = 3)
+        val session = EditorSession(connection, normalPolicy(), initialSelectionStart = 3, initialSelectionEnd = 3)
+        assertTrue(session.inputText("かさ"))
+        assertEquals("明日\nかさ", connection.text)
+        assertEquals(2, session.lineDeleteLength())
+
+        assertTrue(session.deleteToLineStart())
+        assertEquals("明日\n", connection.text)
+        assertFalse(session.hasComposition)
+        assertTrue(session.undoLineDelete())
+        assertEquals("明日\nかさ", connection.text)
+        assertTrue(session.hasComposition)
+    }
+
+    /** ライブ変換の入力中も、変換中の表示だけを消す。 */
+    @Test
+    fun liveDeleteToLineStartClearsConvertedComposition() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        typeLive(session, client, "きょうは")
+        assertEquals("今日は", connection.text)
+
+        assertTrue(session.deleteToLineStart())
+        assertEquals("", connection.text)
+        assertFalse(session.hasComposition)
+        assertTrue(session.canUndoLineDelete)
     }
 
     /** ライブ変換の編集セッションを作る。変換要求はclientへ記録され、テストが結果を返す。 */

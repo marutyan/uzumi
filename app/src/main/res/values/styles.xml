@@ -8,4 +8,8 @@
         <item name="android:navigationBarColor">#F4F5F7</item>
         <item name="android:windowLightNavigationBar">true</item>
     </style>
+    <!-- 設定画面は端末のライト／ダーク設定に従う。キーボードと同じく端末の見た目に合わせるため。 -->
+    <style name="Theme.Uzumi.Settings" parent="android:style/Theme.DeviceDefault.DayNight">
+        <item name="android:colorAccent">@color/kb_accent</item>
+    </style>
 </resources>

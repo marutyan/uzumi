@@ -1,19 +1,19 @@
 package dev.uzumi.ime
 
-import android.graphics.Typeface
+import android.content.Intent
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.BackgroundColorSpan
+import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
-import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
-import android.widget.TextView
 import dev.uzumi.ime.conversion.ConversionOutcome
 import dev.uzumi.ime.conversion.ConversionWorker
 import dev.uzumi.ime.conversion.EngineHealth
@@ -24,8 +24,11 @@ import dev.uzumi.ime.dictionary.UserDictionaries
 import dev.uzumi.ime.editor.AndroidInputConnectionPort
 import dev.uzumi.ime.editor.EditorSession
 import dev.uzumi.ime.editor.InputFieldPolicy
+import dev.uzumi.ime.keyboard.CandidateBarViews
+import dev.uzumi.ime.keyboard.CandidateGridView
 import dev.uzumi.ime.keyboard.KeyboardAction
 import dev.uzumi.ime.keyboard.KeyboardPanel
+import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.learning.LearningStores
 import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.DisplaySpan
@@ -40,12 +43,14 @@ class UzumiInputMethodService : InputMethodService() {
     private var session: EditorSession? = null
     private var keyboardPanel: KeyboardPanel? = null
     private var candidateRow: LinearLayout? = null
-    // ライブ変換の候補バーの両脇に置く、segmentの移動・末尾復帰・取り消しのボタン。明示変換では隠す。
-    private var liveControls: List<Button> = emptyList()
-    private var previousSegmentButton: Button? = null
-    private var nextSegmentButton: Button? = null
-    private var returnToInputButton: Button? = null
-    private var undoButton: Button? = null
+    // 候補バーの左端（元に戻す・読みの札）と右端（末尾へ戻る・候補一覧の開閉）の置き場。
+    private var barLeading: LinearLayout? = null
+    private var barTrailing: LinearLayout? = null
+    private var barViews: CandidateBarViews? = null
+    // ∨で開く候補一覧。キーボードの面を覆って表示する。
+    private var candidateGrid: CandidateGridView? = null
+    // 入力Viewを作ったときのキーボード設定。設定画面で変わっていれば、次に表示するときに作り直す。
+    private var builtPreferences: KeyboardPreferences? = null
     private var currentPolicy: InputFieldPolicy? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var conversionExecutor: ExecutorService? = null
@@ -82,6 +87,8 @@ class UzumiInputMethodService : InputMethodService() {
         )
         conversionExecutor = executor
         conversionWorker = worker
+        // 学習の保存ファイルを別threadで先に読む。変換threadはMozcの読込みで塞がるため、そこへは積まない
+        Thread({ LearningStores.get(applicationContext) }, "uzumi-learning-preload").start()
         worker.start()
     }
 
@@ -95,54 +102,61 @@ class UzumiInputMethodService : InputMethodService() {
         super.onDestroy()
     }
 
-    /** 候補行とキーボード本体を入力Viewとして構築する。 */
+    /** 候補バーとキーボード本体を入力Viewとして構築する。配色は端末のライト／ダーク設定に従う。 */
     override fun onCreateInputView(): View {
         val density = resources.displayMetrics.density
+        val views = CandidateBarViews(this)
+        barViews = views
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xFFF4F5F7.toInt())
+            setBackgroundColor(views.colors.keyboardBackground)
         }
         val candidates = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            minimumHeight = (48 * density).toInt()
-            setPadding((8 * density).toInt(), 0, (8 * density).toInt(), 0)
+            gravity = Gravity.CENTER_VERTICAL
         }
         candidateRow = candidates
-        val previous = controlButton("◀", R.string.live_previous_segment) { it.moveLiveFocus(-1) }
-        val next = controlButton("▶", R.string.live_next_segment) { it.moveLiveFocus(1) }
-        val returnToInput = controlButton(getString(R.string.live_return_label), R.string.live_return_to_input) {
-            it.returnLiveFocusToInput()
+        val leading = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
-        val undo = controlButton(getString(R.string.live_undo_label), R.string.live_undo) { it.undoLive() }
-        previousSegmentButton = previous
-        nextSegmentButton = next
-        returnToInputButton = returnToInput
-        undoButton = undo
-        liveControls = listOf(previous, next, returnToInput, undo)
+        val trailing = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        barLeading = leading
+        barTrailing = trailing
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(views.colors.bar)
         }
-        bar.addView(previous)
+        val match = LinearLayout.LayoutParams.MATCH_PARENT
+        val wrap = LinearLayout.LayoutParams.WRAP_CONTENT
+        bar.addView(leading, LinearLayout.LayoutParams(wrap, match))
         bar.addView(HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
-            addView(candidates)
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
-        bar.addView(next)
-        bar.addView(returnToInput)
-        bar.addView(undo)
-        root.addView(bar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (48 * density).toInt()))
+            addView(candidates, FrameLayout.LayoutParams(wrap, match))
+        }, LinearLayout.LayoutParams(0, match, 1f))
+        bar.addView(trailing, LinearLayout.LayoutParams(wrap, match))
+        root.addView(bar, LinearLayout.LayoutParams(match, (CandidateBarViews.BAR_HEIGHT_DP * density).toInt()))
 
-        keyboardPanel = KeyboardPanel(this, ::handleKeyboardAction).also { panel ->
-            root.addView(
-                panel,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ),
-            )
+        // 候補一覧はキーボードの面と同じ場所に重ね、開いている間はキーを覆う
+        val keyboardArea = FrameLayout(this)
+        val preferences = UzumiSettings.keyboardPreferences(this)
+        builtPreferences = preferences
+        keyboardPanel = KeyboardPanel(
+            this,
+            ::handleKeyboardAction,
+            lineDeleteLength = { session?.lineDeleteLength() },
+            preferences = preferences,
+        ).also { panel ->
+            keyboardArea.addView(panel, FrameLayout.LayoutParams(match, wrap))
         }
+        candidateGrid = CandidateGridView(this).also { grid ->
+            keyboardArea.addView(grid, FrameLayout.LayoutParams(match, match))
+        }
+        root.addView(keyboardArea, LinearLayout.LayoutParams(match, wrap))
         applyPolicyToKeyboard()
         refreshCandidates()
         applyNavigationInsets(root)
@@ -168,7 +182,10 @@ class UzumiInputMethodService : InputMethodService() {
         refreshCandidates()
         val info = attribute ?: return
         val connection = currentInputConnection ?: return
+        // 設定で学習を止めている場合は、欄の種類によらずMozcの学習も止める（学習の設定はLearningStoreだけが持つ）。
+        // 起動直後で学習キャッシュをまだ読み終えていない欄は、UIスレッドで待たずに学習しない側へ倒す
         val policy = InputFieldPolicy.fromEditorInfo(info)
+            .copy(learningDisabledBySetting = LearningStores.peek()?.isEnabled != true)
         currentPolicy = policy
         // ライブ変換の設定は入力開始ごとに読み、設定画面での変更を次の入力欄から反映する。
         val live = policy.usesLiveConversion(UzumiSettings.isLiveConversionEnabled(this))
@@ -190,6 +207,10 @@ class UzumiInputMethodService : InputMethodService() {
     /** 表示済みキーボードへ現在欄の種別と候補を反映する。 */
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        // 設定画面で高さや反応を変えた後は、新しい設定で入力Viewを作り直す
+        if (builtPreferences != null && builtPreferences != UzumiSettings.keyboardPreferences(this)) {
+            setInputView(onCreateInputView())
+        }
         applyPolicyToKeyboard()
         refreshCandidates()
     }
@@ -240,14 +261,23 @@ class UzumiInputMethodService : InputMethodService() {
     /** キーボード操作を現在の編集セッションへ一度だけ送る。 */
     private fun handleKeyboardAction(action: KeyboardAction) {
         val current = session ?: return
+        // 左ドラッグで消した文字列は、次の操作をした時点で戻せなくする
+        if (action != KeyboardAction.DeleteToLineStart) current.forgetLineDelete()
         when (action) {
             is KeyboardAction.Text -> current.inputText(action.value)
             KeyboardAction.Delete -> current.deleteBackward()
-            is KeyboardAction.MoveCursor -> current.moveCursor(action.delta)
+            // ライブ変換の入力中は、←→で候補バーの対象の文節を前後へ移す（Simejiの変換中の←→に当たる操作）
+            is KeyboardAction.MoveCursor -> if (current.isLiveMode && current.hasComposition) {
+                current.moveLiveFocus(action.delta)
+            } else {
+                current.moveCursor(action.delta)
+            }
             KeyboardAction.Enter -> current.handleEnter()
             KeyboardAction.Space -> current.insertSpace()
             KeyboardAction.Convert -> current.convert()
             KeyboardAction.TransformKana -> current.transformKana()
+            KeyboardAction.ToKatakana -> current.toKatakana()
+            KeyboardAction.DeleteToLineStart -> current.deleteToLineStart()
         }
         scheduleConversionTimeout(current)
         refreshCandidates()
@@ -275,27 +305,6 @@ class UzumiInputMethodService : InputMethodService() {
         }
     }
 
-    /** 候補バーの脇に置く小さな操作ボタンを作る。押すと現在の編集セッションへ操作を一度だけ送る。 */
-    private fun controlButton(label: String, descriptionId: Int, action: (EditorSession) -> Boolean): Button {
-        val density = resources.displayMetrics.density
-        return Button(this).apply {
-            text = label
-            isAllCaps = false
-            minWidth = 0
-            minimumWidth = 0
-            minHeight = 0
-            minimumHeight = 0
-            setPadding((10 * density).toInt(), 0, (10 * density).toInt(), 0)
-            contentDescription = getString(descriptionId)
-            visibility = View.GONE
-            setOnClickListener {
-                val current = session ?: return@setOnClickListener
-                action(current)
-                refreshCandidates()
-            }
-        }
-    }
-
     /** 変換応答が一定時間内に届かなければ要求を取り下げ、読みとかな・カナ候補へ戻す。 */
     private fun scheduleConversionTimeout(current: EditorSession) {
         val request = current.pendingConversionRequest ?: return
@@ -311,108 +320,136 @@ class UzumiInputMethodService : InputMethodService() {
         keyboardPanel?.setActionLabel(policy.actionLabel)
     }
 
-    /** 現在の読みとセッション世代に一致する基本候補だけを表示する。 */
+    /**
+     * 候補バーを今の入力状態に合わせて作り直す。左端に「元に戻す」や訂正中の読み、中央に候補、右端に「末尾」と候補一覧の開閉を置く。
+     * 入力していない間は、設定への入口と案内、キーボードを閉じるボタンを出す。
+     */
     private fun refreshCandidates() {
+        keyboardPanel?.setComposing(session?.hasComposition == true)
         val row = candidateRow ?: return
+        val views = barViews ?: return
+        val leading = barLeading ?: return
+        val trailing = barTrailing ?: return
         row.removeAllViews()
+        leading.removeAllViews()
+        trailing.removeAllViews()
         val current = session
-        if (current?.isLiveMode == true) {
-            refreshLiveCandidates(row, current)
-            return
-        }
-        liveControls.forEach { it.visibility = View.GONE }
-        val snapshot = current?.compositionSnapshot()
-        val options = current?.candidateOptions().orEmpty()
-        if (current == null || snapshot == null || options.isEmpty()) {
-            row.addView(candidateHint(current?.policy))
-            return
-        }
-        if (engineHealth is EngineHealth.Unavailable && !current.policy.suppressSuggestions) {
-            row.addView(candidateStatus(getString(R.string.candidate_status_no_dictionary)))
-        }
-
-        options.forEach { option ->
-            row.addView(Button(this).apply {
-                isAllCaps = false
-                text = if (option.conversionChoice != null) {
-                    option.value
-                } else {
-                    getString(R.string.candidate_button_label, option.value, option.label)
-                }
-                setOnClickListener {
-                    val latest = session
-                    if (latest !== current) return@setOnClickListener
-                    val choice = option.conversionChoice
-                    if (choice != null) {
-                        latest.selectConversionCandidate(choice)
-                        scheduleConversionTimeout(latest)
-                        refreshCandidates()
-                    } else if (latest.compositionSnapshot().reading == snapshot.reading) {
-                        latest.applyCandidate(option.value)
-                        refreshCandidates()
-                    }
-                }
+        if (current?.canUndoLineDelete == true) {
+            leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.line_delete_undo_description), true) {
+                if (session === current) current.undoLineDelete()
+                refreshCandidates()
             })
+        }
+        val entries = if (current?.isLiveMode == true) liveEntries(current, leading, trailing) else explicitEntries(current)
+        val grid = candidateGrid
+        if (entries.isEmpty()) {
+            grid?.hide()
+            if (current?.hasComposition == true) {
+                row.addView(views.hint(hintText(current.policy, current.isLiveMode)))
+            } else {
+                showIdleBar(current, leading, trailing)
+            }
+            return
+        }
+        if (engineHealth is EngineHealth.Unavailable && current?.policy?.suppressSuggestions == false) {
+            row.addView(views.hint(getString(R.string.candidate_status_no_dictionary)))
+        }
+        entries.forEach { entry -> row.addView(views.item(entry.label, entry.selected) { pickCandidate(current, entry) }) }
+        trailing.addView(views.divider())
+        trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
+            if (grid?.isShowing == true) grid.hide() else showCandidateGrid(current, entries)
+            refreshCandidates()
+        })
+        // 一覧を開いたまま候補が変わった場合は、一覧も新しい候補で描き直す
+        if (grid?.isShowing == true) showCandidateGrid(current, entries)
+    }
+
+    /** 候補一覧を開く。候補を選ぶと一覧を閉じる。 */
+    private fun showCandidateGrid(current: EditorSession?, entries: List<CandidateEntry>) {
+        val grid = candidateGrid ?: return
+        grid.show(entries.map { it.label }, entries.indexOfFirst { it.selected }) { index ->
+            grid.hide()
+            pickCandidate(current, entries[index])
+        }
+    }
+
+    /** 候補バーの一項目。押したときの操作を持つ。 */
+    private class CandidateEntry(val label: String, val selected: Boolean, val onPick: () -> Unit)
+
+    /** 候補を選ぶ。表示したときと別の編集セッションになっていれば何もしない。 */
+    private fun pickCandidate(shown: EditorSession?, entry: CandidateEntry) {
+        if (shown == null || session !== shown) return
+        shown.forgetLineDelete()
+        entry.onPick()
+        refreshCandidates()
+    }
+
+    /** 明示変換の候補（変換結果、または読みのかな・カナ）を並べる。 */
+    private fun explicitEntries(current: EditorSession?): List<CandidateEntry> {
+        if (current == null) return emptyList()
+        val snapshot = current.compositionSnapshot()
+        return current.candidateOptions().map { option ->
+            val choice = option.conversionChoice
+            val label = if (choice != null) option.value else getString(R.string.candidate_button_label, option.value, option.label)
+            CandidateEntry(label, selected = choice != null && option.value == snapshot.display) {
+                if (choice != null) {
+                    current.selectConversionCandidate(choice)
+                    scheduleConversionTimeout(current)
+                } else if (current.compositionSnapshot().reading == snapshot.reading) {
+                    current.applyCandidate(option.value)
+                }
+            }
         }
     }
 
     /**
-     * ライブ変換の候補バーを作る。対象segmentの候補を並べ、現在の表記を太字にする。
-     * 左右のボタンで過去segmentへ移り、「末尾」で入力位置へ戻り、「取消」で直前の操作を取り消す。
+     * ライブ変換の候補を並べ、対象segmentの現在の表記を選択中として示す。過去segmentを訂正中は、左端に読みの札、
+     * 右端に「末尾」を出す。直前の操作を取り消せるときは左端に「元に戻す」を出す。
      */
-    private fun refreshLiveCandidates(row: LinearLayout, current: EditorSession) {
-        val state = current.liveCandidateState()
-        val choices = state?.choices.orEmpty()
-        liveControls.forEach { it.visibility = View.VISIBLE }
-        previousSegmentButton?.isEnabled = state?.canFocusPrevious == true
-        nextSegmentButton?.isEnabled = state != null && !state.focusAtInput
-        returnToInputButton?.isEnabled = state != null && !state.focusAtInput
-        undoButton?.isEnabled = state?.canUndo == true
-        if (state == null || choices.isEmpty()) {
-            row.addView(candidateHint(current.policy, live = true))
-            return
-        }
-        if (engineHealth is EngineHealth.Unavailable) {
-            row.addView(candidateStatus(getString(R.string.candidate_status_no_dictionary)))
-        }
-        choices.forEach { choice ->
-            row.addView(Button(this).apply {
-                isAllCaps = false
-                text = choice.value
-                if (choice.value == state.currentValue) setTypeface(typeface, Typeface.BOLD)
-                setOnClickListener {
-                    val latest = session
-                    if (latest !== current) return@setOnClickListener
-                    latest.selectLiveCandidate(choice)
-                    refreshCandidates()
-                }
+    private fun liveEntries(current: EditorSession, leading: LinearLayout, trailing: LinearLayout): List<CandidateEntry> {
+        val views = barViews ?: return emptyList()
+        val state = current.liveCandidateState() ?: return emptyList()
+        if (state.canUndo && !current.canUndoLineDelete) {
+            leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.live_undo), true) {
+                if (session === current) current.undoLive()
+                refreshCandidates()
             })
         }
-    }
-
-    /** 候補の前に置く短い状態表示を作る。 */
-    private fun candidateStatus(message: String): TextView {
-        return TextView(this).apply {
-            text = message
-            textSize = 12f
-            setPadding(0, 0, (8 * resources.displayMetrics.density).toInt(), 0)
-        }
-    }
-
-    /** 候補を出さない理由または候補行の用途を短く表示する。 */
-    private fun candidateHint(policy: InputFieldPolicy?, live: Boolean = false): TextView {
-        return TextView(this).apply {
-            text = when {
-                policy?.isPassword == true -> getString(R.string.candidate_hint_sensitive)
-                policy?.isTypeNull == true -> getString(R.string.candidate_hint_compatibility)
-                engineHealth is EngineHealth.Unavailable -> getString(R.string.candidate_hint_no_dictionary)
-                live && engineHealth is EngineHealth.Ready -> getString(R.string.candidate_hint_live)
-                engineHealth is EngineHealth.Ready -> getString(R.string.candidate_hint_conversion)
-                else -> getString(R.string.candidate_hint_default)
+        if (!state.focusAtInput) {
+            state.focusedReading?.let { reading ->
+                leading.addView(views.chip(reading, getString(R.string.live_focused_reading, reading), false, null))
             }
-            textSize = 14f
-            setTypeface(typeface, Typeface.NORMAL)
+            trailing.addView(views.symbolButton(getString(R.string.live_return_label), getString(R.string.live_return_to_input)) {
+                if (session === current) current.returnLiveFocusToInput()
+                refreshCandidates()
+            })
         }
+        return state.choices.map { choice ->
+            CandidateEntry(choice.value, selected = choice.value == state.currentValue) { current.selectLiveCandidate(choice) }
+        }
+    }
+
+    /** 入力していない間の候補バー。左端に設定、中央に案内、右端にキーボードを閉じるボタンを置く。 */
+    private fun showIdleBar(current: EditorSession?, leading: LinearLayout, trailing: LinearLayout) {
+        val views = barViews ?: return
+        leading.addView(views.symbolButton("⚙", getString(R.string.open_settings)) { openSettings() })
+        candidateRow?.addView(views.hint(hintText(current?.policy, current?.isLiveMode == true)))
+        trailing.addView(views.symbolButton("⌄", getString(R.string.close_keyboard)) { requestHideSelf(0) })
+    }
+
+    /** 設定画面を開く。IMEから開くため新しいtaskで起動する。 */
+    private fun openSettings() {
+        startActivity(Intent(this, SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    /** 候補を出さない理由または候補バーの用途を短く返す。 */
+    private fun hintText(policy: InputFieldPolicy?, live: Boolean): String = when {
+        policy?.isPassword == true -> getString(R.string.candidate_hint_sensitive)
+        policy?.isTypeNull == true -> getString(R.string.candidate_hint_compatibility)
+        engineHealth is EngineHealth.Unavailable -> getString(R.string.candidate_hint_no_dictionary)
+        live && engineHealth is EngineHealth.Ready -> getString(R.string.candidate_hint_live)
+        engineHealth is EngineHealth.Ready -> getString(R.string.candidate_hint_conversion)
+        else -> getString(R.string.candidate_hint_default)
     }
 
     /** 旧接続への書込みを禁止してセッション参照を破棄する。 */

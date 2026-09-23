@@ -152,6 +152,11 @@ object KeyboardLayoutData {
         }
     }
 
+    /**
+     * QWERTYの文字キーの行。1行目は数字、4行目の両脇には切替と削除が入る。Simejiの5行配列に合わせる。
+     */
+    val QWERTY_ROWS: List<String> = listOf("1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm")
+
     // QWERTYの英字キーを長押ししたときに入力する数字・記号。一般的な英語キーボードの配置に倣う。
     private val QWERTY_LONG_PRESS: Map<Char, String> = mapOf(
         'q' to "1", 'w' to "2", 'e' to "3", 'r' to "4", 't' to "5",
@@ -166,6 +171,24 @@ object KeyboardLayoutData {
      * QWERTYの英字キーの長押しで入力する文字を返す。Shift状態によらず同じ文字を返し、対象外ならnullを返す。
      */
     fun getQwertyLongPress(char: Char): String? = QWERTY_LONG_PRESS[char.lowercaseChar()]
+
+    /**
+     * 12キーの3行目左端のキー。入力中は読みをカタカナにする「カナ」、それ以外は数字面への切替とする（Simejiと同じ）。
+     */
+    fun kanaNumberKey(composing: Boolean): KeySpec = if (composing) {
+        KeySpec.Action(KeyboardAction.ToKatakana, "カナ")
+    } else {
+        KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC)
+    }
+
+    /**
+     * 12キーの3行目右端のキー。入力中は「変換」、それ以外は「空白」とする。独立した変換キーを置かないSimejiの並びに合わせる。
+     */
+    fun kanaSpaceKey(composing: Boolean): KeySpec = if (composing) {
+        KeySpec.Action(KeyboardAction.Convert, "変換")
+    } else {
+        KeySpec.Action(KeyboardAction.Space, "空白")
+    }
 
     /**
      * 記号面の一ページ分の配列。

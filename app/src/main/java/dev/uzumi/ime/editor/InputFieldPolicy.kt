@@ -18,9 +18,15 @@ data class InputFieldPolicy(
     val actionLabel: String,
     // URL・メールアドレスの欄か。句読点や自動変換の規則をそのまま当てはめない。
     val isAddressLike: Boolean = false,
+    // 利用者が設定で変換の学習を止めているか。欄の機密性とは別に、学習と履歴の保存だけを止める。
+    val learningDisabledBySetting: Boolean = false,
 ) {
-    /** 機密欄または明示的な学習禁止欄かどうか。 */
+    /** 機密欄、明示的な学習禁止欄、または設定で学習を止めているかどうか。 */
     val suppressLearning: Boolean
+        get() = isPassword || noPersonalizedLearning || learningDisabledBySetting
+
+    /** 入力した文字列を一時的にも覚えるべきでない欄か（password、学習禁止欄）。削除の「元に戻す」の記録に使う。 */
+    val isSensitive: Boolean
         get() = isPassword || noPersonalizedLearning
 
     /** 候補生成を抑止すべき欄かどうか。 */

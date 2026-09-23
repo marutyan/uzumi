@@ -15,6 +15,9 @@ object LearningStores {
     @Volatile
     private var instance: LearningStore? = null
 
+    /** 読み込み済みの学習キャッシュだけを返す。ファイルを読まないので、UIスレッドから待たずに呼べる。 */
+    fun peek(): LearningStore? = instance
+
     /** 学習キャッシュを返す。初回だけ保存ファイルを同期で読むため、UIスレッドで初めて呼ぶ前に別スレッドで開いておく。 */
     fun get(context: Context): LearningStore = instance ?: synchronized(this) {
         val appContext = context.applicationContext
