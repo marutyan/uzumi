@@ -7,6 +7,7 @@ import dev.uzumi.ime.conversion.ConversionResult
 import dev.uzumi.ime.conversion.LiveConversionClient
 import dev.uzumi.ime.conversion.SegmentedLiveConverter
 import dev.uzumi.ime.conversion.liveLearningUnits
+import dev.uzumi.ime.evaluation.ConversionProgress
 import dev.uzumi.ime.evaluation.EvaluationCounter
 import dev.uzumi.ime.evaluation.LiveChangeClassifier
 import dev.uzumi.ime.live.CandidateChoice
@@ -75,6 +76,12 @@ class EditorSession(
     // ライブ変換で最後にEditorへ送ったカーソル位置（composition先頭からのUTF-16 offset）。
     private var liveCursorUtf16 = 0
 
+    // 自動測定の道具が変換の届き終わりを確かめるための記録。最後に送ったライブ変換の要求と、最後に受けた結果のrevision。
+    private var liveRequestedRevision = -1L
+    private var liveResultRevision = -1L
+    // 候補の取り直しを依頼して、まだ結果を受けていないか。
+    private var candidatesOutstanding = false
+
     // 変換エンジンが使えない間のライブ変換の結果。部分範囲ごとに読みとカタカナを候補にする。
     private val kanaFallbackConverter = SegmentedLiveConverter(
         convertRange = { chunk ->
@@ -110,6 +117,15 @@ class EditorSession(
 
     // 削除キーの左ドラッグで消した文字列。「元に戻す」で使い、ほかの操作や一致しない周辺文字列で捨てる。
     private var lineDeletion: LineDeletion? = null
+
+    /** 変換の進み具合（revisionと真偽だけ）。評価用の受信口が、自動測定の待ち合わせのために読む。 */
+    fun conversionProgress(): ConversionProgress = ConversionProgress(
+        revision = liveCore?.revision ?: revision,
+        conversionPending = pendingConversion != null,
+        liveRequestedRevision = liveRequestedRevision,
+        liveResultRevision = liveResultRevision,
+        candidatesOutstanding = candidatesOutstanding,
+    )
 
     /** 応答を待っている変換要求。UIが時間超過を判定するために使う。 */
     val pendingConversionRequest: ConversionRequest?
@@ -675,6 +691,7 @@ class EditorSession(
     fun applyLiveCandidates(result: CandidateResult): Boolean {
         val core = liveCore ?: return false
         if (!active) return false
+        candidatesOutstanding = false
         val update = core.onCandidateResult(result)
         return update.handled && update.rejection == null
     }
@@ -710,6 +727,7 @@ class EditorSession(
     fun applyLiveResult(result: LiveResult): Boolean {
         val core = liveCore ?: return false
         if (!active) return false
+        liveResultRevision = result.identity.revision
         val before = core.segments
         val update = core.onConversionResult(result)
         val rejection = update.rejection
@@ -800,6 +818,7 @@ class EditorSession(
 
     /** 変換要求を送る。エンジンが使えない間は、かな・カナ候補の結果をその場で返す。 */
     private fun dispatchLiveRequest(request: LiveRequest) {
+        liveRequestedRevision = request.identity.revision
         val client = liveClient
         if (client != null && client.isAvailable) {
             client.requestLiveConversion(sessionEpoch, request)
@@ -811,7 +830,9 @@ class EditorSession(
     /** 候補の取り直しを依頼する。エンジンが使えない間は、かな・カナ候補のほかに取り直す候補が無いため送らない。 */
     private fun dispatchCandidateRequest(request: CandidateRequest) {
         val client = liveClient ?: return
-        if (client.isAvailable) client.requestSegmentCandidates(sessionEpoch, request)
+        if (!client.isAvailable) return
+        candidatesOutstanding = true
+        client.requestSegmentCandidates(sessionEpoch, request)
     }
 
     /**

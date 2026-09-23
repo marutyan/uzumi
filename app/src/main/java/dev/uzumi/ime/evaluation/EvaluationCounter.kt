@@ -25,6 +25,12 @@ class EvaluationCounter(
         get() = taskId != null
 
     /**
+     * 数えている課題で、IMEが受け取った押下の数（キー操作数と終端操作数の和）。評価モードでなければ-1。
+     * 自動測定の道具が、送った押下をIMEが処理し終えたかを確かめるために読む。
+     */
+    val recordedPresses: Int
+        get() = if (taskId == null) -1 else counts.keys + counts.terminators
+    /**
      * 課題[taskId]の計数を0から始める。数えている課題があれば捨てる。
      * IDが英数字・`_`・`-`の16文字以内でなければ始めず、IDの欄へ本文が入らないようにする。
      */

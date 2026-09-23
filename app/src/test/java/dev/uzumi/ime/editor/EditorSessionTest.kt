@@ -998,6 +998,35 @@ class EditorSessionTest {
         assertEquals("教派天気が", connection.text)
     }
 
+    /**
+     * 評価用の状態の確認口が読む変換の進み具合。ライブ変換の要求を送ると結果のrevisionが追い付くまで差があり、
+     * 候補の取り直しは結果を受けるまで未処理として残る。自動測定の道具はこれで変換の届き終わりを確かめる。
+     */
+    @Test
+    fun conversionProgressTracksLiveRequestsAndCandidateRefreshes() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        assertEquals(-1L, session.conversionProgress().liveRequestedRevision)
+
+        assertTrue(session.inputText("き"))
+        val waiting = session.conversionProgress()
+        assertEquals(client.requests.last().second.identity.revision, waiting.liveRequestedRevision)
+        assertTrue(waiting.liveResultRevision < waiting.liveRequestedRevision)
+        client.deliverLatest(session)
+        val settled = session.conversionProgress()
+        assertEquals(settled.liveRequestedRevision, settled.liveResultRevision)
+        assertEquals(settled.revision, settled.liveResultRevision)
+        assertFalse(settled.conversionPending)
+
+        typeLive(session, client, "ょうは")
+        assertFalse(session.conversionProgress().candidatesOutstanding)
+        assertTrue(session.requestLiveCandidates())
+        assertTrue(session.conversionProgress().candidatesOutstanding)
+        session.applyLiveCandidates(CandidateResult(client.candidateRequests.last(), listOf("今日は")))
+        assertFalse(session.conversionProgress().candidatesOutstanding)
+    }
+
     /** ライブ変換の入力中は文節を伸縮でき、縮めた範囲を区切りに決めた変換を依頼して表示へ反映する。 */
     @Test
     fun liveResizeRequestsFixedRangeAndShowsResult() {

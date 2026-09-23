@@ -104,7 +104,12 @@ H3は安全性の条件であり、件数の多少ではなく発生の有無で
     4. 計数を終える：`adb shell am broadcast -n dev.uzumi.ime/.compat.EvaluationCounterReceiver -a dev.uzumi.ime.debug.EVAL_FINISH`。出力の`data`に1行（`counter_version`、`task_id`、`keys`、`commits`、`corrections`、`terminators`、`display_changes`、`flicker`、`stable_overwrites`、`chosen_overwrites`、`stale_results_discarded`、`to_stable`、`to_chosen`、`to_provisional`、`started_ms`、`finished_ms`、`elapsed_ms`のTSV）が返り、端末内の`no_backup/phase2c-counts.tsv`へも追記される。端末内のファイルが前の版の見出しで始まる場合は、列がずれないよう計数を始めずに拒否する。取り出してから下の`EVAL_CLEAR`で消す。
     5. 最終文を`uiautomator dump`で試験欄から取る。
   - 取り出しと消去：`-a dev.uzumi.ime.debug.EVAL_DUMP`で全行を、`-a dev.uzumi.ime.debug.EVAL_CLEAR`で記録の消去と計数の停止を行う（どちらも上と同じ`-n`で送る）。`adb shell run-as dev.uzumi.ime cat no_backup/phase2c-counts.tsv`でも読める。取り出した結果は`.local-build/phase2c/<実施日>/`へ置く。受信口はDUMP権限を持つ`adb shell`からだけ送れ、releaseビルドには入らない。
+  - 状態の確認口：`-a dev.uzumi.ime.debug.EVAL_STATUS`（上と同じ`-n`で送る）は、計数を変えずに、IMEの状態を`名前=値`のタブ区切り1行で返す。値は数値と真偽（1・0）だけで、本文・読み・候補の文字列は返さない。項目は、IMEの起動（`ime`）、編集セッションの有無（`input_active`）、入力先が試験欄か（`task_field`）、ライブ変換か（`live`）、未確定の表示の有無（`composing`）、計数中か（`recording`）、計数中にIMEが受け取った押下の数（`presses`、キー操作数と終端操作数の和。計数中でなければ-1）、変換の直列threadの未処理の仕事の数（`worker_tasks`）、明示変換の応答待ちの有無（`conversion_pending`）、現在のrevision（`revision`）、最後に送ったライブ変換の要求と最後に受けた結果のrevision（`live_requested_revision`、`live_result_revision`）、候補の取り直しの結果待ちの有無（`candidates_outstanding`）である。道具が変換結果の届き終わりを待つためだけに使い、評価用計数の値には入れない。
 - 実施：条件Oと条件Nで54文を同じ順に1回ずつ流す。条件ごとに学習履歴を消してから始める。
+- 道具の版：自動測定の道具（`tools/phase2c/run_automated.py`）の版を、結果の各行（`tool_version`）と実施の記録に残す。版1は、変換結果を固定の待ち時間（手順ごとに0.8秒と画面の読み直し）で待つ。版2は、上の状態の確認口を50 msごとに読み、送った押下をIMEがすべて受け取り、変換の仕事と応答待ちが残っていない状態を2回続けて読めるまで待つ。上限（10秒、課題の準備では15秒）を超えたら、その課題を中断として記録して止め、黙って先へ進まない。画面の読み取りは、課題の準備、候補を探す手順、最終文の照合だけで行う。キーの間隔（150 ms）、押下の送り方、訂正の手順、課題の順番は版1と同じである。
+  - 待ち方などの道具の手順を変えた版は、同じAPKで、開発用の課題（`phase3a-dev-tasks.tsv`の30文、またはこのファイルの練習6文）を旧い版と新しい版で条件O・Nとも流し、課題ごとの最終正解、キー操作数・確定操作数・訂正操作数・終端操作数、`display_changes`・`flicker`、`stable_overwrites`・`chosen_overwrites`・`stale_results_discarded`、segmentの状態変化、送った押下の数、訂正の手順の記録が一致することを確かめてから、本測定に使う。評価用の54文はこの確認に使わない。手順は`tools/phase2c/compare_tool_versions.py run`で行い、結果は`.local-build/phase2c/<実施日>/`へ置く。
+  - 一致しない項目があれば、新しい版を本測定に使わない。ライブ変換の表示の計数（`display_changes`・`flicker`）だけが食い違う場合は、旧い版を同じ課題でもう一度流し（`--repeat-old`）、同じ版でも揺れる値かを確かめて記録し、使うかどうかを判断する。
+  - 完了時間（`elapsed_ms`と過去訂正の`aligned_elapsed_ms`）は、道具の待ち時間を含むため版によって変わる。版の違う結果の完了時間は比べない。評価の定義（指標、合格基準、課題文、seed、キーの間隔）は道具の版で変えない。
 
 ### ユーザー本人が操作する部分（条件S・O・N）
 
@@ -179,6 +184,7 @@ H3は安全性の条件であり、件数の多少ではなく発生の有無で
 - 承認後は、課題文、許容表記、指標の定義、除外条件、合格基準、実施順、seedを変えない。
 - 変える必要が見つかった場合は、本書を新しい版として理由とともに記録し、それ以前の結果は旧版の基準で判定したまま残す。旧版の結果を新しい基準で判定し直して合格にしない。
 - 測定中に見つかった不具合を修正した場合は、修正前の結果を消さず、修正後の結果と版を分けて示す。
+- 自動測定の道具の版を変えた場合は、「道具の版」の確認で旧い版と同じ結果になることを確かめてから使い、結果には道具の版を記録する。確かめる前の版の結果は本測定の結果に混ぜない。
 
 ## 承認の記録
 
