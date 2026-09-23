@@ -426,6 +426,128 @@ class ConversionWorkerTest {
         assertTrue(learning.allWords().isEmpty())
     }
 
+    /**
+     * 2segment以上の単位では、先頭からの累積句を記録する。新しい句は候補を選んだsegmentを含む句だけで、
+     * 一segmentの単位と選ばずに確定した単位からは作らない。既にある句は選ばずに確定しても回数を更新する。
+     */
+    @Test
+    fun liveCommitRecordsCumulativePhrasesContainingChosenSegment() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "きょうはこうえんにいく"))
+        fixture.executor.runAll()
+
+        fixture.worker.learnCommitted(
+            7,
+            listOf(
+                listOf(
+                    LearnedSegment("きょうは", "今日は"),
+                    LearnedSegment("こうえんに", "校園に", chosen = true),
+                    LearnedSegment("いく", "行く"),
+                ),
+                listOf(LearnedSegment("てんき", "天気"), LearnedSegment("が", "が")),
+                listOf(LearnedSegment("はし", "橋", chosen = true)),
+            ),
+        )
+        fixture.executor.runAll()
+
+        assertEquals(
+            listOf("きょうはこうえんに" to "今日は校園に", "きょうはこうえんにいく" to "今日は校園に行く"),
+            learning.allWords().filter { it.isPhrase }.map { it.reading to it.surface }.sortedBy { it.first.length },
+        )
+        assertEquals(setOf("今日は", "校園に", "行く", "天気", "橋"), learning.allWords().filterNot { it.isPhrase }.map { it.surface }.toSet())
+
+        // 表示された句をそのまま（選ばずに）確定しても、覚えている句は更新する。
+        fixture.worker.learnCommitted(
+            7,
+            listOf(listOf(LearnedSegment("きょうは", "今日は"), LearnedSegment("こうえんに", "校園に"))),
+        )
+        fixture.executor.runAll()
+        assertEquals(2, learning.exactPhraseMatches("きょうはこうえんに").single().useCount)
+    }
+
+    /**
+     * 句は登録語のsegmentの手前で打ち切る。ひらがなだけの句と50文字を超える句は記録しない。
+     * ひらがなだけのsegmentは、漢字を含む句の一部としてなら記録する。
+     */
+    @Test
+    fun phrasesStopBeforeUserDictionaryWordsAndFollowLearningRules() {
+        val learning = learningStore()
+        val fixture = Fixture(dictionary = FakeLookup("うずみ" to "渦見"), learning = learning)
+        fixture.startReady()
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "きょうは"))
+        fixture.executor.runAll()
+        val long = "長".repeat(26)
+
+        fixture.worker.learnCommitted(
+            7,
+            listOf(
+                listOf(
+                    LearnedSegment("きょう", "今日", chosen = true),
+                    LearnedSegment("は", "は"),
+                    LearnedSegment("うずみ", "渦見"),
+                    LearnedSegment("です", "です"),
+                ),
+                listOf(LearnedSegment("いい", "いい", chosen = true), LearnedSegment("よ", "よ")),
+                listOf(LearnedSegment("ながい", long, chosen = true), LearnedSegment("ながい", long)),
+            ),
+        )
+        fixture.executor.runAll()
+
+        assertEquals(listOf("きょうは" to "今日は"), learning.allWords().filter { it.isPhrase }.map { it.reading to it.surface })
+        assertTrue(learning.exactMatches("ながい").single().surface == long)
+    }
+
+    /**
+     * ライブ変換では、部分範囲の先頭からの読みに一致する句の表記を使い、句の終わりで区切って残りを別に変換する。
+     * 学習禁止欄では句を参照しない。
+     */
+    @Test
+    fun liveConversionAlignsSegmentsToLearnedPhrase() {
+        val learning = learningStore().apply { recordPhrase("こうえんにいく", "校園に行く", createIfMissing = true) }
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.segmentsFor = { reading ->
+            when (reading) {
+                "こうえんにいくよ" -> listOf(EngineSegment("こうえんに", "公園に", listOf("公園に")), EngineSegment("いくよ", "行くよ", listOf("行くよ")))
+                "こうえんにいく" -> listOf(EngineSegment("こうえんに", "公園に", listOf("公園に")), EngineSegment("いく", "行く", listOf("行く")))
+                else -> listOf(EngineSegment(reading, reading, listOf(reading)))
+            }
+        }
+
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "こうえんにいくよ"))
+        fixture.executor.runAll()
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 2, reading = "こうえんにいくよ", learningAllowed = false))
+        fixture.executor.runAll()
+
+        assertEquals(
+            listOf(
+                ResultSegment("こうえんにいく", "校園に行く", listOf("校園に行く", "公園に行く", "こうえんにいく")),
+                ResultSegment("よ", "よ", listOf("よ")),
+            ),
+            fixture.liveResults[0].second.segments,
+        )
+        assertEquals(listOf("公園に", "行くよ"), fixture.liveResults[1].second.segments.map { it.surface })
+    }
+
+    /** 明示変換では、読み全体に一致する句をエンジンの第一候補の前に置き、表示はエンジンの第一候補のままにする。 */
+    @Test
+    fun explicitConversionPlacesWholeReadingPhraseFirst() {
+        val learning = learningStore().apply { recordPhrase("こうえんにいく", "校園に行く", createIfMissing = true) }
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+
+        fixture.worker.requestConversion(request(reading = "こうえんにいく"))
+        fixture.executor.runAll()
+
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        assertEquals(listOf("校園に行く", "こうえんにいく"), result.headCandidates.map { it.value })
+        assertEquals("こうえんにいく", result.headCandidates.first().learnedReading)
+        assertEquals("こうえんにいく", result.display)
+        assertTrue(result.isConsistent)
+    }
+
     /** エンジンがReadyでなければ、全消去はworkerへ依頼せず、エンジンの学習ファイルを直接消す経路へ回す。 */
     @Test
     fun clearAllFallsBackToFilesWhenEngineIsNotReady() {

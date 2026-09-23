@@ -134,16 +134,8 @@ class ConversionWorker(
         if (units.isEmpty() || isEnded(sessionEpoch)) return
         executor.execute {
             val sessionId = engineSessions[sessionEpoch] ?: return@execute
-            // 表示のまま確定したsegmentをIME側の学習にも記録する。対象外の表記は記録の規則が除く。
-            // ユーザー辞書の登録語を表示したsegmentは記録しない。辞書から消した後も学習から表示され続けるのを防ぐ。
-            lookupLearningStore()?.let { store ->
-                val dictionary = lookupUserDictionary()
-                units.flatten()
-                    .filterNot { segment ->
-                        dictionary?.exactMatches(segment.reading)?.any { it.surface == segment.surface } == true
-                    }
-                    .forEach { store.record(it.reading, it.surface) }
-            }
+            // 表示のまま確定したsegmentと、同じ単位の先頭からの句をIME側の学習にも記録する。
+            lookupLearningStore()?.let { store -> recordCommittedUnits(store, units) }
             if (!runCatching { engine.setIncognito(false) }.getOrDefault(false)) return@execute
             lastConverted.remove(sessionEpoch)
             for (unit in units) {
@@ -152,6 +144,34 @@ class ConversionWorker(
                 if (!learned && unit.size > 1) {
                     unit.forEach { segment -> runCatching { engine.learnSegments(sessionId, listOf(segment)) } }
                 }
+            }
+        }
+    }
+
+    /**
+     * ライブ変換で確定した単位を学習キャッシュへ記録する。対象外の表記（ひらがなだけ、ASCIIだけ、50文字超）は記録の規則が除く。
+     * ユーザー辞書の登録語を表示したsegmentは記録しない。辞書から消した後も学習から表示され続けるのを防ぐ。
+     * 2segment以上の単位では、先頭からの累積句（1〜2番目、1〜3番目…、最後は単位の読み全体）も句として記録する。
+     * 句は登録語のsegmentを含むところで打ち切る。登録語を含む句も、辞書から消した後に登録語を表示し続けるためである。
+     * 新しい句は、ユーザーが候補を選んだsegmentを含む場合だけ作る。選ばずに確定した句はエンジンの結果の再現なので、
+     * 覚えても表示は変わらず上限を埋めるだけだからである。既に覚えている句は、選ばなくても時刻と回数を更新する。
+     */
+    private fun recordCommittedUnits(store: LearningStore, units: List<List<LearnedSegment>>) {
+        val dictionary = lookupUserDictionary()
+        // 読みと表記がユーザー辞書の登録語と一致するsegmentか。
+        fun registered(segment: LearnedSegment): Boolean =
+            dictionary?.exactMatches(segment.reading)?.any { it.surface == segment.surface } == true
+        for (unit in units) {
+            unit.filterNot(::registered).forEach { store.record(it.reading, it.surface) }
+            // 登録語のsegmentより前だけを句にする。
+            val phraseSource = unit.takeWhile { !registered(it) }
+            for (end in 2..phraseSource.size) {
+                val phrase = phraseSource.subList(0, end)
+                store.recordPhrase(
+                    reading = phrase.joinToString(separator = "") { it.reading },
+                    surface = phrase.joinToString(separator = "") { it.surface },
+                    createIfMissing = phrase.any { it.chosen },
+                )
             }
         }
     }
@@ -258,6 +278,10 @@ class ConversionWorker(
             // 学習禁止欄では学習語を参照しない。完全一致した学習語のうちscoreが最も高いものを表示する。
             learnedSurfaces = lookupLearningStore()?.takeIf { request.learningAllowed }?.let { store ->
                 { reading -> store.exactMatches(reading).map { it.surface } }
+            },
+            // 部分範囲の先頭からの読みに一致する句で区切りを合わせる。学習禁止欄では参照しない。
+            learnedPhrases = lookupLearningStore()?.takeIf { request.learningAllowed }?.let { store ->
+                { reading -> store.exactPhraseMatches(reading).map { it.surface } }
             },
         )
         val result = runCatching { converter.convert(request) }.getOrNull() ?: return

@@ -8,12 +8,15 @@ import kotlin.math.ln
 
 /**
  * 確定で学習した一語。lastUsedMillisは最後に確定した時刻、useCountは確定した回数。
+ * isPhraseは、ライブ変換の一つの確定単位で続いた複数のsegmentを連結した句として作られた語か。
+ * 句はsegmentの語と別の上限で数え、ライブ変換では部分範囲の先頭の区切りを合わせるためにも使う。
  */
 data class LearnedWord(
     val reading: String,
     val surface: String,
     val lastUsedMillis: Long,
     val useCount: Int,
+    val isPhrase: Boolean = false,
 ) {
     /**
      * 候補の並びに使う値。最後に使った時刻を基準にし、回数が多いほど時刻を先へ進めて補正する。
@@ -53,6 +56,8 @@ class LearningStore(
     private val clock: () -> Long = System::currentTimeMillis,
     // 保存する語の上限。超えたらscoreが最も低い語から捨てる。
     private val maxWords: Int = MAX_WORDS,
+    // 保存する語のうち句の上限。超えたらscoreが最も低い句から捨て、segmentの語を句で押し出さない。
+    private val maxPhrases: Int = MAX_PHRASES,
     // 変換エンジンが動いていないときに、エンジン側の学習（Mozcのprofile）を消す処理。
     private val clearEngineFiles: () -> Unit = {},
 ) {
@@ -61,6 +66,7 @@ class LearningStore(
     // 読みごとの学習語。前方一致をsubMapで引くため、読みの辞書順に並べる。
     private val byReading = TreeMap<String, MutableList<LearnedWord>>()
     private var wordCount = 0
+    private var phraseCount = 0
     private var enabled = true
 
     // 保存ファイルへ未反映の変更があるか。
@@ -88,26 +94,50 @@ class LearningStore(
 
     /** 確定した読みと表記を記録する。学習がOFF、または規則で対象外なら何もせずfalseを返す。 */
     fun record(reading: String, surface: String): Boolean = synchronized(lock) {
-        if (!enabled || !LearningRules.isLearnable(reading, surface)) return@synchronized false
-        val words = byReading.getOrPut(reading) { mutableListOf() }
-        val index = words.indexOfFirst { it.surface == surface }
+        recordLocked(reading, surface, isPhrase = false, createIfMissing = true)
+    }
+
+    /**
+     * 確定単位の中で続いたsegmentを連結した句を記録する。createIfMissingがfalseなら、既に覚えている句の
+     * 時刻と回数だけを更新し、新しい句は作らない。記録しなければfalseを返す。
+     */
+    fun recordPhrase(reading: String, surface: String, createIfMissing: Boolean): Boolean = synchronized(lock) {
+        recordLocked(reading, surface, isPhrase = true, createIfMissing = createIfMissing)
+    }
+
+    /**
+     * 読みと表記を記録する共通の処理。lockを持った状態で呼ぶ。既にある語は、句かどうかを作ったときのまま保ち、
+     * 時刻と回数だけを更新する。句かどうかは上限の数え方にだけ使うためである。
+     */
+    private fun recordLocked(reading: String, surface: String, isPhrase: Boolean, createIfMissing: Boolean): Boolean {
+        if (!enabled || !LearningRules.isLearnable(reading, surface)) return false
+        val existing = byReading[reading]
+        val index = existing?.indexOfFirst { it.surface == surface } ?: -1
         val now = clock()
         if (index >= 0) {
-            val old = words[index]
-            words[index] = old.copy(lastUsedMillis = now, useCount = old.useCount + 1)
+            val old = existing!![index]
+            existing[index] = old.copy(lastUsedMillis = now, useCount = old.useCount + 1)
         } else {
-            words += LearnedWord(reading, surface, now, useCount = 1)
+            if (!createIfMissing) return false
+            byReading.getOrPut(reading) { mutableListOf() } += LearnedWord(reading, surface, now, 1, isPhrase)
             wordCount += 1
-            while (wordCount > maxWords) evictLowestLocked()
+            if (isPhrase) phraseCount += 1
+            enforceLimitsLocked()
         }
         dirty = true
-        true
+        return true
     }
 
     /** 読みが完全一致する学習語を、scoreの高い順に最大limit件返す。学習がOFFなら空。 */
     fun exactMatches(reading: String, limit: Int = MAX_CANDIDATES): List<LearnedWord> = synchronized(lock) {
         if (!enabled) return@synchronized emptyList()
         byReading[reading].orEmpty().sortedByDescending { it.score }.take(limit)
+    }
+
+    /** 読みが完全一致する句だけを、scoreの高い順に最大limit件返す。学習がOFFなら空。 */
+    fun exactPhraseMatches(reading: String, limit: Int = MAX_CANDIDATES): List<LearnedWord> = synchronized(lock) {
+        if (!enabled) return@synchronized emptyList()
+        byReading[reading].orEmpty().filter { it.isPhrase }.sortedByDescending { it.score }.take(limit)
     }
 
     /**
@@ -130,9 +160,8 @@ class LearningStore(
     /** 一語を削除してすぐに保存する。無ければfalseを返す。 */
     fun remove(reading: String, surface: String): Boolean = synchronized(lock) {
         val words = byReading[reading] ?: return@synchronized false
-        if (!words.removeAll { it.surface == surface }) return@synchronized false
-        if (words.isEmpty()) byReading.remove(reading)
-        wordCount -= 1
+        val removed = words.firstOrNull { it.surface == surface } ?: return@synchronized false
+        removeLocked(removed)
         dirty = true
         saveLocked()
         true
@@ -146,6 +175,7 @@ class LearningStore(
         synchronized(lock) {
             byReading.clear()
             wordCount = 0
+            phraseCount = 0
             dirty = true
             saveLocked()
         }
@@ -161,13 +191,28 @@ class LearningStore(
     /** 未保存の変更があれば保存する。入力欄やIMEの切替時に呼ぶ。保存に失敗しても次回に再試行する。 */
     fun flush() = synchronized(lock) { saveLocked() }
 
-    /** scoreが最も低い語を一つ捨てる。lockを持った状態で呼ぶ。 */
-    private fun evictLowestLocked() {
-        val lowest = byReading.values.flatten().minByOrNull { it.score } ?: return
-        val words = byReading.getValue(lowest.reading)
-        words.remove(lowest)
-        if (words.isEmpty()) byReading.remove(lowest.reading)
+    /**
+     * 句の上限と全体の上限を超えている間、scoreが最も低い語を捨てる。句の上限を先に当てはめ、
+     * 句が多すぎるときはsegmentの語ではなく句から捨てる。lockを持った状態で呼ぶ。
+     */
+    private fun enforceLimitsLocked() {
+        while (phraseCount > maxPhrases) evictLowestLocked { it.isPhrase }
+        while (wordCount > maxWords) evictLowestLocked { true }
+    }
+
+    /** filterに合う語のうちscoreが最も低いものを一つ捨てる。lockを持った状態で呼ぶ。 */
+    private fun evictLowestLocked(filter: (LearnedWord) -> Boolean) {
+        val lowest = byReading.values.asSequence().flatten().filter(filter).minByOrNull { it.score } ?: return
+        removeLocked(lowest)
+    }
+
+    /** 一語を取り除き、件数を合わせる。lockを持った状態で呼ぶ。 */
+    private fun removeLocked(word: LearnedWord) {
+        val words = byReading[word.reading] ?: return
+        if (!words.remove(word)) return
+        if (words.isEmpty()) byReading.remove(word.reading)
         wordCount -= 1
+        if (word.isPhrase) phraseCount -= 1
     }
 
     /** 変更があれば保存ファイルを原子的に置き換える。lockを持った状態で呼ぶ。 */
@@ -177,7 +222,10 @@ class LearningStore(
             append(HEADER).append('\t').append(if (enabled) ENABLED else DISABLED).append('\n')
             for (word in byReading.values.flatten()) {
                 append(word.reading).append('\t').append(word.surface).append('\t')
-                append(word.lastUsedMillis).append('\t').append(word.useCount).append('\n')
+                append(word.lastUsedMillis).append('\t').append(word.useCount)
+                // 句だけ5列目に印を書く。4列の行はsegmentの語として読むため、句を導入する前のファイルも読める。
+                if (word.isPhrase) append('\t').append(PHRASE)
+                append('\n')
             }
         }
         try {
@@ -196,21 +244,32 @@ class LearningStore(
         enabled = header.getOrNull(1) != DISABLED
         for (line in lines.drop(1)) {
             val columns = line.split('\t')
-            if (columns.size != 4) continue
+            val isPhrase = when {
+                columns.size == 4 -> false
+                columns.size == 5 && columns[4] == PHRASE -> true
+                else -> continue
+            }
             val lastUsed = columns[2].toLongOrNull() ?: continue
             val count = columns[3].toIntOrNull()?.takeIf { it > 0 } ?: continue
             if (!LearningRules.isLearnable(columns[0], columns[1])) continue
             val words = byReading.getOrPut(columns[0]) { mutableListOf() }
             if (words.any { it.surface == columns[1] }) continue
-            words += LearnedWord(columns[0], columns[1], lastUsed, count)
+            words += LearnedWord(columns[0], columns[1], lastUsed, count, isPhrase)
             wordCount += 1
+            if (isPhrase) phraseCount += 1
         }
-        while (wordCount > maxWords) evictLowestLocked()
+        enforceLimitsLocked()
     }
 
     companion object {
         /** 保存する語の上限。 */
         const val MAX_WORDS = 10_000
+
+        /**
+         * 保存する語のうち句の上限（全体の30%）。一回の確定で句は最大「segment数−1」個増えるため、
+         * 上限が無いと、短い読みで繰り返し効くsegmentの語を句が押し出す。
+         */
+        const val MAX_PHRASES = 3_000
 
         /** 一つの読みから候補の先頭へ出す学習語の最大数。 */
         const val MAX_CANDIDATES = 3
@@ -222,5 +281,8 @@ class LearningStore(
         private const val HEADER = "uzumi-learning-v1"
         private const val ENABLED = "enabled"
         private const val DISABLED = "disabled"
+
+        /** 保存ファイルの5列目に書く、句の印。 */
+        private const val PHRASE = "phrase"
     }
 }

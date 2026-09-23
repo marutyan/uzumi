@@ -19,8 +19,11 @@ class LearningStoreTest {
         directory.deleteRecursively()
     }
 
-    private fun store(maxWords: Int = LearningStore.MAX_WORDS, clearEngineFiles: () -> Unit = {}) =
-        LearningStore(file, clock = { now }, maxWords = maxWords, clearEngineFiles = clearEngineFiles)
+    private fun store(
+        maxWords: Int = LearningStore.MAX_WORDS,
+        maxPhrases: Int = LearningStore.MAX_PHRASES,
+        clearEngineFiles: () -> Unit = {},
+    ) = LearningStore(file, clock = { now }, maxWords = maxWords, maxPhrases = maxPhrases, clearEngineFiles = clearEngineFiles)
 
     /** 回数が同じなら最後に使った語が先頭になり、回数の差が大きければ少し古い語でも先頭に残る。 */
     @Test
@@ -68,6 +71,64 @@ class LearningStoreTest {
         }
 
         assertEquals(listOf("橋", "天気", "幹事"), store.allWords().map { it.surface })
+    }
+
+    /**
+     * 句は作ってよいときだけ新しく作り、既にある句は作らない指定でも更新する。segmentとして確定し直しても句のまま数える。
+     * 句だけを引く参照はsegmentの語を返さず、句の印は保存して読み直しても残る。
+     */
+    @Test
+    fun phrasesAreCreatedOnlyWhenAllowedAndKeepTheirKind() {
+        val store = store()
+        assertFalse(store.recordPhrase("こうえんにいく", "校園に行く", createIfMissing = false))
+        assertTrue(store.recordPhrase("こうえんにいく", "校園に行く", createIfMissing = true))
+        now = HOUR
+        assertTrue(store.recordPhrase("こうえんにいく", "校園に行く", createIfMissing = false))
+        store.record("こうえんにいく", "校園に行く")
+        store.record("こうえんに", "校園に")
+
+        assertEquals(listOf(LearnedWord("こうえんにいく", "校園に行く", HOUR, 3, isPhrase = true)), store.exactPhraseMatches("こうえんにいく"))
+        assertTrue(store.exactPhraseMatches("こうえんに").isEmpty())
+        // 句も読みの完全一致と前方一致では語と同じく返す。
+        assertEquals(listOf("校園に行く"), store.exactMatches("こうえんにいく").map { it.surface })
+        assertEquals(listOf("校園に行く"), store.prefixMatches("こうえんに").map { it.surface })
+        // ひらがなだけの句は覚えない。
+        assertFalse(store.recordPhrase("いいよ", "いいよ", createIfMissing = true))
+
+        store.flush()
+        assertEquals(
+            listOf(true, false),
+            store().allWords().sortedByDescending { it.reading.length }.map { it.isPhrase },
+        )
+    }
+
+    /** 句の印が無い4列の行（句を導入する前の保存ファイル）は、segmentの語として読む。 */
+    @Test
+    fun fourColumnLinesLoadAsWords() {
+        file.writeText("uzumi-learning-v1\tenabled\nかんじ\t幹事\t5\t1\nこうえんにいく\t校園に行く\t6\t1\tphrase\n")
+
+        val words = store().allWords()
+
+        assertEquals(listOf("校園に行く" to true, "幹事" to false), words.map { it.surface to it.isPhrase })
+    }
+
+    /** 句が上限を超えたら、segmentの語がより古くても、scoreが最も低い句から捨てる。全体の上限では最も低い語を捨てる。 */
+    @Test
+    fun phraseLimitEvictsPhrasesBeforeWords() {
+        val store = store(maxWords = 4, maxPhrases = 2)
+        store.record("かんじ", "幹事")
+        now = HOUR
+        store.record("てんき", "天気")
+        listOf("きょうはいい" to "今日はいい", "こうえんにいく" to "校園に行く", "はしをわたる" to "橋を渡る")
+            .forEachIndexed { index, (reading, surface) ->
+                now = (2 + index) * HOUR
+                store.recordPhrase(reading, surface, createIfMissing = true)
+            }
+        assertEquals(listOf("橋を渡る", "校園に行く", "天気", "幹事"), store.allWords().map { it.surface })
+
+        now = 10 * HOUR
+        store.record("はし", "箸")
+        assertEquals(listOf("箸", "橋を渡る", "校園に行く", "天気"), store.allWords().map { it.surface })
     }
 
     /** ひらがなだけ・ASCIIだけ・読みと同じ・50文字を超える表記は覚えない。 */
