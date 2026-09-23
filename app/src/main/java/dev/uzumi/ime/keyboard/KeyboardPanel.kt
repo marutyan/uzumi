@@ -283,9 +283,9 @@ class KeyboardPanel(
                     1.0f,
                 ),
             )
-            addView(createKey(KeySpec.Kana(KanaKeyType.PUNCT), 1.2f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.WA), 1.2f))
             addView(createKey(KeySpec.Action(KeyboardAction.TransformKana, "小゛゜"), 1.2f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.WA), 1.2f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.PUNCT), 1.2f))
             val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1.0f)
             enterKeyViews.add(enterKey)
             addView(enterKey)
