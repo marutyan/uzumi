@@ -10,7 +10,7 @@ import java.io.File
 
 /**
  * Phase 2cの評価用計数を`adb shell am broadcast`から開始・終了・取り出しする受信口。debugビルドだけに入る。
- * IMEと同じprocessで動き、[EvaluationCounter.shared]を操作する。結果は課題IDと件数のTSVで、本文は含まない。
+ * IMEと同じprocessで動き、[EvaluationCounter.shared]を操作する。結果は課題IDと件数・時刻のTSVで、本文は含まない。
  * 終えた課題の行は`noBackupFilesDir`のファイルへ追記し、端末のバックアップへ載せない。
  */
 class EvaluationCounterReceiver : BroadcastReceiver() {
@@ -21,6 +21,10 @@ class EvaluationCounterReceiver : BroadcastReceiver() {
         val message = when (intent.action) {
             ACTION_START -> {
                 val taskId = intent.getStringExtra(EXTRA_TASK).orEmpty()
+                // 前の版の見出しで始まるファイルへ新しい版の行を足すと列がずれるため、取り出して消すまで始めない。
+                if (file.isFile && file.useLines { it.firstOrNull() } != TaskOperationCounts.TSV_HEADER) {
+                    return reject("counter file has an older header; dump and clear first")
+                }
                 if (counter.start(taskId)) "started\t$taskId" else return reject("invalid task id")
             }
             ACTION_FINISH -> {
