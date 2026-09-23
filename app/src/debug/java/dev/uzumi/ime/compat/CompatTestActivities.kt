@@ -2,6 +2,7 @@ package dev.uzumi.ime.compat
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import android.telephony.PhoneNumberFormattingTextWatcher
 import android.text.Editable
@@ -10,6 +11,7 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.view.inputmethod.EditorInfo
 import android.webkit.WebView
+import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -128,6 +130,74 @@ class CompatEditTextActivity : Activity() {
                 actionId != EditorInfo.IME_ACTION_NEXT && actionId != EditorInfo.IME_ACTION_DONE
             }
         }
+    }
+}
+
+/**
+ * Phase 2cの課題を一文ずつ入力する試験画面。複数行の欄を一つだけ置き、課題ごとに空にして同じ条件で始められるようにする。
+ * `adb shell am start -n dev.uzumi.ime/.compat.Phase2cTaskActivity --es task N01`で開く（開いていれば同じ画面へ届く）たびに
+ * 欄を空にして課題IDを表示する。手で空にするボタンも置く。課題文は表示せず、入力した本文は画面の外へ出さない。
+ */
+class Phase2cTaskActivity : Activity() {
+    private lateinit var taskLabel: TextView
+    private lateinit var taskField: EditText
+
+    /** 課題IDの表示、入力欄、空にするボタンを並べ、起動時のintentで欄を初期化する。 */
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        taskLabel = TextView(this).apply {
+            id = R.id.phase2c_task_label
+            textSize = 14f
+        }
+        taskField = EditText(this).apply {
+            id = R.id.phase2c_task_field
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            imeOptions = EditorInfo.IME_ACTION_NONE
+            minLines = 3
+        }
+        val reset = Button(this).apply {
+            id = R.id.phase2c_task_reset
+            setText(R.string.phase2c_task_reset)
+            setOnClickListener { clearField() }
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(taskLabel)
+            addView(taskField)
+            addView(reset)
+        }
+        applySystemInsets(content)
+        setContentView(content)
+        startTask(intent)
+    }
+
+    /** 画面を開いたまま次の課題のintentが届いたら、欄を空にして課題IDを差し替える。 */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        startTask(intent)
+    }
+
+    /** intentの課題IDを表示し、欄を空にする。IDが無ければ未指定と表示する。 */
+    private fun startTask(intent: Intent) {
+        // 表示するのは課題IDだけ。長い文字列を渡されても画面に文を出さないよう短く切る。
+        val taskId = intent.getStringExtra(EXTRA_TASK)?.take(MAX_TASK_ID_LENGTH)
+        taskLabel.text = getString(R.string.phase2c_task_label, taskId ?: getString(R.string.phase2c_task_unset))
+        clearField()
+    }
+
+    /** 欄を空にして入力位置を置き直す。この操作はIMEの計数に入らない。 */
+    private fun clearField() {
+        taskField.setText("")
+        taskField.requestFocus()
+    }
+
+    private companion object {
+        /** 課題IDを受け取るextraの名前。評価用計数の受信口と同じ名前にする。 */
+        const val EXTRA_TASK = "task"
+
+        /** 表示する課題IDの長さの上限。 */
+        const val MAX_TASK_ID_LENGTH = 16
     }
 }
 

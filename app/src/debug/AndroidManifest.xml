@@ -14,5 +14,18 @@
             android:label="@string/compat_webview_title"
             android:process=":compat"
             android:windowSoftInputMode="adjustResize" />
+        <!-- Phase 2cの課題入力画面。adbから課題IDを付けて開くたびに欄を空にする。 -->
+        <activity
+            android:name=".compat.Phase2cTaskActivity"
+            android:exported="true"
+            android:label="@string/phase2c_task_title"
+            android:launchMode="singleTop"
+            android:process=":compat"
+            android:windowSoftInputMode="stateAlwaysVisible|adjustResize" />
+        <!-- Phase 2cの評価用計数の受信口。IMEと同じprocessで動く。DUMP権限を持つadb shellからだけ送れる。 -->
+        <receiver
+            android:name=".compat.EvaluationCounterReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
     </application>
 </manifest>

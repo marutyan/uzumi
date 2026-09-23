@@ -1,5 +1,6 @@
 package dev.uzumi.ime.live
 
+import dev.uzumi.ime.evaluation.OperationCounts
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -616,12 +617,12 @@ class LiveConversionCoreTest {
         assertEquals("", driver.core.display)
     }
 
-    /** 正しく変換される文は、文字キーだけで確定操作と訂正操作なしに入力できる。 */
+    /** 正しく変換される文は、文字キーだけで確定操作と訂正操作なしに入力できる。句点は終端操作でキー操作数に含めない。 */
     @Test
     fun operationCountsForSentenceWithoutCorrection() {
         val driver = LiveSessionDriver().type("${sentence}。")
         assertEquals("今日は天気がいいですね。", driver.editor.committed.toString())
-        assertEquals(OperationCounts(keys = 14, commits = 0, corrections = 0, terminators = 0), driver.counts)
+        assertEquals(OperationCounts(keys = 13, commits = 0, corrections = 0, terminators = 1), driver.counts)
         assertTrue(driver.rejections.isEmpty())
     }
 
@@ -634,10 +635,10 @@ class LiveConversionCoreTest {
         driver.returnToInput()
         driver.type("。")
         assertEquals("今日は転機がいいですね。", driver.editor.committed.toString())
-        assertEquals(OperationCounts(keys = 14, commits = 0, corrections = 3, terminators = 0), driver.counts)
+        assertEquals(OperationCounts(keys = 16, commits = 0, corrections = 3, terminators = 1), driver.counts)
     }
 
-    /** 確定キーは確定操作として数え、Enterは終端操作として分けて数える。 */
+    /** 確定キーは確定操作としてキー操作数の内訳に数え、Enterは終端操作として分けて数える。 */
     @Test
     fun operationCountsSeparateCommitFromTerminator() {
         val driver = LiveSessionDriver().type("よい")
@@ -645,7 +646,7 @@ class LiveConversionCoreTest {
         driver.type("よい")
         driver.enter(EnterKind.EditorAction(actionCode = 3))
         assertEquals("良い良い", driver.editor.committed.toString())
-        assertEquals(OperationCounts(keys = 4, commits = 1, corrections = 0, terminators = 1), driver.counts)
+        assertEquals(OperationCounts(keys = 5, commits = 1, corrections = 0, terminators = 1), driver.counts)
     }
 
     /** Editor側でcompositionが終わった場合は、書込みなしで内部状態を捨て、保留中の結果も適用しない。 */

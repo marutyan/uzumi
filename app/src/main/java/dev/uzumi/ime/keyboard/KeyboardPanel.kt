@@ -12,6 +12,7 @@ import android.widget.LinearLayout
  * @param onAction キーボード操作イベントを通知するコールバック
  * @param lineDeleteLength 削除キーの左ドラッグで消える、カーソルから行頭までの文字数を返す。分からなければnull
  * @param preferences 設定画面で選んだ高さ・拡大表示・振動・キー音・削除の左ドラッグ
+ * @param onPanelKey IMEへ操作を送らずパネルの中で完結するキー（面の切替、Shift、記号のページ）を押したときに呼ぶ。評価用の計数に使う
  */
 // 必須コールバックを伴うプログラム生成専用Viewであり、XMLからは生成しない。
 @SuppressLint("ViewConstructor")
@@ -20,6 +21,7 @@ class KeyboardPanel(
     private val onAction: (KeyboardAction) -> Unit,
     private val lineDeleteLength: () -> Int? = { null },
     private val preferences: KeyboardPreferences = KeyboardPreferences(),
+    private val onPanelKey: () -> Unit = {},
 ) : LinearLayout(context) {
 
     private val density = context.resources.displayMetrics.density
@@ -537,6 +539,7 @@ class KeyboardPanel(
                 spec = spec,
                 onAction = { dispatchAction(it) },
                 onModeSwitch = { targetMode ->
+                    onPanelKey()
                     // 実行時のpassword状態に応じて安全に切り替え
                     val actualTarget = if (isPasswordField) {
                         if (targetMode == KeyboardMode.KANA) KeyboardMode.QWERTY else targetMode
@@ -545,8 +548,14 @@ class KeyboardPanel(
                     }
                     switchMode(actualTarget)
                 },
-                onShiftToggle = { toggleShift() },
-                onPageSwitch = { showNextSymbolPage() },
+                onShiftToggle = {
+                    onPanelKey()
+                    toggleShift()
+                },
+                onPageSwitch = {
+                    onPanelKey()
+                    showNextSymbolPage()
+                },
                 onPreview = { key, text ->
                     if (text == null || isPasswordField || !preferences.keyPreview) keyPreview.hide() else keyPreview.show(key, text)
                 },
