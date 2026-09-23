@@ -1,6 +1,6 @@
-# Phase 2c 常用試験の評価条件（案）
+# Phase 2c 常用試験の評価条件
 
-**この文書は案であり、ユーザーの承認を得ていない。** 承認までは試験を始めない。承認した時点のcommit IDを「固定版」とし、以後の結果にはその固定版を必ず記録する。
+**状態：承認済み（2026-09-23）。** 承認した時点のcommit IDを「固定版」とし、以後の結果にはその固定版を必ず記録する。
 
 根拠は[開発計画](../plans/development-plan.md)のPhase 2c・3a、[評価計画](research/ux-and-evaluation.md)の指標案と測定方法、[ライブ変換の状態設計](live-conversion-design.md)の状態と境界である。課題文は[`phase2c-tasks.tsv`](phase2c-tasks.tsv)に置く。
 
