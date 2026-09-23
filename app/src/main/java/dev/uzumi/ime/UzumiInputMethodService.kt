@@ -3,6 +3,7 @@ package dev.uzumi.ime
 import android.graphics.Typeface
 import android.inputmethodservice.InputMethodService
 import android.view.View
+import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.HorizontalScrollView
@@ -53,7 +54,19 @@ class UzumiInputMethodService : InputMethodService() {
         }
         applyPolicyToKeyboard()
         refreshCandidates()
+        applyNavigationInsets(root)
         return root
+    }
+
+    /** システムバー（captionBar含む）とカットアウトのInsetsを反映し、システム操作領域との重なりを防ぐ。 */
+    private fun applyNavigationInsets(view: View) {
+        view.setOnApplyWindowInsetsListener { targetView, insets ->
+            val systemInsets = insets.getInsets(
+                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+            )
+            targetView.setPadding(systemInsets.left, 0, systemInsets.right, systemInsets.bottom)
+            insets
+        }
     }
 
     /** フィールドごとに旧接続を破棄し、新しい編集セッションを開始する。 */

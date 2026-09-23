@@ -253,6 +253,25 @@ class EditorSessionTest {
         assertEquals(listOf(3 to 3), moveConnection.selectionCalls)
     }
 
+    /** composition中の左移動、直前削除、挿入が残った文字の前に反映される。 */
+    @Test
+    fun insertsBeforeRemainingCompositionAfterCursorMoveAndDelete() {
+        val connection = ModelEditorConnection(text = "アイパッ ", selectionStart = 5, selectionEnd = 5)
+        val session = EditorSession(connection, normalPolicy(), 5, 5)
+
+        assertTrue(session.inputText("あ"))
+        assertTrue(session.inputText("い"))
+        assertTrue(session.moveCursor(-1))
+        assertEquals(1, session.compositionSnapshot().selectionEnd)
+        assertTrue(session.deleteBackward())
+        assertEquals("い", session.compositionSnapshot().reading)
+        assertEquals(0, session.compositionSnapshot().selectionEnd)
+        assertTrue(session.inputText("か"))
+
+        assertEquals("アイパッ かい", connection.text)
+        assertEquals(1, session.compositionSnapshot().selectionEnd)
+    }
+
     /** TYPE_NULLではcompositionを作らず、候補も返さず直接確定する。 */
     @Test
     fun typeNullCommitsDirectlyWithoutCandidates() {
