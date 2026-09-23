@@ -12,8 +12,10 @@ import android.os.Looper
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Button
 
 /**
  * キーの種別と表示・動作定義を表すシールドインターフェース。
@@ -22,8 +24,16 @@ sealed interface KeySpec {
     /** 12キーかなフリックキー */
     data class Kana(val type: KanaKeyType) : KeySpec
 
-    /** 単純な文字キー（QWERTYや数字など） */
-    data class SimpleText(val text: String, val shiftText: String? = null) : KeySpec
+    /**
+     * 単純な文字キー（QWERTYや数字、記号など）。
+     *
+     * @property longPressText 長押しで入力する文字。長押しを持たないキーではnull
+     */
+    data class SimpleText(
+        val text: String,
+        val shiftText: String? = null,
+        val longPressText: String? = null,
+    ) : KeySpec
 
     /** 各種機能アクションキー */
     data class Action(
@@ -32,19 +42,36 @@ sealed interface KeySpec {
         val isAccent: Boolean = false,
     ) : KeySpec
 
-    /** キーボードモード切替キー */
-    data class ModeSwitch(val label: String, val targetMode: KeyboardMode) : KeySpec
+    /**
+     * キーボードモード切替キー。
+     *
+     * @property longPressTarget 長押しで切り替える先のモード。長押しを持たないキーではnull
+     * @property longPressLabel 長押し先を示す小さな表示
+     */
+    data class ModeSwitch(
+        val label: String,
+        val targetMode: KeyboardMode,
+        val longPressTarget: KeyboardMode? = null,
+        val longPressLabel: String? = null,
+    ) : KeySpec
 
     /** 英語配列のShiftキー */
     data class Shift(val label: String) : KeySpec
+
+    /**
+     * 記号面のページ切替キー。モードは変えずに同じ記号面の次のページを表示する。
+     *
+     * @property description TalkBackで読み上げる説明
+     */
+    data class PageSwitch(val label: String, val description: String) : KeySpec
 }
 
 /**
  * ソフトウェアキーボードの個別キーを描画およびタッチ処理するカスタムView。
  *
  * 単一・マルチタッチ追跡（active pointer制御）、フリック判定（DOWN→UP直結対応）、
- * 可視ガイド描画、触覚フィードバック、削除リピート処理（初回二重送信防止）、
- * TalkBack等のアクセシビリティ（全フリック候補のAccessibilityAction対応）を備える。
+ * 可視ガイド描画、触覚フィードバック、削除・カーソルの連続実行、文字キーの長押し、
+ * TalkBack等のアクセシビリティ（全フリック候補と長押し文字のAccessibilityAction対応）を備える。
  */
 class KeyView(context: Context) : View(context) {
 
@@ -56,23 +83,34 @@ class KeyView(context: Context) : View(context) {
     private var onAction: ((KeyboardAction) -> Unit)? = null
     private var onModeSwitch: ((KeyboardMode) -> Unit)? = null
     private var onShiftToggle: (() -> Unit)? = null
+    private var onPageSwitch: (() -> Unit)? = null
 
-    private var isKeyPressed = false
+    // 長押しの取り消し距離は端末の標準touch slopに合わせる。フリック閾値とは別の値である。
+    private val gesture = KeyGestureState(ViewConfiguration.get(context).scaledTouchSlop.toFloat())
     private var isShifted = false
     private var isCapsLock = false
     private var currentDirection = FlickDirection.CENTER
     private var activePointerId = MotionEvent.INVALID_POINTER_ID
-    private var startX = 0f
-    private var startY = 0f
     private var customActionLabel: String? = null
+
+    // 現在の押下で連続実行した回数。間隔の加速に使う。
+    private var repeatCount = 0
 
     private val repeatHandler = Handler(Looper.getMainLooper())
     private val repeatRunnable = object : Runnable {
         override fun run() {
             if (!isAttachedToWindow) return
-            onAction?.invoke(KeyboardAction.Delete)
+            val action = repeatableAction() ?: return
+            onAction?.invoke(action)
             performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            repeatHandler.postDelayed(this, REPEAT_INTERVAL_MS)
+            repeatCount += 1
+            repeatHandler.postDelayed(this, KeyRepeatPolicy.intervalAfter(repeatCount))
+        }
+    }
+    private val longPressRunnable = Runnable {
+        if (isAttachedToWindow && gesture.longPressTimeout()) {
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            invalidate()
         }
     }
 
@@ -102,11 +140,13 @@ class KeyView(context: Context) : View(context) {
         onAction: (KeyboardAction) -> Unit,
         onModeSwitch: ((KeyboardMode) -> Unit)? = null,
         onShiftToggle: (() -> Unit)? = null,
+        onPageSwitch: (() -> Unit)? = null,
     ) {
         this.spec = spec
         this.onAction = onAction
         this.onModeSwitch = onModeSwitch
         this.onShiftToggle = onShiftToggle
+        this.onPageSwitch = onPageSwitch
         updateContentDescription()
         invalidate()
     }
@@ -143,12 +183,13 @@ class KeyView(context: Context) : View(context) {
     }
 
     /**
-     * 保留中のタッチ入力やリピート処理を直ちに中断する。
+     * 保留中のタッチ入力、長押し、連続実行を直ちに中断する。
      */
     fun cancelPendingInput() {
         repeatHandler.removeCallbacksAndMessages(null)
-        if (isKeyPressed || activePointerId != MotionEvent.INVALID_POINTER_ID) {
-            isKeyPressed = false
+        removeCallbacks(longPressRunnable)
+        if (gesture.isPressed || activePointerId != MotionEvent.INVALID_POINTER_ID) {
+            gesture.reset()
             currentDirection = FlickDirection.CENTER
             activePointerId = MotionEvent.INVALID_POINTER_ID
             invalidate()
@@ -160,23 +201,47 @@ class KeyView(context: Context) : View(context) {
         super.onDetachedFromWindow()
     }
 
+    /** 押下中に連続実行するアクションキーであれば、そのアクションを返す。 */
+    private fun repeatableAction(): KeyboardAction? {
+        val currentSpec = spec as? KeySpec.Action ?: return null
+        return currentSpec.action.takeIf(KeyRepeatPolicy::isRepeatable)
+    }
+
+    /** 長押しで別の入力を持つキーかどうかを返す。かなキーは長押しを持たず、フリックと衝突しない。 */
+    private fun hasLongPress(): Boolean = when (val currentSpec = spec) {
+        is KeySpec.SimpleText -> currentSpec.longPressText != null
+        is KeySpec.ModeSwitch -> currentSpec.longPressTarget != null
+        else -> false
+    }
+
+    /** Shift状態を反映した文字キーの入力文字列を返す。 */
+    private fun shiftedText(textSpec: KeySpec.SimpleText): String {
+        return if (isShifted || isCapsLock) {
+            textSpec.shiftText ?: textSpec.text.uppercase()
+        } else {
+            textSpec.text
+        }
+    }
+
     /** フリック確定とアクセシビリティのperformClickを別経路で重複なく処理する。 */
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 activePointerId = event.getPointerId(0)
-                startX = event.x
-                startY = event.y
-                isKeyPressed = true
+                gesture.down(event.x, event.y)
                 currentDirection = FlickDirection.CENTER
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
 
-                val currentSpec = spec
-                if (currentSpec is KeySpec.Action && currentSpec.action is KeyboardAction.Delete) {
-                    // 削除キー押下時は初回に1文字即時削除し、長押し時にリピートを開始（初回二重送信防止）
-                    onAction?.invoke(KeyboardAction.Delete)
-                    repeatHandler.postDelayed(repeatRunnable, INITIAL_REPEAT_DELAY_MS)
+                val repeatAction = repeatableAction()
+                if (repeatAction != null) {
+                    // 削除・カーソルは押下時に一回実行し、押し続けた場合だけ連続実行する（離したときは再送しない）
+                    onAction?.invoke(repeatAction)
+                    repeatCount = 0
+                    repeatHandler.postDelayed(repeatRunnable, KeyRepeatPolicy.INITIAL_DELAY_MS)
+                } else if (hasLongPress()) {
+                    // 利用者が変更できる端末の長押し時間に従う
+                    postDelayed(longPressRunnable, ViewConfiguration.getLongPressTimeout().toLong())
                 }
 
                 invalidate()
@@ -195,17 +260,18 @@ class KeyView(context: Context) : View(context) {
 
                 val curX = event.getX(pointerIndex)
                 val curY = event.getY(pointerIndex)
-                val dx = curX - startX
-                val dy = curY - startY
+                gesture.move(curX, curY)
+                if (gesture.hasMovedBeyondSlop) {
+                    removeCallbacks(longPressRunnable)
+                }
 
-                val currentSpec = spec
-                if (currentSpec is KeySpec.Kana) {
-                    val newDirection = determineFlickDirection(dx, dy, thresholdPx)
+                if (spec is KeySpec.Kana) {
+                    val newDirection = determineFlickDirection(curX - gesture.startX, curY - gesture.startY, thresholdPx)
                     if (newDirection != currentDirection) {
                         currentDirection = newDirection
                         invalidate()
                     }
-                } else if (currentSpec is KeySpec.Action && currentSpec.action is KeyboardAction.Delete) {
+                } else if (repeatableAction() != null) {
                     // 指がキー領域から大きく外れた場合はリピート停止
                     if (curX < -thresholdPx || curX > width + thresholdPx ||
                         curY < -thresholdPx || curY > height + thresholdPx
@@ -255,10 +321,14 @@ class KeyView(context: Context) : View(context) {
      */
     private fun handleActivePointerUp(event: MotionEvent, pointerIndex: Int) {
         repeatHandler.removeCallbacksAndMessages(null)
-        val wasPressed = isKeyPressed
+        removeCallbacks(longPressRunnable)
+        val wasPressed = gesture.isPressed
+        val wasLongPressed = gesture.isLongPressActive
+        val startX = gesture.startX
+        val startY = gesture.startY
         val finalSpec = spec
 
-        isKeyPressed = false
+        gesture.reset()
         activePointerId = MotionEvent.INVALID_POINTER_ID
         currentDirection = FlickDirection.CENTER
         invalidate()
@@ -272,9 +342,7 @@ class KeyView(context: Context) : View(context) {
         when (finalSpec) {
             is KeySpec.Kana -> {
                 // MOVEが届かない速いフリックでもUP座標から正確にフリック方向を再計算する
-                val dx = upX - startX
-                val dy = upY - startY
-                val finalDirection = determineFlickDirection(dx, dy, thresholdPx)
+                val finalDirection = determineFlickDirection(upX - startX, upY - startY, thresholdPx)
                 val char = KeyboardLayoutData.getKanaChar(finalSpec.type, finalDirection)
                 if (char.isNotEmpty()) {
                     onAction?.invoke(KeyboardAction.Text(char))
@@ -283,12 +351,13 @@ class KeyView(context: Context) : View(context) {
             }
 
             is KeySpec.SimpleText -> {
-                if (isInside) {
-                    val text = if (isShifted || isCapsLock) {
-                        finalSpec.shiftText ?: finalSpec.text.uppercase()
-                    } else {
-                        finalSpec.text
-                    }
+                val text = resolveTextKeyRelease(
+                    text = shiftedText(finalSpec),
+                    longPressText = finalSpec.longPressText,
+                    isInside = isInside,
+                    isLongPressActive = wasLongPressed,
+                )
+                if (text != null) {
                     onAction?.invoke(KeyboardAction.Text(text))
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                 }
@@ -296,7 +365,8 @@ class KeyView(context: Context) : View(context) {
 
             is KeySpec.Action -> {
                 if (isInside) {
-                    if (finalSpec.action !is KeyboardAction.Delete) {
+                    // 連続実行するキーは押下時に実行済みのため、離したときは送らない
+                    if (!KeyRepeatPolicy.isRepeatable(finalSpec.action)) {
                         onAction?.invoke(finalSpec.action)
                     }
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
@@ -305,7 +375,8 @@ class KeyView(context: Context) : View(context) {
 
             is KeySpec.ModeSwitch -> {
                 if (isInside) {
-                    onModeSwitch?.invoke(finalSpec.targetMode)
+                    val target = if (wasLongPressed) finalSpec.longPressTarget ?: finalSpec.targetMode else finalSpec.targetMode
+                    onModeSwitch?.invoke(target)
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                 }
             }
@@ -316,12 +387,22 @@ class KeyView(context: Context) : View(context) {
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                 }
             }
+
+            is KeySpec.PageSwitch -> {
+                if (isInside) {
+                    onPageSwitch?.invoke()
+                    sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
+                }
+            }
         }
     }
 
+    /**
+     * 外部アクセシビリティサービスからのクリックを一回の入力として処理する。
+     * TalkBackでは指を離したとき、またはダブルタップしたときにこの経路で入力されるため、独自のhover処理は持たない。
+     */
     override fun performClick(): Boolean {
         super.performClick()
-        // 外部アクセシビリティサービス等から明示的にクリックされた場合の入力処理
         when (val currentSpec = spec) {
             is KeySpec.Kana -> {
                 val char = KeyboardLayoutData.getKanaChar(currentSpec.type, FlickDirection.CENTER)
@@ -332,12 +413,7 @@ class KeyView(context: Context) : View(context) {
             }
 
             is KeySpec.SimpleText -> {
-                val text = if (isShifted || isCapsLock) {
-                    currentSpec.shiftText ?: currentSpec.text.uppercase()
-                } else {
-                    currentSpec.text
-                }
-                onAction?.invoke(KeyboardAction.Text(text))
+                onAction?.invoke(KeyboardAction.Text(shiftedText(currentSpec)))
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
             }
 
@@ -356,6 +432,11 @@ class KeyView(context: Context) : View(context) {
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
             }
 
+            is KeySpec.PageSwitch -> {
+                onPageSwitch?.invoke()
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            }
+
             null -> Unit
         }
         return true
@@ -363,48 +444,80 @@ class KeyView(context: Context) : View(context) {
 
     override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
         super.onInitializeAccessibilityNodeInfo(info)
+        // TalkBackが「ボタン」として扱い、ダブルタップや指を離す操作でクリックできることを伝える
+        info.className = Button::class.java.name
         val currentSpec = spec ?: return
-        if (currentSpec is KeySpec.Kana) {
-            val map = KeyboardLayoutData.getKanaDirections(currentSpec.type)
-            // TalkBackのカスタムアクションメニューから全フリック文字にアクセス可能にする
-            map[FlickDirection.CENTER]?.let { char ->
-                info.addAction(AccessibilityNodeInfo.AccessibilityAction(ACTION_INPUT_CENTER, "「$char」を入力"))
+        info.hintText = accessibilityHint(currentSpec)
+        when (currentSpec) {
+            is KeySpec.Kana -> {
+                // TalkBackの操作メニューから全フリック文字にアクセス可能にする
+                val map = KeyboardLayoutData.getKanaDirections(currentSpec.type)
+                FLICK_ACTION_IDS.forEach { (direction, actionId) ->
+                    map[direction]?.takeIf { it.isNotEmpty() }?.let { char ->
+                        info.addAction(
+                            AccessibilityNodeInfo.AccessibilityAction(actionId, KeySpeech.flickActionLabel(char, direction)),
+                        )
+                    }
+                }
             }
-            map[FlickDirection.LEFT]?.let { char ->
-                info.addAction(AccessibilityNodeInfo.AccessibilityAction(ACTION_INPUT_LEFT, "「$char」を入力（左フリック）"))
+
+            is KeySpec.SimpleText -> currentSpec.longPressText?.let { alt ->
+                info.addAction(
+                    AccessibilityNodeInfo.AccessibilityAction(
+                        AccessibilityNodeInfo.ACTION_LONG_CLICK,
+                        "${KeySpeech.spokenText(alt)}を入力",
+                    ),
+                )
             }
-            map[FlickDirection.UP]?.let { char ->
-                info.addAction(AccessibilityNodeInfo.AccessibilityAction(ACTION_INPUT_UP, "「$char」を入力（上フリック）"))
+
+            is KeySpec.ModeSwitch -> currentSpec.longPressTarget?.let { target ->
+                info.addAction(
+                    AccessibilityNodeInfo.AccessibilityAction(
+                        AccessibilityNodeInfo.ACTION_LONG_CLICK,
+                        KeySpeech.modeSwitchDescription(target),
+                    ),
+                )
             }
-            map[FlickDirection.RIGHT]?.let { char ->
-                info.addAction(AccessibilityNodeInfo.AccessibilityAction(ACTION_INPUT_RIGHT, "「$char」を入力（右フリック）"))
-            }
-            map[FlickDirection.DOWN]?.let { char ->
-                info.addAction(AccessibilityNodeInfo.AccessibilityAction(ACTION_INPUT_DOWN, "「$char」を入力（下フリック）"))
-            }
+
+            else -> Unit
         }
     }
 
     override fun performAccessibilityAction(action: Int, arguments: Bundle?): Boolean {
-        val currentSpec = spec
-        if (currentSpec is KeySpec.Kana) {
-            val direction = when (action) {
-                ACTION_INPUT_CENTER -> FlickDirection.CENTER
-                ACTION_INPUT_LEFT -> FlickDirection.LEFT
-                ACTION_INPUT_UP -> FlickDirection.UP
-                ACTION_INPUT_RIGHT -> FlickDirection.RIGHT
-                ACTION_INPUT_DOWN -> FlickDirection.DOWN
-                else -> null
+        when (val currentSpec = spec) {
+            is KeySpec.Kana -> {
+                val direction = FLICK_ACTION_IDS.firstOrNull { it.second == action }?.first
+                if (direction != null) {
+                    val char = KeyboardLayoutData.getKanaChar(currentSpec.type, direction)
+                    if (char.isNotEmpty()) {
+                        onAction?.invoke(KeyboardAction.Text(char))
+                        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
+                        return true
+                    }
+                }
             }
-            if (direction != null) {
-                val char = KeyboardLayoutData.getKanaChar(currentSpec.type, direction)
-                if (char.isNotEmpty()) {
-                    onAction?.invoke(KeyboardAction.Text(char))
-                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+
+            is KeySpec.SimpleText -> {
+                val alt = currentSpec.longPressText
+                if (action == AccessibilityNodeInfo.ACTION_LONG_CLICK && alt != null) {
+                    onAction?.invoke(KeyboardAction.Text(alt))
+                    performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                     return true
                 }
             }
+
+            is KeySpec.ModeSwitch -> {
+                val target = currentSpec.longPressTarget
+                if (action == AccessibilityNodeInfo.ACTION_LONG_CLICK && target != null) {
+                    onModeSwitch?.invoke(target)
+                    performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    return true
+                }
+            }
+
+            else -> Unit
         }
         return super.performAccessibilityAction(action, arguments)
     }
@@ -418,13 +531,15 @@ class KeyView(context: Context) : View(context) {
         rectF.set(pad, pad, w - pad, h - pad)
 
         val currentSpec = spec ?: return
+        val isKeyPressed = gesture.isPressed
+        val isLongPressed = gesture.isLongPressActive
         val isAccent = when (currentSpec) {
             is KeySpec.Action -> currentSpec.isAccent
             else -> false
         }
         val isFunctionKey = when (currentSpec) {
             is KeySpec.Action -> !currentSpec.isAccent
-            is KeySpec.ModeSwitch, is KeySpec.Shift -> true
+            is KeySpec.ModeSwitch, is KeySpec.Shift, is KeySpec.PageSwitch -> true
             else -> false
         }
 
@@ -457,30 +572,29 @@ class KeyView(context: Context) : View(context) {
             }
 
             is KeySpec.SimpleText -> {
-                val text = if (isShifted || isCapsLock) {
-                    currentSpec.shiftText ?: currentSpec.text.uppercase()
+                val alt = currentSpec.longPressText
+                if (isLongPressed && alt != null) {
+                    // 長押し成立中は、離したときに入力される文字を強調して示す
+                    drawCenteredText(canvas, alt, centerX, centerY, 0xFF1976D2.toInt(), 24f, Typeface.DEFAULT_BOLD)
                 } else {
-                    currentSpec.text
+                    drawCenteredText(canvas, shiftedText(currentSpec), centerX, centerY, textColor, 20f, Typeface.DEFAULT)
+                    alt?.let { drawCornerHint(canvas, it, rectF) }
                 }
-                mainTextPaint.color = textColor
-                mainTextPaint.textSize = 20f * density
-                val textY = centerY - (mainTextPaint.descent() + mainTextPaint.ascent()) / 2f
-                canvas.drawText(text, centerX, textY, mainTextPaint)
             }
 
             is KeySpec.Action -> {
                 val label = customActionLabel ?: currentSpec.label
-                mainTextPaint.color = textColor
-                mainTextPaint.textSize = 15f * density
-                val textY = centerY - (mainTextPaint.descent() + mainTextPaint.ascent()) / 2f
-                canvas.drawText(label, centerX, textY, mainTextPaint)
+                drawCenteredText(canvas, label, centerX, centerY, textColor, 15f, Typeface.DEFAULT)
             }
 
             is KeySpec.ModeSwitch -> {
-                mainTextPaint.color = textColor
-                mainTextPaint.textSize = 14f * density
-                val textY = centerY - (mainTextPaint.descent() + mainTextPaint.ascent()) / 2f
-                canvas.drawText(currentSpec.label, centerX, textY, mainTextPaint)
+                val longLabel = currentSpec.longPressLabel
+                if (isLongPressed && longLabel != null) {
+                    drawCenteredText(canvas, longLabel, centerX, centerY, 0xFF1976D2.toInt(), 14f, Typeface.DEFAULT_BOLD)
+                } else {
+                    drawCenteredText(canvas, currentSpec.label, centerX, centerY, textColor, 14f, Typeface.DEFAULT)
+                    longLabel?.let { drawCornerHint(canvas, it, rectF) }
+                }
             }
 
             is KeySpec.Shift -> {
@@ -489,12 +603,37 @@ class KeyView(context: Context) : View(context) {
                     isShifted -> "▲"
                     else -> "⇧"
                 }
-                mainTextPaint.color = textColor
-                mainTextPaint.textSize = 16f * density
-                val textY = centerY - (mainTextPaint.descent() + mainTextPaint.ascent()) / 2f
-                canvas.drawText(label, centerX, textY, mainTextPaint)
+                drawCenteredText(canvas, label, centerX, centerY, textColor, 16f, Typeface.DEFAULT)
+            }
+
+            is KeySpec.PageSwitch -> {
+                drawCenteredText(canvas, currentSpec.label, centerX, centerY, textColor, 14f, Typeface.DEFAULT)
             }
         }
+    }
+
+    /** キー中央へ一つのラベルを描画する。サイズはdp単位で受け取る。 */
+    private fun drawCenteredText(
+        canvas: Canvas,
+        text: String,
+        centerX: Float,
+        centerY: Float,
+        color: Int,
+        sizeDp: Float,
+        face: Typeface,
+    ) {
+        mainTextPaint.color = color
+        mainTextPaint.textSize = sizeDp * density
+        mainTextPaint.typeface = face
+        val textY = centerY - (mainTextPaint.descent() + mainTextPaint.ascent()) / 2f
+        canvas.drawText(text, centerX, textY, mainTextPaint)
+    }
+
+    /** 長押しで入力できる文字をキー右上へ小さく描画し、長押しの存在を見て分かるようにする。 */
+    private fun drawCornerHint(canvas: Canvas, text: String, rect: RectF) {
+        guideTextPaint.textSize = 10f * density
+        guideTextPaint.color = 0xFF757575.toInt()
+        canvas.drawText(text, rect.right - 8f * density, rect.top + 12f * density, guideTextPaint)
     }
 
     /**
@@ -550,38 +689,30 @@ class KeyView(context: Context) : View(context) {
     }
 
     /**
+     * TalkBackでキーの後に読み上げる補足説明を返す。指で探索中は短い名前だけを読み、少し止まると操作方法を伝える。
+     */
+    private fun accessibilityHint(currentSpec: KeySpec): String? = when (currentSpec) {
+        is KeySpec.Kana -> KeySpeech.kanaHint(currentSpec.type)
+        is KeySpec.SimpleText -> currentSpec.longPressText?.let(KeySpeech::longPressHint)
+        is KeySpec.ModeSwitch -> currentSpec.longPressTarget?.let { "長押しで" + KeySpeech.modeSwitchDescription(it) }
+        else -> null
+    }
+
+    /**
      * TalkBack用の日本語コンテンツ説明文を更新する。
-     * 各フリック候補文字を含めて説明する。
+     * 指で探索しながら入力しやすいよう、入力される文字や操作だけを短く読む。
      */
     private fun updateContentDescription() {
         val desc = when (val currentSpec = spec) {
             is KeySpec.Kana -> {
-                val map = KeyboardLayoutData.getKanaDirections(currentSpec.type)
-                val c = map[FlickDirection.CENTER] ?: ""
-                val l = map[FlickDirection.LEFT] ?: ""
-                val u = map[FlickDirection.UP] ?: ""
-                val r = map[FlickDirection.RIGHT] ?: ""
-                val d = map[FlickDirection.DOWN] ?: ""
-                val sb = StringBuilder("$c 行、タップで $c")
-                if (l.isNotEmpty()) sb.append("、左で $l")
-                if (u.isNotEmpty()) sb.append("、上で $u")
-                if (r.isNotEmpty()) sb.append("、右で $r")
-                if (d.isNotEmpty()) sb.append("、下で $d")
-                sb.toString()
+                KeySpeech.spokenText(KeyboardLayoutData.getKanaChar(currentSpec.type, FlickDirection.CENTER))
             }
 
-            is KeySpec.SimpleText -> {
-                val text = if (isShifted || isCapsLock) {
-                    currentSpec.shiftText ?: currentSpec.text.uppercase()
-                } else {
-                    currentSpec.text
-                }
-                text
-            }
+            is KeySpec.SimpleText -> KeySpeech.spokenText(shiftedText(currentSpec))
 
             is KeySpec.Action -> {
                 customActionLabel ?: when (currentSpec.action) {
-                    is KeyboardAction.Text -> currentSpec.action.value
+                    is KeyboardAction.Text -> KeySpeech.spokenText(currentSpec.action.value)
                     is KeyboardAction.Delete -> "削除"
                     is KeyboardAction.Enter -> "確定"
                     is KeyboardAction.Space -> "空白"
@@ -591,12 +722,14 @@ class KeyView(context: Context) : View(context) {
                 }
             }
 
-            is KeySpec.ModeSwitch -> "${currentSpec.label} キー"
+            is KeySpec.ModeSwitch -> KeySpeech.modeSwitchDescription(currentSpec.targetMode)
             is KeySpec.Shift -> when {
                 isCapsLock -> "キャップスロック有効"
                 isShifted -> "シフト有効"
                 else -> "シフト"
             }
+
+            is KeySpec.PageSwitch -> currentSpec.description
 
             null -> ""
         }
@@ -604,14 +737,20 @@ class KeyView(context: Context) : View(context) {
     }
 
     companion object {
-        private const val INITIAL_REPEAT_DELAY_MS = 400L
-        private const val REPEAT_INTERVAL_MS = 60L
-
         // TalkBack用カスタムAccessibilityAction ID（0x01000000番台）
         const val ACTION_INPUT_CENTER = 0x01000001
         const val ACTION_INPUT_LEFT = 0x01000002
         const val ACTION_INPUT_UP = 0x01000003
         const val ACTION_INPUT_RIGHT = 0x01000004
         const val ACTION_INPUT_DOWN = 0x01000005
+
+        // フリック方向と操作メニューのIDの対応。登録と実行で同じ表を使い、食い違いを防ぐ。
+        private val FLICK_ACTION_IDS = listOf(
+            FlickDirection.CENTER to ACTION_INPUT_CENTER,
+            FlickDirection.LEFT to ACTION_INPUT_LEFT,
+            FlickDirection.UP to ACTION_INPUT_UP,
+            FlickDirection.RIGHT to ACTION_INPUT_RIGHT,
+            FlickDirection.DOWN to ACTION_INPUT_DOWN,
+        )
     }
 }
