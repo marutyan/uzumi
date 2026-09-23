@@ -96,6 +96,12 @@ class EditorSession(
     val isLiveMode: Boolean
         get() = liveCore != null
 
+    /**
+     * 未確定の読み（ライブ変換では変換中の表示）があるか。キーボードが「カナ」「変換」へ切り替えるために使う。
+     */
+    val hasComposition: Boolean
+        get() = active && (liveCore?.display?.isNotEmpty() ?: !buffer.isEmpty)
+
     /** 応答を待っている変換要求。UIが時間超過を判定するために使う。 */
     val pendingConversionRequest: ConversionRequest?
         get() = pendingConversion
@@ -334,6 +340,24 @@ class EditorSession(
         if (synchronizeComposition()) return true
         failClosed()
         return false
+    }
+
+    /**
+     * 読みをカタカナにする。ライブ変換では対象の文節を、そのカタカナ表記の候補へ切り替える（候補に無ければ何もしない）。
+     * 明示変換では、変換結果を表示していない読みをカタカナ表記へ置き換える。
+     */
+    fun toKatakana(): Boolean {
+        if (!active) return false
+        val core = liveCore
+        if (core != null) {
+            val focused = core.focusedSegment ?: return false
+            val katakana = BasicCandidateProvider.toKatakana(focused.reading)
+            if (focused.surface == katakana) return true
+            val choice = core.candidateBar()?.choices?.firstOrNull { it.value == katakana } ?: return false
+            return selectLiveCandidate(choice)
+        }
+        if (buffer.isEmpty || pendingConversion != null || currentConversion() != null) return false
+        return applyCandidate(BasicCandidateProvider.toKatakana(buffer.reading))
     }
 
     /** カーソル直前のかなを小文字・濁点・半濁点へ循環変換する。 */

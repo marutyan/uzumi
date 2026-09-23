@@ -168,6 +168,24 @@ object KeyboardLayoutData {
     fun getQwertyLongPress(char: Char): String? = QWERTY_LONG_PRESS[char.lowercaseChar()]
 
     /**
+     * 12キーの3行目左端のキー。入力中は読みをカタカナにする「カナ」、それ以外は数字面への切替とする（Simejiと同じ）。
+     */
+    fun kanaNumberKey(composing: Boolean): KeySpec = if (composing) {
+        KeySpec.Action(KeyboardAction.ToKatakana, "カナ")
+    } else {
+        KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC)
+    }
+
+    /**
+     * 12キーの3行目右端のキー。入力中は「変換」、それ以外は「空白」とする。独立した変換キーを置かないSimejiの並びに合わせる。
+     */
+    fun kanaSpaceKey(composing: Boolean): KeySpec = if (composing) {
+        KeySpec.Action(KeyboardAction.Convert, "変換")
+    } else {
+        KeySpec.Action(KeyboardAction.Space, "空白")
+    }
+
+    /**
      * 記号面の一ページ分の配列。
      *
      * @property label 切替キーに表示する短い名前

@@ -176,6 +176,18 @@ class KeyView(context: Context) : View(context) {
     }
 
     /**
+     * コールバックはそのままに、キーの定義だけを差し替える。入力中かどうかで役割が変わるキー
+     * （「123」と「カナ」、「空白」と「変換」）に使い、差し替え前の押下や連続実行は捨てる。
+     */
+    fun replaceSpec(newSpec: KeySpec) {
+        if (newSpec == spec) return
+        cancelPendingInput()
+        spec = newSpec
+        updateContentDescription()
+        invalidate()
+    }
+
+    /**
      * Shift状態を更新する。
      */
     fun updateShiftState(isShifted: Boolean, isCapsLock: Boolean) {
@@ -720,6 +732,7 @@ class KeyView(context: Context) : View(context) {
                     is KeyboardAction.Space -> "空白"
                     is KeyboardAction.Convert -> "変換"
                     is KeyboardAction.TransformKana -> "濁点、半濁点、小文字"
+                    is KeyboardAction.ToKatakana -> "カタカナにする"
                     is KeyboardAction.MoveCursor -> if (currentSpec.action.delta < 0) "カーソルを左へ移動" else "カーソルを右へ移動"
                 }
             }

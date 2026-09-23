@@ -802,6 +802,36 @@ class EditorSessionTest {
         assertTrue(client.committedAll.isEmpty())
     }
 
+    /** 12キーの「カナ」は、変換前の読みをカタカナにし、入力中の状態をキーボードへ伝えられる。 */
+    @Test
+    fun katakanaKeyReplacesReadingAndCompositionStateIsReported() {
+        val connection = FakeEditorConnection()
+        val session = EditorSession(connection, normalPolicy())
+        assertFalse(session.hasComposition)
+        assertFalse(session.toKatakana())
+
+        assertTrue(session.inputText("かな"))
+        assertTrue(session.hasComposition)
+        assertTrue(session.toKatakana())
+        assertEquals("カナ", session.compositionSnapshot().display)
+        assertTrue(session.commitComposition())
+        assertFalse(session.hasComposition)
+    }
+
+    /** ライブ変換の「カナ」は、カタカナ表記の候補が無い文節では表示を変えない。 */
+    @Test
+    fun liveKatakanaKeyKeepsDisplayWithoutKatakanaCandidate() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        assertFalse(session.hasComposition)
+        typeLive(session, client, "きょうは")
+        assertTrue(session.hasComposition)
+
+        assertFalse(session.toKatakana())
+        assertEquals("今日は", connection.text)
+    }
+
     /** ライブ変換の編集セッションを作る。変換要求はclientへ記録され、テストが結果を返す。 */
     private fun liveSession(
         connection: EditorConnectionPort,

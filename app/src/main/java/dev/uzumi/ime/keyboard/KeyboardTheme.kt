@@ -46,6 +46,15 @@ data class KeyboardColors(
  * キーの形の寸法（dp）。Simejiの実測と仕様案に合わせた値を一か所に置き、キーの描画が同じ値を使うようにする。
  */
 object KeyboardDimens {
+    /** 12キー・数字・記号の1行の高さ。Simejiの実測66.3dpに合わせる。 */
+    const val ROW_HEIGHT_DP = 66f
+
+    /** QWERTYの1行の高さ。数字行を含む5行で、ほかの面の4行とほぼ同じ高さになる。 */
+    const val QWERTY_ROW_HEIGHT_DP = 53f
+
+    /** キーボード全体の外周の余白。 */
+    const val PANEL_PADDING_DP = 2f
+
     /** キーの描画を枠から内側へ縮める量。隣のキーとの見た目の隙間は2倍の4dpになる。 */
     const val KEY_INSET_DP = 2f
 

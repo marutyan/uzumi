@@ -213,6 +213,16 @@ class KeyboardLayoutDataTest {
     }
 
     @Test
+    fun kanaKeysSwitchRoleOnlyWhileComposing() {
+        // 入力前はSimejiと同じく数字面への切替と空白
+        assertEquals(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), KeyboardLayoutData.kanaNumberKey(composing = false))
+        assertEquals(KeySpec.Action(KeyboardAction.Space, "空白"), KeyboardLayoutData.kanaSpaceKey(composing = false))
+        // 入力中は同じ位置が「カナ」と「変換」になる
+        assertEquals(KeySpec.Action(KeyboardAction.ToKatakana, "カナ"), KeyboardLayoutData.kanaNumberKey(composing = true))
+        assertEquals(KeySpec.Action(KeyboardAction.Convert, "変換"), KeyboardLayoutData.kanaSpaceKey(composing = true))
+    }
+
+    @Test
     fun lightAndDarkPalettesDefineSameColorsWithReadableText() {
         val light = readKeyboardColors("src/main/res/values/colors.xml")
         val dark = readKeyboardColors("src/main/res/values-night/colors.xml")

@@ -241,11 +241,17 @@ class UzumiInputMethodService : InputMethodService() {
         when (action) {
             is KeyboardAction.Text -> current.inputText(action.value)
             KeyboardAction.Delete -> current.deleteBackward()
-            is KeyboardAction.MoveCursor -> current.moveCursor(action.delta)
+            // ライブ変換の入力中は、←→で候補バーの対象の文節を前後へ移す（Simejiの変換中の←→に当たる操作）
+            is KeyboardAction.MoveCursor -> if (current.isLiveMode && current.hasComposition) {
+                current.moveLiveFocus(action.delta)
+            } else {
+                current.moveCursor(action.delta)
+            }
             KeyboardAction.Enter -> current.handleEnter()
             KeyboardAction.Space -> current.insertSpace()
             KeyboardAction.Convert -> current.convert()
             KeyboardAction.TransformKana -> current.transformKana()
+            KeyboardAction.ToKatakana -> current.toKatakana()
         }
         scheduleConversionTimeout(current)
         refreshCandidates()
@@ -311,6 +317,7 @@ class UzumiInputMethodService : InputMethodService() {
 
     /** 現在の読みとセッション世代に一致する基本候補だけを表示する。 */
     private fun refreshCandidates() {
+        keyboardPanel?.setComposing(session?.hasComposition == true)
         val row = candidateRow ?: return
         row.removeAllViews()
         val current = session
