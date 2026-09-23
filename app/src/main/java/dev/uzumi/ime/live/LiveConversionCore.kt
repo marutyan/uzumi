@@ -63,6 +63,13 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
     val focusedSegment: LiveSegment?
         get() = state.segments.firstOrNull { it.id == state.focusedSegmentId } ?: defaultFocus()
 
+    /**
+     * 候補バーの対象が末尾入力位置の既定segmentか。falseなら過去segmentを訂正中で、
+     * 統合担当は「末尾へ戻る」操作と対象segmentの強調を表示する。
+     */
+    val isFocusAtInput: Boolean
+        get() = state.focusedSegmentId == null || focusedSegment?.id == defaultFocus()?.id
+
     val canUndo: Boolean
         get() = undoStack.isNotEmpty()
 
@@ -306,6 +313,16 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
         revision += 1
         resetComposition()
         return LiveUpdate(handled = true, commands = commands)
+    }
+
+    /**
+     * Editor側でcompositionが終わった（外部の確定、範囲選択、アプリ側の置換）ため、
+     * Editorへ何も書かずに内部のcompositionとUndo範囲だけを捨てる。旧表示の再送を防ぐために使う。
+     */
+    fun discardComposition() {
+        if (!isActive) return
+        revision += 1
+        resetComposition()
     }
 
     /**
