@@ -132,7 +132,7 @@ class UzumiInputMethodService : InputMethodService() {
         bar.addView(undo)
         root.addView(bar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (48 * density).toInt()))
 
-        keyboardPanel = KeyboardPanel(this, ::handleKeyboardAction).also { panel ->
+        keyboardPanel = KeyboardPanel(this, ::handleKeyboardAction, lineDeleteLength = { session?.lineDeleteLength() }).also { panel ->
             root.addView(
                 panel,
                 LinearLayout.LayoutParams(
@@ -238,6 +238,8 @@ class UzumiInputMethodService : InputMethodService() {
     /** キーボード操作を現在の編集セッションへ一度だけ送る。 */
     private fun handleKeyboardAction(action: KeyboardAction) {
         val current = session ?: return
+        // 左ドラッグで消した文字列は、次の操作をした時点で戻せなくする
+        if (action != KeyboardAction.DeleteToLineStart) current.forgetLineDelete()
         when (action) {
             is KeyboardAction.Text -> current.inputText(action.value)
             KeyboardAction.Delete -> current.deleteBackward()
@@ -252,6 +254,7 @@ class UzumiInputMethodService : InputMethodService() {
             KeyboardAction.Convert -> current.convert()
             KeyboardAction.TransformKana -> current.transformKana()
             KeyboardAction.ToKatakana -> current.toKatakana()
+            KeyboardAction.DeleteToLineStart -> current.deleteToLineStart()
         }
         scheduleConversionTimeout(current)
         refreshCandidates()
@@ -321,6 +324,7 @@ class UzumiInputMethodService : InputMethodService() {
         val row = candidateRow ?: return
         row.removeAllViews()
         val current = session
+        if (current?.canUndoLineDelete == true) row.addView(lineDeleteUndoButton(current))
         if (current?.isLiveMode == true) {
             refreshLiveCandidates(row, current)
             return
@@ -392,6 +396,20 @@ class UzumiInputMethodService : InputMethodService() {
                     refreshCandidates()
                 }
             })
+        }
+    }
+
+    /** 削除キーの左ドラッグで消した文字列を戻すボタン。候補バーの左端に出す（Simejiの「取り消し」と同じ位置）。 */
+    private fun lineDeleteUndoButton(current: EditorSession): Button {
+        return Button(this).apply {
+            isAllCaps = false
+            text = getString(R.string.line_delete_undo)
+            contentDescription = getString(R.string.line_delete_undo_description)
+            setOnClickListener {
+                if (session !== current) return@setOnClickListener
+                current.undoLineDelete()
+                refreshCandidates()
+            }
         }
     }
 

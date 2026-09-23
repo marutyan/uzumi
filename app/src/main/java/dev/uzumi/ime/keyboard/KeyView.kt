@@ -102,6 +102,16 @@ class KeyView(context: Context) : View(context) {
     // 現在の押下で連続実行した回数。間隔の加速に使う。
     private var repeatCount = 0
 
+    // 削除キーの左ドラッグの判定。閾値はSimejiの実測（66〜73dp）に合わせて68dpとする。
+    private val deleteDrag = DeleteDragTracker(
+        slopPx = ViewConfiguration.get(context).scaledTouchSlop.toFloat(),
+        thresholdPx = DELETE_DRAG_THRESHOLD_DP * density,
+        escapePx = DELETE_DRAG_ESCAPE_DP * density,
+    )
+
+    // 削除キーのドラッグ中の状態を、キーボードへ知らせて案内を出すコールバック。
+    private var onDeleteDrag: ((View, DeleteDragState) -> Unit)? = null
+
     private val repeatHandler = Handler(Looper.getMainLooper())
     private val repeatRunnable = object : Runnable {
         override fun run() {
@@ -149,7 +159,9 @@ class KeyView(context: Context) : View(context) {
         onShiftToggle: (() -> Unit)? = null,
         onPageSwitch: (() -> Unit)? = null,
         onPreview: ((View, String?) -> Unit)? = null,
+        onDeleteDrag: ((View, DeleteDragState) -> Unit)? = null,
     ) {
+        this.onDeleteDrag = onDeleteDrag
         this.spec = spec
         this.onAction = onAction
         this.onModeSwitch = onModeSwitch
@@ -210,6 +222,8 @@ class KeyView(context: Context) : View(context) {
         repeatHandler.removeCallbacksAndMessages(null)
         removeCallbacks(longPressRunnable)
         if (gesture.isPressed) onPreview?.invoke(this, null)
+        if (deleteDrag.state != DeleteDragState.NONE) onDeleteDrag?.invoke(this, DeleteDragState.NONE)
+        deleteDrag.reset()
         if (gesture.isPressed || activePointerId != MotionEvent.INVALID_POINTER_ID) {
             gesture.reset()
             currentDirection = FlickDirection.CENTER
@@ -240,6 +254,11 @@ class KeyView(context: Context) : View(context) {
         val text = previewText() ?: return
         if (gesture.isPressed) callback(this, text)
     }
+
+    /**
+     * 削除キーかどうか。削除キーは左ドラッグを受け付けるため、押した瞬間ではなく離したときに1文字消す。
+     */
+    private fun isDeleteKey(): Boolean = (spec as? KeySpec.Action)?.action == KeyboardAction.Delete
 
     /** 押下中に連続実行するアクションキーであれば、そのアクションを返す。 */
     private fun repeatableAction(): KeyboardAction? {
@@ -275,7 +294,12 @@ class KeyView(context: Context) : View(context) {
                 updatePreview()
 
                 val repeatAction = repeatableAction()
-                if (repeatAction != null) {
+                if (isDeleteKey()) {
+                    // 削除は離したときに1文字消す。押し続けた場合は従来と同じ待ち時間の後に連続削除を始める。
+                    deleteDrag.reset()
+                    repeatCount = 0
+                    repeatHandler.postDelayed(repeatRunnable, KeyRepeatPolicy.INITIAL_DELAY_MS)
+                } else if (repeatAction != null) {
                     // 削除・カーソルは押下時に一回実行し、押し続けた場合だけ連続実行する（離したときは再送しない）
                     onAction?.invoke(repeatAction)
                     repeatCount = 0
@@ -313,6 +337,11 @@ class KeyView(context: Context) : View(context) {
                         updatePreview()
                         invalidate()
                     }
+                } else if (isDeleteKey() && repeatCount == 0) {
+                    // 連続削除が始まる前に左へ動かしたら、左ドラッグとして扱い連続削除を止める
+                    val changed = deleteDrag.move(gesture.startX - curX, gesture.startY - curY)
+                    if (deleteDrag.isDragging) repeatHandler.removeCallbacksAndMessages(null)
+                    if (changed) onDeleteDrag?.invoke(this, deleteDrag.state)
                 } else if (repeatableAction() != null) {
                     // 指がキー領域から大きく外れた場合はリピート停止
                     if (curX < -thresholdPx || curX > width + thresholdPx ||
@@ -367,6 +396,10 @@ class KeyView(context: Context) : View(context) {
         onPreview?.invoke(this, null)
         val wasPressed = gesture.isPressed
         val wasLongPressed = gesture.isLongPressActive
+        val deleteRelease = deleteDrag.release()
+        val deleteRepeated = repeatCount > 0
+        if (deleteDrag.state != DeleteDragState.NONE) onDeleteDrag?.invoke(this, DeleteDragState.NONE)
+        deleteDrag.reset()
         val startX = gesture.startX
         val startY = gesture.startY
         val finalSpec = spec
@@ -406,7 +439,19 @@ class KeyView(context: Context) : View(context) {
                 }
             }
 
-            is KeySpec.Action -> {
+            is KeySpec.Action -> if (finalSpec.action == KeyboardAction.Delete) {
+                // 左ドラッグはキーの外で離すことが多いため、キー内かどうかより先に判定する
+                val action = when (deleteRelease) {
+                    DeleteRelease.TAP -> KeyboardAction.Delete.takeIf { isInside && !deleteRepeated }
+                    DeleteRelease.SINGLE -> KeyboardAction.Delete
+                    DeleteRelease.LINE -> KeyboardAction.DeleteToLineStart
+                    DeleteRelease.CANCEL -> null
+                }
+                if (action != null) {
+                    onAction?.invoke(action)
+                    sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
+                }
+            } else {
                 if (isInside) {
                     // 連続実行するキーは押下時に実行済みのため、離したときは送らない
                     if (!KeyRepeatPolicy.isRepeatable(finalSpec.action)) {
@@ -513,6 +558,10 @@ class KeyView(context: Context) : View(context) {
                 )
             }
 
+            is KeySpec.Action -> if (currentSpec.action == KeyboardAction.Delete) {
+                info.addAction(AccessibilityNodeInfo.AccessibilityAction(ACTION_DELETE_TO_LINE_START, "行頭まで削除"))
+            }
+
             is KeySpec.ModeSwitch -> currentSpec.longPressTarget?.let { target ->
                 info.addAction(
                     AccessibilityNodeInfo.AccessibilityAction(
@@ -546,6 +595,15 @@ class KeyView(context: Context) : View(context) {
                 if (action == AccessibilityNodeInfo.ACTION_LONG_CLICK && alt != null) {
                     onAction?.invoke(KeyboardAction.Text(alt))
                     performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
+                    return true
+                }
+            }
+
+            is KeySpec.Action -> {
+                if (action == ACTION_DELETE_TO_LINE_START && currentSpec.action == KeyboardAction.Delete) {
+                    onAction?.invoke(KeyboardAction.DeleteToLineStart)
+                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                     return true
                 }
@@ -762,6 +820,7 @@ class KeyView(context: Context) : View(context) {
                     is KeyboardAction.Convert -> "変換"
                     is KeyboardAction.TransformKana -> "濁点、半濁点、小文字"
                     is KeyboardAction.ToKatakana -> "カタカナにする"
+                    is KeyboardAction.DeleteToLineStart -> "行頭まで削除"
                     is KeyboardAction.MoveCursor -> if (currentSpec.action.delta < 0) "カーソルを左へ移動" else "カーソルを右へ移動"
                 }
             }
@@ -790,6 +849,15 @@ class KeyView(context: Context) : View(context) {
         const val ACTION_INPUT_UP = 0x01000003
         const val ACTION_INPUT_RIGHT = 0x01000004
         const val ACTION_INPUT_DOWN = 0x01000005
+
+        /** 削除キーの操作メニューに出す「行頭まで削除」のID。左ドラッグと同じ操作をTalkBackから行う。 */
+        const val ACTION_DELETE_TO_LINE_START = 0x01000006
+
+        /** 削除キーをこの距離（dp）以上左へ動かして離すと行頭まで消す。 */
+        private const val DELETE_DRAG_THRESHOLD_DP = 68f
+
+        /** 削除キーを押した位置からこの距離（dp）以上上へ動かすと、左ドラッグを取り消す。 */
+        private const val DELETE_DRAG_ESCAPE_DP = 60f
 
         // フリック方向と操作メニューのIDの対応。登録と実行で同じ表を使い、食い違いを防ぐ。
         private val FLICK_ACTION_IDS = listOf(

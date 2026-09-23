@@ -14,4 +14,6 @@
     <color name="kb_text_secondary">#FFA6AEB8</color>
     <color name="kb_popup">#FF9DB8EA</color>
     <color name="kb_on_popup">#FF10203A</color>
+    <color name="kb_danger">#FFF2B8B5</color>
+    <color name="kb_on_danger">#FF601410</color>
 </resources>

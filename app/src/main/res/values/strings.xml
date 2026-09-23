@@ -67,4 +67,6 @@
     <string name="open_licenses">第三者ライセンス</string>
     <string name="licenses_title">第三者ライセンス</string>
     <string name="licenses_missing">このビルドには第三者表示が含まれていません。</string>
+    <string name="line_delete_undo">↶ 元に戻す</string>
+    <string name="line_delete_undo_description">行頭までの削除を元に戻す</string>
 </resources>

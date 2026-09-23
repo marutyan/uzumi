@@ -119,3 +119,106 @@ class KeyPreviewPopup(private val host: View, private val colors: KeyboardColors
         const val PREVIEW_TEXT_DP = 30f
     }
 }
+
+/**
+ * 削除キーを左へドラッグしている間、キーの左に「離すと何が消えるか」を示す案内。
+ * 閾値の手前では「1文字」、超えたら警告色で「行頭まで」と消える文字数を出す。入力欄の文字には手を加えない。
+ */
+class DeleteDragHint(private val host: View, private val colors: KeyboardColors) {
+    private val density = host.resources.displayMetrics.density
+    private val drawable = HintDrawable()
+    private var attachedRoot: View? = null
+    private val keyLocation = IntArray(2)
+    private val rootLocation = IntArray(2)
+
+    /** 削除キー[key]の左に、状態[state]の案内を出す。[lineLength]は行頭までの文字数（分からなければnull）。 */
+    fun show(key: View, state: DeleteDragState, lineLength: Int?) {
+        if (state == DeleteDragState.NONE) {
+            hide()
+            return
+        }
+        val root = host.rootView ?: return
+        if (attachedRoot !== root) {
+            hide()
+            root.overlay.add(drawable)
+            attachedRoot = root
+        }
+        drawable.text = deleteDragHintText(state, lineLength)
+        drawable.armed = state == DeleteDragState.ARMED
+        key.getLocationInWindow(keyLocation)
+        root.getLocationInWindow(rootLocation)
+        val height = HINT_HEIGHT_DP * density
+        val width = drawable.textWidth() + HINT_PADDING_DP * 2 * density
+        val right = (keyLocation[0] - rootLocation[0]).toFloat()
+        val top = (keyLocation[1] - rootLocation[1]) + (key.height - height) / 2f
+        val left = (right - width).coerceAtLeast(0f)
+        drawable.setBounds(left.toInt(), top.toInt(), (left + width).toInt(), (top + height).toInt())
+        drawable.invalidateSelf()
+    }
+
+    /** 案内を消す。 */
+    fun hide() {
+        attachedRoot?.overlay?.remove(drawable)
+        attachedRoot = null
+    }
+
+    /** 左端を丸めた札と文字を描く。 */
+    private inner class HintDrawable : Drawable() {
+        var text: String = ""
+        var armed = false
+        private val background = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val label = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textAlign = Paint.Align.CENTER
+            textSize = HINT_TEXT_DP * density
+        }
+        private val rect = RectF()
+
+        /** 文字の幅（px）。札の幅を決めるために使う。 */
+        fun textWidth(): Float = label.measureText(text)
+
+        override fun draw(canvas: Canvas) {
+            background.color = if (armed) colors.danger else colors.functionPressed
+            label.color = if (armed) colors.onDanger else colors.text
+            label.isFakeBoldText = armed
+            rect.set(bounds)
+            val radius = rect.height() / 2f
+            canvas.drawRoundRect(rect, radius, radius, background)
+            val y = rect.centerY() - (label.descent() + label.ascent()) / 2f
+            canvas.drawText(text, rect.centerX(), y, label)
+        }
+
+        override fun setAlpha(alpha: Int) {
+            background.alpha = alpha
+            label.alpha = alpha
+        }
+
+        override fun setColorFilter(colorFilter: ColorFilter?) {
+            background.colorFilter = colorFilter
+            label.colorFilter = colorFilter
+        }
+
+        @Deprecated("Drawable.getOpacityはAPI 29で非推奨だが、minSdk 30でも実装が必要")
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+    }
+
+    private companion object {
+        /** 案内の札の高さ（dp）。 */
+        const val HINT_HEIGHT_DP = 44f
+
+        /** 札の左右の余白（dp）。 */
+        const val HINT_PADDING_DP = 14f
+
+        /** 案内の文字の大きさ（dp）。 */
+        const val HINT_TEXT_DP = 14f
+    }
+}
+
+/**
+ * 削除ドラッグの案内の文言を決める。行頭までの文字数が分かる場合は、離す前に消える量を示す。
+ */
+fun deleteDragHintText(state: DeleteDragState, lineLength: Int?): String = when (state) {
+    DeleteDragState.ARMED -> if (lineLength != null) "× 行頭まで ${lineLength}文字" else "× 行頭まで"
+    DeleteDragState.DRAGGING -> "× 1文字"
+    DeleteDragState.CANCELED -> "取り消し"
+    DeleteDragState.NONE -> ""
+}

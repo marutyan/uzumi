@@ -47,4 +47,9 @@ sealed interface KeyboardAction {
      * 入力中の読み（ライブ変換では対象の文節）をカタカナにする要求。12キーの入力中に「123」の位置へ出る。
      */
     data object ToKatakana : KeyboardAction
+
+    /**
+     * カーソルから同じ行の行頭までを一度に消す要求。削除キーを左へドラッグして離したときに送る（Simejiと同じ操作）。
+     */
+    data object DeleteToLineStart : KeyboardAction
 }

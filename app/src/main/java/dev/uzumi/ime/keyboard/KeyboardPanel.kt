@@ -10,12 +10,14 @@ import android.widget.LinearLayout
  *
  * @param context コンテキスト
  * @param onAction キーボード操作イベントを通知するコールバック
+ * @param lineDeleteLength 削除キーの左ドラッグで消える、カーソルから行頭までの文字数を返す。分からなければnull
  */
 // 必須コールバックを伴うプログラム生成専用Viewであり、XMLからは生成しない。
 @SuppressLint("ViewConstructor")
 class KeyboardPanel(
     context: Context,
     private val onAction: (KeyboardAction) -> Unit,
+    private val lineDeleteLength: () -> Int? = { null },
 ) : LinearLayout(context) {
 
     private val density = context.resources.displayMetrics.density
@@ -51,6 +53,9 @@ class KeyboardPanel(
 
     // 押したキーの拡大表示。password欄では入力した文字を画面に大きく出さないため使わない。
     private val keyPreview = KeyPreviewPopup(this, KeyboardColors.from(context))
+
+    // 削除キーの左ドラッグ中に、離すと消える範囲を示す案内。
+    private val deleteDragHint = DeleteDragHint(this, KeyboardColors.from(context))
 
     private lateinit var kanaContainer: LinearLayout
     private lateinit var qwertyContainer: LinearLayout
@@ -117,6 +122,7 @@ class KeyboardPanel(
     fun cancelPendingInput() {
         allKeyViews.forEach { it.cancelPendingInput() }
         keyPreview.hide()
+        deleteDragHint.hide()
     }
 
     override fun onDetachedFromWindow() {
@@ -541,6 +547,11 @@ class KeyboardPanel(
                 onPageSwitch = { showNextSymbolPage() },
                 onPreview = { key, text ->
                     if (text == null || isPasswordField) keyPreview.hide() else keyPreview.show(key, text)
+                },
+                onDeleteDrag = { key, state ->
+                    // 文字数は閾値を超えたときだけ問い合わせ、ドラッグ中の毎回の問い合わせを避ける
+                    val length = if (state == DeleteDragState.ARMED) lineDeleteLength() else null
+                    deleteDragHint.show(key, state, length)
                 },
             )
         }

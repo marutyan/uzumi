@@ -111,3 +111,95 @@ object KeyRepeatPolicy {
         return START_INTERVAL_MS - reduction
     }
 }
+
+/**
+ * 削除キーを左へドラッグしたときの見た目の状態。キーボードは状態に応じて削除キーの左に案内を出す。
+ */
+enum class DeleteDragState {
+    /** ドラッグしていない。案内を出さない。 */
+    NONE,
+
+    /** 左へ動かしているが閾値の手前。離すと1文字だけ消える。 */
+    DRAGGING,
+
+    /** 閾値を超えた。離すとカーソルから行頭までを消す。 */
+    ARMED,
+
+    /** キーボードの上へ外した、または閾値を超えた後に戻した。離しても何も消さない。 */
+    CANCELED,
+}
+
+/**
+ * 削除キーを離したときに行う操作。
+ */
+enum class DeleteRelease {
+    /** ドラッグしなかった。通常の削除として扱う（長押しの連続削除が始まっていれば何もしない）。 */
+    TAP,
+
+    /** 閾値の手前で離した。1文字だけ消す。 */
+    SINGLE,
+
+    /** 閾値を超えて離した。カーソルから行頭までを消す。 */
+    LINE,
+
+    /** 取り消した。何も消さない。 */
+    CANCEL,
+}
+
+/**
+ * 削除キーの左ドラッグを判定する。Simejiの実機での挙動（約70dpで行削除、元の位置へ戻す・上へ外すと取り消し）に合わせ、
+ * Viewから切り離してJVMテストで守る。
+ *
+ * @param slopPx この距離より左へ動いたらドラッグとみなす（ピクセル）
+ * @param thresholdPx この距離以上左で離すと行頭まで消す（ピクセル）
+ * @param escapePx 押した位置からこの距離以上上へ動かしたら取り消す（ピクセル）
+ */
+class DeleteDragTracker(
+    private val slopPx: Float,
+    private val thresholdPx: Float,
+    private val escapePx: Float,
+) {
+    /** 左へのドラッグが始まったか。始まると長押しの連続削除は行わない。 */
+    var isDragging = false
+        private set
+
+    // 一度でも閾値を超えたか。超えた後に閾値の手前へ戻して離した場合は取り消しとする。
+    private var wasArmed = false
+
+    /** 現在の見た目の状態。 */
+    var state = DeleteDragState.NONE
+        private set
+
+    /** 押下開始で状態を捨てる。 */
+    fun reset() {
+        isDragging = false
+        wasArmed = false
+        state = DeleteDragState.NONE
+    }
+
+    /**
+     * 押した位置からの移動量を渡す。[leftPx]は左向きを正、[upPx]は上向きを正とする。状態が変わったらtrueを返す。
+     */
+    fun move(leftPx: Float, upPx: Float): Boolean {
+        if (!isDragging && leftPx > slopPx) isDragging = true
+        if (!isDragging) return false
+        val next = when {
+            upPx >= escapePx -> DeleteDragState.CANCELED
+            leftPx >= thresholdPx -> DeleteDragState.ARMED
+            wasArmed -> DeleteDragState.CANCELED
+            else -> DeleteDragState.DRAGGING
+        }
+        if (next == DeleteDragState.ARMED) wasArmed = true
+        val changed = next != state
+        state = next
+        return changed
+    }
+
+    /** 離したときの操作を返す。 */
+    fun release(): DeleteRelease = when {
+        !isDragging -> DeleteRelease.TAP
+        state == DeleteDragState.ARMED -> DeleteRelease.LINE
+        state == DeleteDragState.DRAGGING -> DeleteRelease.SINGLE
+        else -> DeleteRelease.CANCEL
+    }
+}

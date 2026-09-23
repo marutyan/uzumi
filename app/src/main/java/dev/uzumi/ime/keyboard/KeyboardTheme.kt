@@ -21,6 +21,8 @@ data class KeyboardColors(
     val textSecondary: Int,
     val popupBackground: Int,
     val onPopup: Int,
+    val danger: Int,
+    val onDanger: Int,
 ) {
     companion object {
         /** 現在の構成（ライト／ダーク）に合う配色をresourceから読む。 */
@@ -38,6 +40,8 @@ data class KeyboardColors(
             textSecondary = context.getColor(R.color.kb_text_secondary),
             popupBackground = context.getColor(R.color.kb_popup),
             onPopup = context.getColor(R.color.kb_on_popup),
+            danger = context.getColor(R.color.kb_danger),
+            onDanger = context.getColor(R.color.kb_on_danger),
         )
     }
 }

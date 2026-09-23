@@ -16,4 +16,7 @@
     <!-- 押したキーの拡大表示 -->
     <color name="kb_popup">#FF345995</color>
     <color name="kb_on_popup">#FFFFFFFF</color>
+    <!-- 削除キーの左ドラッグで、離すと行頭まで消える状態の案内 -->
+    <color name="kb_danger">#FFB3261E</color>
+    <color name="kb_on_danger">#FFFFFFFF</color>
 </resources>

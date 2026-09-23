@@ -1,6 +1,7 @@
 package dev.uzumi.ime.keyboard
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -238,6 +239,48 @@ class KeyboardLayoutDataTest {
     }
 
     @Test
+    fun deleteDragFollowsSimejiReleaseRules() {
+        fun tracker() = DeleteDragTracker(slopPx = 10f, thresholdPx = 68f, escapePx = 60f)
+
+        // 動かさずに離す：通常の削除
+        assertEquals(DeleteRelease.TAP, tracker().release())
+        // 閾値の手前で離す：1文字
+        tracker().apply {
+            move(40f, 0f)
+            assertEquals(DeleteDragState.DRAGGING, state)
+            assertEquals(DeleteRelease.SINGLE, release())
+        }
+        // 閾値を超えて離す：行頭まで
+        tracker().apply {
+            move(40f, 0f)
+            move(80f, 5f)
+            assertEquals(DeleteDragState.ARMED, state)
+            assertEquals(DeleteRelease.LINE, release())
+        }
+        // 閾値を超えた後に元の位置へ戻す：取り消し
+        tracker().apply {
+            move(80f, 0f)
+            move(2f, 0f)
+            assertEquals(DeleteDragState.CANCELED, state)
+            assertEquals(DeleteRelease.CANCEL, release())
+        }
+        // キーボードの上へ外す：取り消し
+        tracker().apply {
+            move(80f, 0f)
+            move(80f, 70f)
+            assertEquals(DeleteRelease.CANCEL, release())
+        }
+        // 左へ動かさずに上下へ揺れただけ：ドラッグにしない
+        tracker().apply {
+            move(-30f, 20f)
+            assertFalse(isDragging)
+            assertEquals(DeleteRelease.TAP, release())
+        }
+        assertEquals("× 行頭まで 12文字", deleteDragHintText(DeleteDragState.ARMED, 12))
+        assertEquals("× 行頭まで", deleteDragHintText(DeleteDragState.ARMED, null))
+    }
+
+    @Test
     fun kanaKeysSwitchRoleOnlyWhileComposing() {
         // 入力前はSimejiと同じく数字面への切替と空白
         assertEquals(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), KeyboardLayoutData.kanaNumberKey(composing = false))
@@ -262,6 +305,7 @@ class KeyboardLayoutDataTest {
                 "kb_text_secondary" to "kb_key",
                 "kb_on_accent" to "kb_accent",
                 "kb_on_popup" to "kb_popup",
+                "kb_on_danger" to "kb_danger",
             ).forEach { (fg, bg) ->
                 val ratio = contrastRatio(palette.getValue(fg), palette.getValue(bg))
                 assertTrue("$fg / $bg のコントラスト比が不足: $ratio", ratio >= 4.5)
