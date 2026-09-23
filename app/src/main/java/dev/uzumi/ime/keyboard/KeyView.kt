@@ -141,7 +141,9 @@ class KeyView(context: Context) : View(context) {
         override fun run() {
             if (!isAttachedToWindow) return
             val action = longPressAction() ?: return
-            onAction?.invoke(action)
+            // 同じ長押しの2回目以降は繰り返しの印を付け、評価用の計数で押下を重ねて数えないようにする。
+            val repeated = (action as? KeyboardAction.ResizeSegment)?.takeIf { repeatCount > 0 }?.copy(continued = true)
+            onAction?.invoke(repeated ?: action)
             haptic(if (repeatCount == 0) HapticFeedbackConstants.LONG_PRESS else HapticFeedbackConstants.KEYBOARD_TAP)
             repeatCount += 1
             repeatHandler.postDelayed(this, KeyRepeatPolicy.LONG_PRESS_ACTION_INTERVAL_MS)

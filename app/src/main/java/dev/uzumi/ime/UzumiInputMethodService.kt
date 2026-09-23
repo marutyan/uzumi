@@ -273,7 +273,7 @@ class UzumiInputMethodService : InputMethodService() {
     /** キーボード操作を現在の編集セッションへ一度だけ送る。 */
     private fun handleKeyboardAction(action: KeyboardAction) {
         val current = session ?: return
-        evaluation.record(OperationClassifier.keyboardAction(action, current.isLiveMode))
+        OperationClassifier.keyboardAction(action, current.isLiveMode)?.let(evaluation::record)
         // 左ドラッグで消した文字列は、次の操作をした時点で戻せなくする
         if (action != KeyboardAction.DeleteToLineStart) current.forgetLineDelete()
         when (action) {

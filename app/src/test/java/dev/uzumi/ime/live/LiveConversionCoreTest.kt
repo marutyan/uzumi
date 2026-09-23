@@ -802,18 +802,43 @@ class LiveConversionCoreTest {
     /** 伸ばすと後ろの文節の先頭を取り込み、残りを未変換へ戻して変換し直す。Undoで一操作として戻る。 */
     @Test
     fun expandingSegmentTakesNextGraphemeAndUndoRestores() {
-        val driver = typedSentence()
+        val driver = LiveSessionDriver().type("きょうはてんき")
+        assertEquals(SegmentState.PROVISIONAL, driver.core.segments[1].state)
         driver.focus(0)
         val before = driver.core.segments
 
         driver.resize(1)
-        assertEquals(listOf("きょうはて", "んきが", "いいですね"), readings(driver.core))
+        assertEquals(listOf("きょうはて", "んき"), readings(driver.core))
+        assertEquals("きょうはてんき", driver.core.reading)
         assertEquals(SegmentState.CHOSEN, driver.core.segments[0].state)
-        assertEquals(sentence, driver.core.reading)
         assertEquals(driver.core.display, driver.editor.composing)
 
         driver.undo()
         assertEquals(before.map { it.reading to it.surface }, driver.core.segments.map { it.reading to it.surface })
+    }
+
+    /**
+     * 後ろの文節が候補を選んだchosenや、stableなら伸ばさない。選んだ表記と保護を残し、次の要求でも保護範囲に入る（回帰）。
+     */
+    @Test
+    fun expandingIntoChosenOrStableNeighborIsRefused() {
+        val driver = typedSentence()
+        driver.focus(1)
+        driver.select("転機が")
+        driver.focus(0)
+        assertEquals(LiveUpdate.NO_CHANGE, driver.core.resizeFocusedSegment(1))
+        assertEquals(listOf("今日は", "転機が", "いいですね"), surfaces(driver.core))
+        assertEquals(SegmentState.CHOSEN, driver.core.segments[1].state)
+        val request = assertNotNullAndGet(driver.handle(driver.core.inputText("よ")).request)
+        assertTrue(ProtectedRange(4, 8, "転機が") in request.identity.protectedRanges)
+        assertEquals("転機が", driver.core.segments[1].surface)
+
+        val stable = typedSentence().type("、")
+        assertEquals(SegmentState.STABLE, stable.core.segments[1].state)
+        stable.focus(0)
+        val before = stable.core.segments
+        assertEquals(LiveUpdate.NO_CHANGE, stable.core.resizeFocusedSegment(1))
+        assertEquals(before, stable.core.segments)
     }
 
     /** 1書記素の文節は縮めず、末尾の文節は伸ばさず、読点と入力カーソルをまたいで伸ばさない。 */

@@ -58,17 +58,18 @@ object OperationClassifier {
     /**
      * キーボードの操作[action]の種類。変換キーは、明示変換（[liveMode]がfalse）では変換を始める確定操作、
      * ライブ変換では次の候補へ切り替える訂正操作とする。Enterは入力中でも確定と改行・送信を一度に行うため終端操作とする。
+     * キー操作数は画面に指が触れた回数なので、同じ長押しで繰り返した文節の伸縮（2回目以降）は数えずnullを返す。
      */
-    fun keyboardAction(action: KeyboardAction, liveMode: Boolean): OperationKind = when (action) {
+    fun keyboardAction(action: KeyboardAction, liveMode: Boolean): OperationKind? = when (action) {
         is KeyboardAction.Text -> text(action.value)
         KeyboardAction.Space, KeyboardAction.TransformKana -> OperationKind.INPUT
         KeyboardAction.Convert -> if (liveMode) OperationKind.CORRECTION else OperationKind.COMMIT
         KeyboardAction.Delete,
         KeyboardAction.DeleteToLineStart,
         is KeyboardAction.MoveCursor,
-        is KeyboardAction.ResizeSegment,
         KeyboardAction.ToKatakana,
         -> OperationKind.CORRECTION
+        is KeyboardAction.ResizeSegment -> if (action.continued) null else OperationKind.CORRECTION
         KeyboardAction.Enter -> OperationKind.TERMINATOR
     }
 

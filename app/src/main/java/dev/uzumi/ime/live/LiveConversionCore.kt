@@ -246,7 +246,9 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
      * 伸縮したsegmentはユーザーが決めた区切りとして読みへ戻し、変換器へ一segmentとしての変換を求める。
      * 結果が届くとchosenになり、以後の自動更新から守られる。縮めて外れた書記素は未変換のsegmentになり、
      * 後ろが自由なsegmentなら次の変換で一緒に変換される。伸ばして一部を取り込んだ後ろのsegmentは、残りを未変換へ戻す。
-     * 入力カーソルを内部に含むことになる伸縮と、読点をまたぐ伸縮はしない。Undo可能な一操作である。
+     * 入力カーソルを内部に含むことになる伸縮と、読点をまたぐ伸縮はしない。後ろのsegmentがstable・chosen・
+     * Undoで戻した範囲なら伸ばさない。保護を解くのは、ユーザーがそのsegmentの読みを編集した場合だけだからである。
+     * Undo可能な一操作である。
      */
     fun resizeFocusedSegment(delta: Int): LiveUpdate {
         if (!acceptsInput()) return LiveUpdate.NOT_HANDLED
@@ -258,7 +260,9 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
         if (state.inputCursor > target.readingStart && state.inputCursor < newEnd) return LiveUpdate.NO_CHANGE
         val index = state.segments.indexOfFirst { it.id == target.id }
         val next = state.segments.getOrNull(index + 1)
-        if (delta > 0 && (next == null || next.reading == LiveConversionRules.SOFT_BOUNDARY)) return LiveUpdate.NO_CHANGE
+        if (delta > 0 && (next == null || next.reading == LiveConversionRules.SOFT_BOUNDARY || isProtected(next))) {
+            return LiveUpdate.NO_CHANGE
+        }
         val clusters = state.clusters
         val resized = rawSegment(clusters, target.readingStart, newEnd).copy(userBounded = true)
         val segments = if (delta < 0) {
