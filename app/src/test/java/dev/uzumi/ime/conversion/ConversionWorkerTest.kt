@@ -233,9 +233,10 @@ private class FakeConversionEngine : ConversionEngine {
     override fun convert(sessionId: Long, reading: String): EngineConversion {
         calls += "convert($sessionId,$reading)"
         val values = if (reading == "かんじ") knownConversionValues else listOf(reading)
+        val segmentReading = segmentReadingOverride ?: reading
         return EngineConversion(
-            segments = listOf(ConversionSegment(segmentReadingOverride ?: reading, values.first())),
-            headCandidates = values.mapIndexed { index, value -> ConversionCandidate(index, value) },
+            segments = listOf(ConversionSegment(segmentReading, values.first())),
+            headCandidates = values.mapIndexed { index, value -> ConversionCandidate(index, value, segmentReading) },
         )
     }
 

@@ -447,7 +447,7 @@ class EditorSessionTest {
         session.convert()
         val request = client.requests.single()
         val inconsistent = ConversionOutcome.Converted(
-            ConversionResult(request, listOf(ConversionSegment("かん", "漢")), listOf(ConversionCandidate(0, "漢"))),
+            ConversionResult(request, listOf(ConversionSegment("かん", "漢")), listOf(ConversionCandidate(0, "漢", "かん"))),
         )
 
         assertFalse(session.applyConversionOutcome(inconsistent))
@@ -471,7 +471,7 @@ class EditorSessionTest {
         val result = ConversionResult(
             first,
             listOf(ConversionSegment("きょうは", "今日は"), ConversionSegment("てんき", "天気")),
-            listOf(ConversionCandidate(0, "今日は"), ConversionCandidate(1, "京は")),
+            listOf(ConversionCandidate(0, "今日は", "きょうは"), ConversionCandidate(1, "京は", "きょうは")),
         )
         assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(result)))
         assertEquals("今日は天気", connection.text)
@@ -484,6 +484,50 @@ class EditorSessionTest {
         assertEquals("てんき", second.reading)
         assertTrue(session.applyConversionOutcome(converted(second, "天気")))
         assertEquals("京は天気", connection.text)
+    }
+
+    /** 複数の文節をまとめる候補を選ぶと、その候補が覆う読みを確定し、残りだけを再入力する。 */
+    @Test
+    fun selectingMultiSegmentCandidateDoesNotDuplicateReading() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), 0, 0, conversionClient = client)
+        session.inputText("きょうはいいてんき")
+        session.convert()
+        val first = client.requests.single()
+        val result = ConversionResult(
+            first,
+            listOf(
+                ConversionSegment("きょうは", "今日は"),
+                ConversionSegment("いい", "いい"),
+                ConversionSegment("てんき", "天気"),
+            ),
+            listOf(
+                ConversionCandidate(0, "今日は", "きょうは"),
+                ConversionCandidate(5, "今日はいい", "きょうはいい"),
+                ConversionCandidate(6, "今日はいい天気", "きょうはいいてんき"),
+            ),
+        )
+        assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(result)))
+
+        assertTrue(session.selectConversionCandidate(ConversionChoice(first, 5)))
+        assertEquals("今日はいいてんき", connection.text)
+        assertEquals("てんき", client.requests.last().reading)
+        assertTrue(session.applyConversionOutcome(converted(client.requests.last(), "天気")))
+        assertTrue(session.commitComposition())
+        assertEquals("今日はいい天気", connection.text)
+
+        session.inputText("きょうはいいてんき")
+        session.convert()
+        val full = client.requests.last()
+        assertTrue(
+            session.applyConversionOutcome(
+                ConversionOutcome.Converted(result.copy(request = full)),
+            ),
+        )
+        assertTrue(session.selectConversionCandidate(ConversionChoice(full, 6)))
+        assertEquals("今日はいい天気今日はいい天気", connection.text)
+        assertTrue(session.compositionSnapshot().reading.isEmpty())
     }
 
     /** 変換結果の表示中に次の文字を入力すると、表示中の変換を確定して新しい読みを始める。 */
@@ -531,7 +575,7 @@ class EditorSessionTest {
             ConversionResult(
                 request,
                 listOf(ConversionSegment(request.reading, values.first())),
-                values.mapIndexed { index, value -> ConversionCandidate(index, value) },
+                values.mapIndexed { index, value -> ConversionCandidate(index, value, request.reading) },
             ),
         )
     }

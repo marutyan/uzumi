@@ -198,8 +198,9 @@ class EditorSession(
         val conversion = currentConversion() ?: return false
         if (conversion.request != choice.request) return false
         val candidate = conversion.headCandidates.firstOrNull { it.id == choice.candidateId } ?: return false
-        // isConsistentにより、先頭文節の読みは現在の読みの接頭辞であることが保証されている。
-        val remainingReading = buffer.reading.substring(conversion.segments.first().reading.length)
+        // isConsistentにより、候補が確定する読みは現在の読みの接頭辞であることが保証されている。
+        // 複数の文節をまとめる候補では、その候補が覆う文節すべてが確定される。
+        val remainingReading = buffer.reading.substring(candidate.reading.length)
         if (!commitCompositionAs(candidate.value)) return false
         conversionClient?.commitCandidate(conversion.request, candidate.id)
         if (remainingReading.isEmpty()) return true

@@ -19,10 +19,14 @@ data class ConversionSegment(
     val value: String,
 )
 
-/** 先頭文節の候補。idはエンジン内部の候補識別子で、確定時の学習通知にだけ使う。 */
+/**
+ * 先頭文節の候補。idはエンジン内部の候補識別子で、確定時の学習通知にだけ使う。
+ * readingはこの候補を選んだときに確定される読みで、複数の文節をまとめる候補では先頭文節より長い。
+ */
 data class ConversionCandidate(
     val id: Int,
     val value: String,
+    val reading: String,
 )
 
 /** エンジンが返した文節と先頭文節の候補。要求の世代とは独立した生の結果。 */
@@ -39,12 +43,16 @@ data class ConversionResult(
     val segments: List<ConversionSegment>,
     val headCandidates: List<ConversionCandidate>,
 ) {
-    /** 文節の読みを連結したものが要求した読み全体と一致し、候補が一つ以上あるかを返す。 */
+    /**
+     * 文節の読みを連結したものが要求した読み全体と一致し、候補が一つ以上あり、
+     * 各候補が確定する読みが要求した読みの空でない接頭辞であるかを返す。
+     */
     val isConsistent: Boolean
         get() = segments.isNotEmpty() &&
             headCandidates.isNotEmpty() &&
             segments.all { it.reading.isNotEmpty() && it.value.isNotEmpty() } &&
-            segments.joinToString(separator = "") { it.reading } == request.reading
+            segments.joinToString(separator = "") { it.reading } == request.reading &&
+            headCandidates.all { it.reading.isNotEmpty() && request.reading.startsWith(it.reading) }
 
     /** 全文節の第一候補を連結した、compositionへ表示する文字列。 */
     val display: String

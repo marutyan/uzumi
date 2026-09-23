@@ -37,6 +37,9 @@ class MozcConversionEngine(
     // 辞書fileを用意して返す。APKに辞書が無ければnullを返す。
     private val dataFile: () -> File?,
 ) : ConversionEngine {
+    // 直前の応答にpreeditが残っていたsession。worker threadだけが読み書きする。
+    private val sessionsWithPreedit = mutableSetOf<Long>()
+
     override fun load(): EngineHealth {
         if (!native.loadLibrary()) {
             return EngineHealth.Unavailable(EngineUnavailableReason.NATIVE_LIBRARY_MISSING)
@@ -60,6 +63,7 @@ class MozcConversionEngine(
     }
 
     override fun deleteSession(sessionId: Long) {
+        sessionsWithPreedit -= sessionId
         eval(Input.newBuilder().setType(Input.CommandType.DELETE_SESSION).setId(sessionId))
     }
 
@@ -72,7 +76,11 @@ class MozcConversionEngine(
 
     override fun convert(sessionId: Long, reading: String): EngineConversion? {
         if (reading.isEmpty()) return null
-        sendCommand(sessionId, SessionCommand.CommandType.REVERT) ?: return null
+        // REVERTは変換中なら変換の取り消しだが、確定後の待機状態では直前の確定の学習を取り消すため、
+        // preeditが残っている場合だけ送る。
+        if (sessionId in sessionsWithPreedit) {
+            sendCommand(sessionId, SessionCommand.CommandType.REVERT) ?: return null
+        }
         for (character in GraphemeClusters.split(reading)) {
             // AS_ISで読みを変えずにcompositionへ積み、ローマ字表などによる書き換えを避ける。
             val key = KeyEvent.newBuilder()
@@ -83,7 +91,7 @@ class MozcConversionEngine(
         }
         val output = sendKey(sessionId, KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.SPACE))
             ?: return null
-        return toConversion(output)
+        return toConversion(sessionId, output)
     }
 
     override fun commitCandidate(sessionId: Long, candidateId: Int): Boolean {
@@ -95,14 +103,28 @@ class MozcConversionEngine(
         return sendCommand(sessionId, SessionCommand.CommandType.SUBMIT)?.consumed == true
     }
 
-    /** 変換状態のOutputから文節と先頭文節の候補を取り出す。変換状態でなければnullを返す。 */
-    private fun toConversion(output: Output): EngineConversion? {
+    /**
+     * 変換状態のOutputから文節と先頭文節の候補を取り出す。変換状態でなければnullを返す。
+     * 候補には複数の文節をまとめて置き換えるもの（全文候補など）が混ざり、候補の情報だけでは
+     * 覆う読みを確実に判別できない。そこで各候補を一時的に選び、preeditの先頭文節の読みを
+     * その候補が確定する読みとして記録し、最後に元の候補へ選択を戻す。
+     */
+    private fun toConversion(sessionId: Long, output: Output): EngineConversion? {
         if (!output.hasPreedit() || !output.hasAllCandidateWords()) return null
         val segments = output.preedit.segmentList.map { ConversionSegment(reading = it.key, value = it.value) }
-        val candidates = output.allCandidateWords.candidatesList
+        val words = output.allCandidateWords.candidatesList
             .filter { it.hasValue() && it.value.isNotEmpty() }
-            .map { ConversionCandidate(id = it.id, value = it.value) }
-            .distinctBy(ConversionCandidate::value)
+        val focusedId = output.allCandidateWords.candidatesList
+            .getOrNull(output.allCandidateWords.focusedIndex)
+            ?.id
+        val candidates = words.mapNotNull { word ->
+            val selected = sendCommand(sessionId, SessionCommand.CommandType.SELECT_CANDIDATE, word.id)
+            val headReading = selected?.preedit?.segmentList?.firstOrNull()?.key
+            headReading?.let { ConversionCandidate(id = word.id, value = word.value, reading = it) }
+        }.distinctBy { it.value to it.reading }
+        if (focusedId != null) {
+            sendCommand(sessionId, SessionCommand.CommandType.SELECT_CANDIDATE, focusedId) ?: return null
+        }
         return EngineConversion(segments = segments, headCandidates = candidates)
     }
 
@@ -113,7 +135,12 @@ class MozcConversionEngine(
                 .setType(Input.CommandType.SEND_KEY)
                 .setId(sessionId)
                 .setKey(key),
-        )
+        )?.also { recordPreedit(sessionId, it) }
+    }
+
+    /** 応答にpreeditがあるかを記録し、次の変換でREVERTを送るべきかの判断に使う。 */
+    private fun recordPreedit(sessionId: Long, output: Output) {
+        if (output.hasPreedit()) sessionsWithPreedit += sessionId else sessionsWithPreedit -= sessionId
     }
 
     /** 指定sessionへSessionCommandを送る。候補を扱う命令ではcandidateIdを付ける。 */
@@ -129,7 +156,7 @@ class MozcConversionEngine(
                 .setType(Input.CommandType.SEND_COMMAND)
                 .setId(sessionId)
                 .setCommand(command),
-        )
+        )?.also { recordPreedit(sessionId, it) }
     }
 
     /** Commandを一つ評価し、失敗の応答や解析できない応答ならnullを返す。 */
