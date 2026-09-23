@@ -14,7 +14,7 @@ Phase 0はPR #1で完了し、2026-09-21のユーザー指示でPhase 1へ着手
 | 独立レビューと文書検証 | done | 2026-09-20、7文書の要求/API保証/license区分/状態/MVP整合を確認し合格。Android 17メモリ制限の指摘を修正して再確認。相対リンク・表列数・fence・git diff --cached --checkも合格 |
 | Phase 1a 入力基盤 | in_progress | 50単体テストとPixel試用欄の基本編集は合格。別アプリ・機密欄・回転等の互換試験は未実施 |
 | Phase 1b キーUI | in_progress | 12-key、英語QWERTY、数字の試用欄入力と最下段操作をPixelで確認。2026-09-23に記号面（3ページ）、QWERTYから数字・記号への直接切替、削除・カーソルの連続実行、QWERTY長押しの数字・記号、触覚、TalkBack用の読み上げ・操作メニューを実装し、63単体テスト・APK・lintは合格（[記録](../docs/phase1-validation.md#キー入力の追加2026-09-23)）。実機での操作・TalkBack・触覚は未確認 |
-| Phase 1c 漢字変換・辞書 | in_progress | [Mozcのnative・辞書・Java liteのローカルビルド](../docs/mozc-build-probe.md)成功。配布資産の監査・NOTICEは未完了。APK組込み・端末変換は未実施。ユーザー辞書は保存・登録・検索・編集・削除・TSV入出力・管理画面・参照APIを実装しJVMテストで確認したが、実機操作とIME候補への接続は未実施 |
+| Phase 1c 漢字変換・辞書 | in_progress | [Mozcのnative・辞書・Java liteのローカルビルド](../docs/mozc-build-probe.md)成功。[配布物監査](../docs/mozc-distribution-audit.md)でNOTICE添付を条件に本人用debug APKへの同梱可と判定し、[`NOTICE.txt`](../third_party/mozc/NOTICE.txt)を作成。APK組込み・端末変換は未実施。ユーザー辞書は保存・登録・検索・編集・削除・TSV入出力・管理画面・参照APIを実装しJVMテストで確認したが、実機操作とIME候補への接続は未実施 |
 | Phase 2以降 | pending | Phase 1の受入条件を満たしてから開始 |
 
 ## 二つの到達点
@@ -63,7 +63,7 @@ Android 17の実機では`adb shell am memory-limiter status`で制限状態を�
 
 ## 次の一手
 
-1. `mozc.data`の入力資産、郵便番号データ、nativeの実リンク閉包、Java lite runtimeを棚卸しし、APK同梱用のNOTICEを確定する。
+1. `mozc.data`の入力資産、郵便番号データ、nativeの実リンク閉包、Java lite runtimeを棚卸しし、APK同梱用のNOTICEを確定する。完了：[配布物監査](../docs/mozc-distribution-audit.md)。
 2. 配布条件を満たした資産と最小JNIブリッジを接続し、Pixel 10 Proで既知のかな漢字変換、辞書不在fallback、session破棄を確認する。
 3. Phase 1a/1bの未実施互換試験と、Phase 1cのユーザー辞書を進める。性能選定の実験条件は実行前に固定する。
 
