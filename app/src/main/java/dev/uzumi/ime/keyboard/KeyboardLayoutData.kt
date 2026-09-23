@@ -191,6 +191,18 @@ object KeyboardLayoutData {
     }
 
     /**
+     * ←→キー。文節を伸縮できる間（変換中）は、押して離すと文節の移動、長押しで文節の区切りの伸縮にする。
+     * それ以外は従来どおり、押すとカーソルを動かし、押し続けると繰り返す。
+     *
+     * @param delta 負で←、正で→
+     */
+    fun arrowKey(delta: Int, resizable: Boolean): KeySpec = KeySpec.Action(
+        action = KeyboardAction.MoveCursor(delta),
+        label = if (delta < 0) "←" else "→",
+        longPressAction = if (resizable) KeyboardAction.ResizeSegment(delta) else null,
+    )
+
+    /**
      * 記号面の一ページ分の配列。
      *
      * @property label 切替キーに表示する短い名前

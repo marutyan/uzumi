@@ -97,4 +97,20 @@ object KeySpeech {
      * 長押しで入力できる文字の補足説明を返す。
      */
     fun longPressHint(text: String): String = "長押しで ${spokenText(text)}"
+
+    /**
+     * アクションキーの操作をTalkBackで読み上げる短い名前。キーの説明と、長押しの別操作の説明に使う。
+     */
+    fun actionDescription(action: KeyboardAction): String = when (action) {
+        is KeyboardAction.Text -> spokenText(action.value)
+        is KeyboardAction.Delete -> "削除"
+        is KeyboardAction.Enter -> "確定"
+        is KeyboardAction.Space -> "空白"
+        is KeyboardAction.Convert -> "変換"
+        is KeyboardAction.TransformKana -> "濁点、半濁点、小文字"
+        is KeyboardAction.ToKatakana -> "カタカナにする"
+        is KeyboardAction.DeleteToLineStart -> "行頭まで削除"
+        is KeyboardAction.MoveCursor -> if (action.delta < 0) "カーソルを左へ移動" else "カーソルを右へ移動"
+        is KeyboardAction.ResizeSegment -> if (action.delta < 0) "文節を縮める" else "文節を伸ばす"
+    }
 }

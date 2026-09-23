@@ -2,6 +2,8 @@ package dev.uzumi.ime.conversion
 
 import dev.uzumi.ime.dictionary.UserDictionaryLookup
 import dev.uzumi.ime.learning.LearningStore
+import dev.uzumi.ime.live.CandidateRequest
+import dev.uzumi.ime.live.CandidateResult
 import dev.uzumi.ime.live.ConversionRequest as LiveRequest
 import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.ResultSegment
@@ -40,6 +42,9 @@ interface LiveConversionClient {
 
     /** ライブ変換で確定したsegment列を、単位ごとにエンジンへ学習させる。学習禁止欄では呼ばない。 */
     fun learnCommitted(sessionEpoch: Long, units: List<List<LearnedSegment>>)
+
+    /** 注目したsegmentの候補の取り直しを依頼する。未処理の古い要求は捨てられ、最新の要求だけを処理する。 */
+    fun requestSegmentCandidates(sessionEpoch: Long, request: CandidateRequest)
 }
 
 /**
@@ -57,6 +62,8 @@ class ConversionWorker(
     private val onOutcome: (ConversionOutcome) -> Unit,
     // ライブ変換の結果の通知（編集セッションの世代、結果）。worker threadから呼ばれる。失敗時は通知しない。
     private val onLiveResult: (Long, LiveResult) -> Unit = { _, _ -> },
+    // 取り直した候補の通知（編集セッションの世代、結果）。worker threadから呼ばれる。失敗時は通知しない。
+    private val onCandidateResult: (Long, CandidateResult) -> Unit = { _, _ -> },
     // ユーザー辞書を返す。初回はファイルを読むため、worker threadからだけ呼ぶ。
     private val userDictionary: () -> UserDictionaryLookup? = { null },
     // IME側の学習キャッシュを返す。初回はファイルを読むため、worker threadからだけ呼ぶ。nullなら学習を使わない。
@@ -70,6 +77,9 @@ class ConversionWorker(
 
     // 未処理のライブ変換要求のうち最新の一件と、その編集セッションの世代。
     private val latestLiveRequest = AtomicReference<Pair<Long, LiveRequest>?>(null)
+
+    // 未処理の候補の取り直し要求のうち最新の一件と、その編集セッションの世代。
+    private val latestCandidateRequest = AtomicReference<Pair<Long, CandidateRequest>?>(null)
 
     // この値以下のsessionEpochは終了済み。キューに残った要求もエンジンへ送らない。
     private val endedThroughEpoch = AtomicLong(Long.MIN_VALUE)
@@ -124,6 +134,11 @@ class ConversionWorker(
     override fun requestLiveConversion(sessionEpoch: Long, request: LiveRequest) {
         latestLiveRequest.set(sessionEpoch to request)
         executor.execute(::drainLatestLiveRequest)
+    }
+
+    override fun requestSegmentCandidates(sessionEpoch: Long, request: CandidateRequest) {
+        latestCandidateRequest.set(sessionEpoch to request)
+        executor.execute(::drainLatestCandidateRequest)
     }
 
     /**
@@ -236,7 +251,7 @@ class ConversionWorker(
             return
         }
         lastConverted.remove(request.sessionEpoch)
-        val conversion = runCatching { engine.convert(sessionId, request.reading) }.getOrNull()
+        val conversion = runCatching { engine.convert(sessionId, request.reading, request.headLength) }.getOrNull()
         if (conversion == null) {
             onOutcome(ConversionOutcome.Failed(request))
             return
@@ -276,17 +291,58 @@ class ConversionWorker(
             },
             userDictionary = lookupUserDictionary(),
             // 学習禁止欄では学習語を参照しない。完全一致した学習語のうちscoreが最も高いものを表示する。
-            learnedSurfaces = lookupLearningStore()?.takeIf { request.learningAllowed }?.let { store ->
-                { reading -> store.exactMatches(reading).map { it.surface } }
-            },
+            learnedSurfaces = learnedSurfaces(request.learningAllowed),
             // 部分範囲の先頭からの読みに一致する句で区切りを合わせる。学習禁止欄では参照しない。
-            learnedPhrases = lookupLearningStore()?.takeIf { request.learningAllowed }?.let { store ->
-                { reading -> store.exactPhraseMatches(reading).map { it.surface } }
+            learnedPhrases = learnedPhrases(request.learningAllowed),
+            // ユーザーが伸縮で区切りを決めた読みは、Mozcの文節の幅を合わせて一文節として変換する。
+            convertFixed = { reading ->
+                if (isAsciiOnly(reading)) {
+                    ResultSegment(reading, reading)
+                } else {
+                    engine.convertSegment(sessionId, "", reading, "")?.let {
+                        ResultSegment(reading, it.value, it.candidates, candidatesComplete = true)
+                    }
+                }
             },
         )
         val result = runCatching { converter.convert(request) }.getOrNull() ?: return
         onLiveResult(sessionEpoch, result)
     }
+
+    /**
+     * 最新の候補の取り直し要求だけを取り出し、対象segmentを前後の読みを文脈に一文節として変換して候補を集める。
+     * 自動変換と同じく、ユーザー辞書と学習語を合成する。ASCIIだけの読みはMozcへ送らない（入力のまま表示するため）。
+     */
+    private fun drainLatestCandidateRequest() {
+        val (sessionEpoch, request) = latestCandidateRequest.getAndSet(null) ?: return
+        if (isEnded(sessionEpoch) || currentHealth !is EngineHealth.Ready || isAsciiOnly(request.reading)) return
+        val sessionId = sessionFor(sessionEpoch) ?: return
+        if (!runCatching { engine.setIncognito(!request.learningAllowed) }.getOrDefault(false)) return
+        lastConverted.remove(sessionEpoch)
+        // 文脈に使う前後の読み。ASCIIだけの読みはライブ変換でもMozcへ送らないため、文脈にもしない。
+        val preceding = request.preceding.takeUnless(::isAsciiOnly).orEmpty()
+        val following = request.following.takeUnless(::isAsciiOnly).orEmpty()
+        val segment = runCatching { engine.convertSegment(sessionId, preceding, request.reading, following) }
+            .getOrNull() ?: return
+        val exactSurfaces = combineExactSurfaces(
+            learnedSurfaces(request.learningAllowed),
+            learnedPhrases(request.learningAllowed),
+        )
+        val candidates = mergeSegmentCandidates(request.reading, segment.candidates, lookupUserDictionary(), exactSurfaces)
+        onCandidateResult(sessionEpoch, CandidateResult(request, candidates))
+    }
+
+    /** 読みに完全一致する学習語の表記を返す関数。学習禁止欄と学習キャッシュが無い場合はnull。 */
+    private fun learnedSurfaces(learningAllowed: Boolean): ((String) -> List<String>)? =
+        lookupLearningStore()?.takeIf { learningAllowed }?.let { store ->
+            { reading -> store.exactMatches(reading).map { it.surface } }
+        }
+
+    /** 読みに完全一致する学習した句の表記を返す関数。学習禁止欄と学習キャッシュが無い場合はnull。 */
+    private fun learnedPhrases(learningAllowed: Boolean): ((String) -> List<String>)? =
+        lookupLearningStore()?.takeIf { learningAllowed }?.let { store ->
+            { reading -> store.exactPhraseMatches(reading).map { it.surface } }
+        }
 
     /** ユーザー辞書を開いて返す。読めなければ登録語なしで変換を続ける。 */
     private fun lookupUserDictionary(): UserDictionaryLookup? = runCatching { userDictionary() }.getOrNull()

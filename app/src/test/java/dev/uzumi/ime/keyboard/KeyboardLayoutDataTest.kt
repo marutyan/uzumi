@@ -305,6 +305,22 @@ class KeyboardLayoutDataTest {
         assertEquals(KeySpec.Action(KeyboardAction.Convert, "変換"), KeyboardLayoutData.kanaSpaceKey(composing = true))
     }
 
+    /** ←→は変換中だけ長押しで文節を伸縮し、それ以外は従来どおり押し続けるとカーソルを連続で動かす。 */
+    @Test
+    fun arrowKeysResizeSegmentOnLongPressOnlyWhileConverting() {
+        assertEquals(
+            KeySpec.Action(KeyboardAction.MoveCursor(-1), "←", longPressAction = KeyboardAction.ResizeSegment(-1)),
+            KeyboardLayoutData.arrowKey(-1, resizable = true),
+        )
+        assertEquals(
+            KeySpec.Action(KeyboardAction.MoveCursor(1), "→", longPressAction = KeyboardAction.ResizeSegment(1)),
+            KeyboardLayoutData.arrowKey(1, resizable = true),
+        )
+        assertEquals(KeySpec.Action(KeyboardAction.MoveCursor(1), "→"), KeyboardLayoutData.arrowKey(1, resizable = false))
+        assertEquals("文節を縮める", KeySpeech.actionDescription(KeyboardAction.ResizeSegment(-1)))
+        assertEquals("文節を伸ばす", KeySpeech.actionDescription(KeyboardAction.ResizeSegment(1)))
+    }
+
     @Test
     fun lightAndDarkPalettesDefineSameColorsWithReadableText() {
         val light = readKeyboardColors("src/main/res/values/colors.xml")

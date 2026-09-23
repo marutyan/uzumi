@@ -11,6 +11,8 @@ data class ConversionRequest(
     val reading: String,
     // 学習・履歴の利用を止めるべき欄か。trueならエンジンへ変換を送る前にincognitoを指定する。
     val incognito: Boolean,
+    // 先頭文節の読みの書記素数。ユーザーが文節を伸縮したときだけ指定し、nullならエンジンの区切りのまま変換する。
+    val headLength: Int? = null,
 )
 
 /** 変換結果の一文節。readingはその文節が占める読み、valueは現在の第一候補の表記。 */
