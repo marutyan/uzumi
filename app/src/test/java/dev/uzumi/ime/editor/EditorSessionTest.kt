@@ -7,6 +7,12 @@ import dev.uzumi.ime.conversion.ConversionOutcome
 import dev.uzumi.ime.conversion.ConversionRequest
 import dev.uzumi.ime.conversion.ConversionResult
 import dev.uzumi.ime.conversion.ConversionSegment
+import dev.uzumi.ime.conversion.LearnedSegment
+import dev.uzumi.ime.conversion.LiveConversionClient
+import dev.uzumi.ime.live.DisplaySpan
+import dev.uzumi.ime.live.FakeLiveConverter
+import dev.uzumi.ime.live.LiveConversionCore
+import dev.uzumi.ime.live.ConversionRequest as LiveRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -580,6 +586,221 @@ class EditorSessionTest {
         )
     }
 
+    /** ライブ変換では、打つたびに変換結果が表示され、句点で確定操作なしに確定して学習へ回る。 */
+    @Test
+    fun liveTypingShowsConversionAndPeriodCommits() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+
+        typeLive(session, client, "きょうは")
+        assertEquals("今日は", connection.text)
+        assertTrue(client.requests.all { it.first == 5L && it.second.learningAllowed })
+
+        assertTrue(session.inputText("。"))
+        assertEquals("今日は。", connection.text)
+        assertEquals(listOf(listOf(LearnedSegment("きょうは", "今日は"))), client.learned)
+        typeLive(session, client, "よい")
+        assertEquals("今日は。良い", connection.text)
+    }
+
+    /** 「良い」の末尾で削除すると、読み末尾の「い」だけを消して「よ」を再変換する。 */
+    @Test
+    fun liveBackspaceOnConvertedSegmentReconvertsShortenedReading() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        typeLive(session, client, "よい")
+        assertEquals("良い", connection.text)
+
+        assertTrue(session.deleteBackward())
+        assertEquals("よ", connection.text)
+        assertEquals("よ", client.requests.last().second.targetReading)
+        client.deliverLatest(session)
+        assertEquals("世", connection.text)
+    }
+
+    /** 過去segmentへ移って候補を選び直し、取り消し、末尾へ戻って入力を続けられる。 */
+    @Test
+    fun livePastSegmentCorrectionUndoAndReturn() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val spans = mutableListOf<DisplaySpan?>()
+        val session = liveSession(connection, client, styler = { text, span -> spans += span; text })
+        typeLive(session, client, "きょうはてんきがいいですね")
+        assertEquals("今日は天気がいいですね", connection.text)
+        assertTrue(session.liveCandidateState()!!.focusAtInput)
+
+        assertTrue(session.moveLiveFocus(-1))
+        val state = session.liveCandidateState()!!
+        assertEquals("天気が", state.currentValue)
+        assertFalse(state.focusAtInput)
+        assertEquals(DisplaySpan(spans.last()!!.segmentId, 3, 6, spans.last()!!.state, true, true), spans.last())
+
+        assertTrue(session.selectLiveCandidate(state.choices.first { it.value == "転機が" }))
+        assertEquals("今日は転機がいいですね", connection.text)
+        assertTrue(session.liveCandidateState()!!.canUndo)
+        assertTrue(session.undoLive())
+        assertEquals("今日は天気がいいですね", connection.text)
+
+        assertTrue(session.returnLiveFocusToInput())
+        assertTrue(session.liveCandidateState()!!.focusAtInput)
+        typeLive(session, client, "よ")
+        assertEquals("今日は天気がいいですね世", connection.text)
+    }
+
+    /** 変換済み表示の内部をEditorでタップすると、そのsegmentを候補バーの対象にする。 */
+    @Test
+    fun liveTapInsideConvertedSegmentFocusesIt() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        typeLive(session, client, "きょうはてんきがいいですね")
+
+        session.updateSelection(11, 11, 4, 4, 0, 11)
+
+        assertEquals("天気が", session.liveCandidateState()!!.currentValue)
+        assertEquals("今日は天気がいいですね", connection.text)
+    }
+
+    /** Enterは表示を確定してからEditor actionを一度だけ送り、改行欄では改行を一度だけ入れる。 */
+    @Test
+    fun liveEnterCommitsThenActsOnce() {
+        val sendConnection = FakeEditorConnection()
+        val client = FakeLiveClient()
+        val send = liveSession(sendConnection, client, normalPolicy(imeAction = EditorInfo.IME_ACTION_SEND))
+        typeLive(send, client, "よい")
+        assertTrue(send.handleEnter())
+        assertEquals(listOf("良い"), sendConnection.committedTexts)
+        assertEquals(listOf(EditorInfo.IME_ACTION_SEND), sendConnection.editorActions)
+
+        val newlineConnection = FakeEditorConnection()
+        val newlineClient = FakeLiveClient()
+        val newline = liveSession(newlineConnection, newlineClient, normalPolicy().copy(isMultiLine = true))
+        typeLive(newline, newlineClient, "よい")
+        assertTrue(newline.handleEnter())
+        assertEquals(listOf("良い", "\n"), newlineConnection.committedTexts)
+        assertTrue(newlineConnection.editorActions.isEmpty())
+    }
+
+    /** password欄ではライブ変換の要求を出さず、学習禁止欄では要求へ学習禁止を付けて確定を学習させない。 */
+    @Test
+    fun liveSensitiveFieldsControlRequestsAndLearning() {
+        val passwordClient = FakeLiveClient()
+        val password = liveSession(FakeEditorConnection(), passwordClient, normalPolicy().copy(isPassword = true))
+        typeLive(password, passwordClient, "abc")
+        assertTrue(passwordClient.requests.isEmpty())
+
+        val noLearningClient = FakeLiveClient()
+        val noLearning = liveSession(
+            FakeEditorConnection(),
+            noLearningClient,
+            normalPolicy().copy(noPersonalizedLearning = true),
+        )
+        typeLive(noLearning, noLearningClient, "よい。")
+        assertTrue(noLearningClient.requests.isNotEmpty())
+        assertTrue(noLearningClient.requests.none { it.second.learningAllowed })
+        assertTrue(noLearningClient.learned.isEmpty())
+    }
+
+    /** 変換エンジンが使えない間は要求を送らず、かな・カナを候補にする。 */
+    @Test
+    fun liveWithoutEngineOffersKanaCandidates() {
+        val client = FakeLiveClient().apply { available = false }
+        val session = liveSession(FakeEditorConnection(), client)
+
+        assertTrue(session.inputText("かな"))
+
+        assertTrue(client.requests.isEmpty())
+        assertEquals(listOf("かな", "カナ"), session.liveCandidateState()!!.choices.map { it.value })
+    }
+
+    /** 後から入力した読みの結果より前に出した要求の結果は、表示へ反映しない。 */
+    @Test
+    fun liveStaleResultIsNotApplied() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        session.inputText("よ")
+        val older = client.result(0)
+        session.inputText("い")
+
+        assertFalse(session.applyLiveResult(older))
+        assertEquals("よい", connection.text)
+        client.deliverLatest(session)
+        assertEquals("良い", connection.text)
+    }
+
+    /** 明示変換で登録語の候補を確定しても、エンジンの候補ではないため確定を通知しない。 */
+    @Test
+    fun explicitUserDictionaryCandidateIsNotReportedToEngine() {
+        val connection = FakeEditorConnection()
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("かんじ")
+        session.convert()
+        val request = client.requests.single()
+        val result = ConversionResult(
+            request,
+            listOf(ConversionSegment("かんじ", "漢字")),
+            listOf(
+                ConversionCandidate(Int.MIN_VALUE, "幹事", "かんじ", fromUserDictionary = true),
+                ConversionCandidate(0, "漢字", "かんじ"),
+            ),
+        )
+        assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(result)))
+
+        val option = session.candidateOptions().first()
+        assertEquals("幹事", option.value)
+        assertTrue(session.selectConversionCandidate(option.conversionChoice!!))
+        assertEquals(listOf("幹事"), connection.committedTexts)
+        assertTrue(client.committedCandidates.isEmpty())
+    }
+
+    /** 明示変換の表示中に削除すると、読み末尾を消した残りの読みを変換し直す。 */
+    @Test
+    fun explicitDeleteDuringConversionReconvertsRemainingReading() {
+        val connection = FakeEditorConnection()
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("よい")
+        session.convert()
+        assertTrue(session.applyConversionOutcome(converted(client.requests.single(), "良い")))
+
+        assertTrue(session.deleteBackward())
+
+        assertEquals("よ", connection.composingTexts.last())
+        assertEquals("よ", client.requests.last().reading)
+        assertEquals(2, client.requests.size)
+    }
+
+    /** ライブ変換の編集セッションを作る。変換要求はclientへ記録され、テストが結果を返す。 */
+    private fun liveSession(
+        connection: EditorConnectionPort,
+        client: FakeLiveClient,
+        policy: InputFieldPolicy = normalPolicy(),
+        styler: (String, DisplaySpan?) -> CharSequence = { text, _ -> text },
+    ): EditorSession {
+        return EditorSession(
+            connection = connection,
+            policy = policy,
+            initialSelectionStart = 0,
+            initialSelectionEnd = 0,
+            sessionEpoch = 5,
+            liveCore = LiveConversionCore(),
+            liveClient = client,
+            compositionStyler = styler,
+        )
+    }
+
+    /** 一書記素ずつ入力し、そのたびに新しい要求があれば結果を返す。 */
+    private fun typeLive(session: EditorSession, client: FakeLiveClient, text: String) {
+        for (cluster in GraphemeClusters.split(text)) {
+            session.inputText(cluster)
+            client.deliverLatest(session)
+        }
+    }
+
     private fun normalPolicy(
         isTypeNull: Boolean = false,
         imeAction: Int = EditorInfo.IME_ACTION_DONE,
@@ -622,6 +843,37 @@ private class FakeConversionClient : ConversionClient {
 
     override fun commitAll(request: ConversionRequest) {
         committedAll += request
+    }
+}
+
+/** ライブ変換の要求と学習を記録し、試験用の語彙で結果を作る偽の窓口。 */
+private class FakeLiveClient : LiveConversionClient {
+    var available = true
+    val requests = mutableListOf<Pair<Long, LiveRequest>>()
+    val learned = mutableListOf<List<LearnedSegment>>()
+    private val converter = FakeLiveConverter(FakeLiveConverter.LEXICON)
+    // 結果を返し終えた要求の数。新しい要求だけを返すために使う。
+    private var delivered = 0
+
+    override val isAvailable: Boolean
+        get() = available
+
+    override fun requestLiveConversion(sessionEpoch: Long, request: LiveRequest) {
+        requests += sessionEpoch to request
+    }
+
+    override fun learnCommitted(sessionEpoch: Long, units: List<List<LearnedSegment>>) {
+        learned += units
+    }
+
+    /** index番目の要求を変換した結果。 */
+    fun result(index: Int) = converter.convert(requests[index].second)
+
+    /** まだ結果を返していない要求があれば、最新の要求の結果を返す。 */
+    fun deliverLatest(session: EditorSession) {
+        if (requests.size == delivered) return
+        delivered = requests.size
+        session.applyLiveResult(result(requests.lastIndex))
     }
 }
 

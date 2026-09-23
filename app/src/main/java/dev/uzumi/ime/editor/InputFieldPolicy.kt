@@ -16,6 +16,8 @@ data class InputFieldPolicy(
     val noEnterAction: Boolean,
     val imeAction: Int,
     val actionLabel: String,
+    // URL・メールアドレスの欄か。句読点や自動変換の規則をそのまま当てはめない。
+    val isAddressLike: Boolean = false,
 ) {
     /** 機密欄または明示的な学習禁止欄かどうか。 */
     val suppressLearning: Boolean
@@ -24,6 +26,14 @@ data class InputFieldPolicy(
     /** 候補生成を抑止すべき欄かどうか。 */
     val suppressSuggestions: Boolean
         get() = isPassword || isTypeNull
+
+    /**
+     * ライブ変換の設定がONのとき、この欄でライブ変換を使うか。機密・互換入力・数字・URL・メールの欄は
+     * 自動変換を避け、従来の明示変換で扱う。IMEは入力開始ごとにこの判定で編集セッションの種類を決める。
+     */
+    fun usesLiveConversion(liveSettingEnabled: Boolean): Boolean {
+        return liveSettingEnabled && !isPassword && !isTypeNull && !isNumeric && !isAddressLike
+    }
 
     companion object {
         /** EditorInfoを、接続をまたいで持ち運べる方針へ変換する。 */
@@ -53,6 +63,11 @@ data class InputFieldPolicy(
                 InputType.TYPE_CLASS_NUMBER -> variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD
                 else -> false
             }
+            val addressLike = inputClass == InputType.TYPE_CLASS_TEXT && (
+                variation == InputType.TYPE_TEXT_VARIATION_URI ||
+                    variation == InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS ||
+                    variation == InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS
+                )
             val numeric = inputClass == InputType.TYPE_CLASS_NUMBER ||
                 inputClass == InputType.TYPE_CLASS_PHONE ||
                 inputClass == InputType.TYPE_CLASS_DATETIME
@@ -75,6 +90,7 @@ data class InputFieldPolicy(
                     actionLabel?.takeIf { it.isNotBlank() }
                         ?: defaultActionLabel(action, multiLine = false)
                 },
+                isAddressLike = addressLike,
             )
         }
 
