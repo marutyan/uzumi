@@ -95,7 +95,7 @@ zenzの区切り記号での停止は、変換した表記の後に`U+EE00`（�
 
 一致しない理由は、llama.cppのSentencePiece系のtokenizerが空白を必ず`U+2581`へ置き換える（この語彙に`U+2581`は無く、3つのbyte tokenになる）のに対し、`tokenizer.json`は空白をそのまま語彙の空白tokenにするためである。例：左文脈「午後 3時」は、`tokenizer.json`では`… 12590, 260, 279 …`、内蔵では`… 12590, 230, 154, 133, 279 …`になる（NFKCで全角空白も半角になるため、全角空白でも同じ）。
 
-現在の入力の経路では、空白キーはcompositionを確定してから空白を入れる（`EditorSession.insertSpace`）ため、空白がcompositionの読みにも左文脈にも入らない。左文脈は同じcompositionの中の表記だけなので（[設計](neural-direct-conversion-design.md#左文脈)）、この不一致は段階2の要求には現れない。確定済みの文字列を左文脈に使う場合や、空白を含む記号をcompositionへ入れられるようにする場合は、その前に対応を決める（要確認）。
+現在の入力の経路では、空白キーはcompositionを確定してから空白を入れる（`EditorSession.insertSpace`）ため、空白がcompositionの読みにも左文脈にも入らない。左文脈は同じcompositionの中の表記だけなので（[設計](neural-direct-conversion-design.md#左文脈)）、この不一致は段階2の要求には現れない。このため今は対応しない（2026-09-24にPMが判断）。確定済みの文字列を左文脈に使うように変える場合や、空白を含む記号をcompositionへ入れられるようにする場合は、前処理の変更として扱い、評価条件の承認を取り直してから行う。公式のHuggingFace tokenizersでの照合し直しは行わない（同日のPMの判断）。
 
 ## 限界
 
