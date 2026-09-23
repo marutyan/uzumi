@@ -1,10 +1,12 @@
 package dev.uzumi.ime.conversion
 
 import dev.uzumi.ime.dictionary.UserDictionaryLookup
+import dev.uzumi.ime.learning.LearningStore
 import dev.uzumi.ime.live.ConversionRequest as LiveRequest
 import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.ResultSegment
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -57,6 +59,8 @@ class ConversionWorker(
     private val onLiveResult: (Long, LiveResult) -> Unit = { _, _ -> },
     // ユーザー辞書を返す。初回はファイルを読むため、worker threadからだけ呼ぶ。
     private val userDictionary: () -> UserDictionaryLookup? = { null },
+    // IME側の学習キャッシュを返す。初回はファイルを読むため、worker threadからだけ呼ぶ。nullなら学習を使わない。
+    private val learningStore: () -> LearningStore? = { null },
 ) : ConversionClient, LiveConversionClient {
     @Volatile
     private var currentHealth: EngineHealth = EngineHealth.Loading
@@ -74,6 +78,8 @@ class ConversionWorker(
     private val engineSessions = mutableMapOf<Long, Long>()
     // sessionEpochごとに、エンジン側sessionの状態を作った直前の要求。学習通知の照合に使う。
     private val lastConverted = mutableMapOf<Long, ConversionRequest>()
+    // sessionEpochごとに、直前の明示変換で表示した先頭文節の候補。確定した候補の読みと表記を引くために使う。
+    private val lastHeadCandidates = mutableMapOf<Long, List<ConversionCandidate>>()
 
     /** 最新の初期化状態。UI threadから読んでよい。 */
     val health: EngineHealth
@@ -96,6 +102,21 @@ class ConversionWorker(
             onHealthChanged(verified)
             // 初回の読込みはファイルを読むため、UI threadで初めて開かないようここで先に開く。
             lookupUserDictionary()
+            // 設定画面の「学習履歴を消す」で、Mozcの学習もこのworker経由で消せるようにする。
+            lookupLearningStore()?.setEngineClearer(::requestEngineLearningClear)
+        }
+    }
+
+    /**
+     * エンジンの学習の消去をworkerのキューへ積む。workerが止まっていて積めなければfalseを返し、
+     * 呼び出し側（学習キャッシュ）がエンジンの保存ファイルを直接消す。
+     */
+    private fun requestEngineLearningClear(): Boolean {
+        return try {
+            executor.execute { runCatching { engine.clearLearning() } }
+            true
+        } catch (_: RejectedExecutionException) {
+            false
         }
     }
 
@@ -112,6 +133,8 @@ class ConversionWorker(
         if (units.isEmpty() || isEnded(sessionEpoch)) return
         executor.execute {
             val sessionId = engineSessions[sessionEpoch] ?: return@execute
+            // 表示のまま確定したsegmentをIME側の学習にも記録する。対象外の表記は記録の規則が除く。
+            lookupLearningStore()?.let { store -> units.flatten().forEach { store.record(it.reading, it.surface) } }
             if (!runCatching { engine.setIncognito(false) }.getOrDefault(false)) return@execute
             lastConverted.remove(sessionEpoch)
             for (unit in units) {
@@ -129,11 +152,17 @@ class ConversionWorker(
         executor.execute(::drainLatestRequest)
     }
 
+    /**
+     * 明示的に選んだ候補の確定を、IME側の学習へ記録し、エンジンの候補ならエンジンへも通知する。
+     * 学習語だけから作った候補はエンジンが知らないため、エンジンへは送らない。
+     */
     override fun commitCandidate(request: ConversionRequest, candidateId: Int) {
         if (request.incognito) return
         executor.execute {
             val sessionId = sessionForCommit(request) ?: return@execute
-            runCatching { engine.commitCandidate(sessionId, candidateId) }
+            val candidate = lastHeadCandidates[request.sessionEpoch]?.firstOrNull { it.id == candidateId }
+            candidate?.let { lookupLearningStore()?.record(it.learnedReading ?: it.reading, it.value) }
+            if (candidate?.learnedReading == null) runCatching { engine.commitCandidate(sessionId, candidateId) }
             lastConverted.remove(request.sessionEpoch)
         }
     }
@@ -155,6 +184,9 @@ class ConversionWorker(
         endedThroughEpoch.accumulateAndGet(sessionEpoch, ::maxOf)
         executor.execute {
             lastConverted.remove(sessionEpoch)
+            lastHeadCandidates.remove(sessionEpoch)
+            // 学習は打鍵ごとではなく、入力欄の終了時にまとめて保存する。
+            lookupLearningStore()?.flush()
             val sessionId = engineSessions.remove(sessionEpoch) ?: return@execute
             runCatching { engine.deleteSession(sessionId) }
         }
@@ -181,7 +213,14 @@ class ConversionWorker(
             return
         }
         lastConverted[request.sessionEpoch] = request
-        val merged = UserDictionaryCandidates.mergeExplicit(request.reading, conversion, lookupUserDictionary())
+        // 並びは「ユーザー辞書 → 学習 → エンジン」。学習禁止欄では学習語を参照しない。
+        val learned = LearnedCandidates.mergeExplicit(
+            request.reading,
+            conversion,
+            lookupLearningStore().takeUnless { request.incognito },
+        )
+        val merged = UserDictionaryCandidates.mergeExplicit(request.reading, learned, lookupUserDictionary())
+        lastHeadCandidates[request.sessionEpoch] = merged.headCandidates
         val result = ConversionResult(request, merged.segments, merged.headCandidates)
         onOutcome(
             if (result.isConsistent) ConversionOutcome.Converted(result) else ConversionOutcome.Failed(request),
@@ -207,6 +246,10 @@ class ConversionWorker(
                 }
             },
             userDictionary = lookupUserDictionary(),
+            // 学習禁止欄では学習語を参照しない。完全一致した学習語のうちscoreが最も高いものを表示する。
+            learnedSurfaces = lookupLearningStore()?.takeIf { request.learningAllowed }?.let { store ->
+                { reading -> store.exactMatches(reading).map { it.surface } }
+            },
         )
         val result = runCatching { converter.convert(request) }.getOrNull() ?: return
         onLiveResult(sessionEpoch, result)
@@ -214,6 +257,9 @@ class ConversionWorker(
 
     /** ユーザー辞書を開いて返す。読めなければ登録語なしで変換を続ける。 */
     private fun lookupUserDictionary(): UserDictionaryLookup? = runCatching { userDictionary() }.getOrNull()
+
+    /** 学習キャッシュを開いて返す。開けなければ学習なしで変換を続ける。 */
+    private fun lookupLearningStore(): LearningStore? = runCatching { learningStore() }.getOrNull()
 
     /** 学習通知が、エンジン側sessionの現在の変換と同じ要求に対するものなら、そのsession IDを返す。 */
     private fun sessionForCommit(request: ConversionRequest): Long? {

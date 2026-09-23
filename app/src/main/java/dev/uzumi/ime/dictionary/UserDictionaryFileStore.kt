@@ -17,9 +17,6 @@ data class StoredDictionary(
  * 書込み途中で異常終了しても既存のファイルを壊さない。Android frameworkに依存せずJVMテストで検証できる。
  */
 class UserDictionaryFileStore(private val file: File) {
-    // 書込み中のデータ。renameの前に異常終了した場合だけ残り、次回の読込みでは使わない。
-    private val temporaryFile = File(file.path + ".tmp")
-
     /** 保存ファイルを読む。ファイルがなければ空の辞書を返し、壊れた行は除いたうえでproblemを立てる。 */
     fun load(): StoredDictionary {
         if (!file.exists()) return StoredDictionary(emptyList(), problem = false)
@@ -35,23 +32,7 @@ class UserDictionaryFileStore(private val file: File) {
     /** 全項目を書き込み、成功した場合だけ保存ファイルを置き換える。失敗時はIOExceptionを投げ、既存ファイルを残す。 */
     @Throws(IOException::class)
     fun save(entries: List<UserDictionaryEntry>) {
-        file.parentFile?.mkdirs()
-        val bytes = UserDictionaryTsv.format(entries).toByteArray(Charsets.UTF_8)
-        try {
-            FileOutputStream(temporaryFile).use { output ->
-                output.write(bytes)
-                output.fd.sync()
-            }
-            Files.move(
-                temporaryFile.toPath(),
-                file.toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-                StandardCopyOption.ATOMIC_MOVE,
-            )
-        } catch (error: IOException) {
-            temporaryFile.delete()
-            throw error
-        }
+        writeFileAtomically(file, UserDictionaryTsv.format(entries).toByteArray(Charsets.UTF_8))
     }
 
     /**
@@ -64,5 +45,31 @@ class UserDictionaryFileStore(private val file: File) {
         val copy = File(file.path + ".unreadable-$timestampMillis")
         Files.copy(file.toPath(), copy.toPath())
         return copy
+    }
+}
+
+/**
+ * bytesを一時ファイルへ書いてfsyncしてからrenameでfileを置き換える。書込み途中で異常終了しても既存のファイルを壊さない。
+ * ユーザー辞書と学習キャッシュの保存で共通に使う。失敗時はIOExceptionを投げ、一時ファイルを消して既存ファイルを残す。
+ */
+@Throws(IOException::class)
+fun writeFileAtomically(file: File, bytes: ByteArray) {
+    file.parentFile?.mkdirs()
+    // 書込み中のデータ。renameの前に異常終了した場合だけ残り、次回の読込みでは使わない。
+    val temporaryFile = File(file.path + ".tmp")
+    try {
+        FileOutputStream(temporaryFile).use { output ->
+            output.write(bytes)
+            output.fd.sync()
+        }
+        Files.move(
+            temporaryFile.toPath(),
+            file.toPath(),
+            StandardCopyOption.REPLACE_EXISTING,
+            StandardCopyOption.ATOMIC_MOVE,
+        )
+    } catch (error: IOException) {
+        temporaryFile.delete()
+        throw error
     }
 }
