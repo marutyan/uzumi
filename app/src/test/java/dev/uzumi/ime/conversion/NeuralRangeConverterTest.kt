@@ -98,9 +98,25 @@ class NeuralRangeConverterTest {
         assertEquals(listOf(ResultSegment("じゅうじ", "じゅうじ")), withoutDictionary("10時").convert("じゅうじ"))
         assertEquals(listOf(ResultSegment("じゅうじ", "じゅうじ")), withoutDictionary("11時").convert("じゅうじ"))
 
+        // 数字の頭を削った出力は、辞書の候補の部分文字列であっても完全一致しないため捨てる。
+        assertEquals(lexiconSegments("じゅうじ"), withDictionary("0時").convert("じゅうじ"))
+        assertEquals(lexiconSegments("にせんにじゅうろくねん"), withDictionary("26年").convert("にせんにじゅうろくねん"))
+        assertEquals(lexiconSegments("にせんにじゅうろくねん"), withDictionary("6年").convert("にせんにじゅうろくねん"))
+        assertEquals(lexiconSegments("じゅうじから"), withDictionary("0時から").convert("じゅうじから"))
+
         // 辞書の候補にある数字は、文節をまたいで連結した候補（「10」＋「時」）でも一segmentの候補でも使う。
         assertEquals(listOf("10時"), withDictionary("10時").convert("じゅうじ").map { it.surface }.take(1))
         assertEquals(listOf("2026年"), withDictionary("2026年").convert("にせんにじゅうろくねん").map { it.surface })
+    }
+
+    /** 辞書の文節が数字の連なりの読みの範囲の境界をまたぐ場合は、候補で確かめられないため辞書の結果へ戻す。 */
+    @Test
+    fun digitsOverlappingDictionarySegmentPartlyAreRejected() {
+        // 「じゅうじか」を一文節とする辞書。出力の「10時」は読み「じゅうじ」に対応し、文節の一部だけに重なる。
+        val crossing = listOf(ResultSegment("じゅうじか", "10時か", listOf("10時か")), ResultSegment("ら", "ら"))
+        val converter = NeuralRangeConverter(model = { _, _ -> "10時から" }, dictionary = { crossing })
+
+        assertEquals(crossing, converter.convert("じゅうじから"))
     }
 
     /** 漢字の読みは確かめないため、読みに合わない漢字語は捨てられない（設計上の限界を固定する）。 */

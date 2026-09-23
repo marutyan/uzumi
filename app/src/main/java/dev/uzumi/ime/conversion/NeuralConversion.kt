@@ -146,12 +146,15 @@ private fun isDigitOrLetterCluster(cluster: String): Boolean =
             it in 0xFF41..0xFF5A
     }
 
-// 数字・英字の検査で、重なる辞書の文節の候補を連結して作る組み合わせの上限。長い読みで計算が膨らむのを防ぐ。
+// 数字・英字の検査で、辞書の文節の候補を連結して作る組み合わせの上限。長い読みで計算が膨らむのを防ぐ。
+// 上限で切った組み合わせに一致しなければ捨てる側に倒れる。
 private const val MAX_CANDIDATE_COMBINATIONS = 256
 
 /**
- * 読みに対応づけた出力のうち、数字・英字を含む連なりが、同じ読みの範囲に重なる辞書の文節の候補（各文節の候補を一つずつ
- * 連結したもの）に含まれるかを確かめる。辞書が使えなければ確かめられないため、数字・英字を含む出力は使わない。
+ * 読みに対応づけた出力のうち、数字・英字を含む連なりが、同じ読みの範囲をちょうど覆う辞書の文節の候補
+ * （各文節の候補を一つずつ連結したもの）のどれかと完全に一致するかを確かめる。
+ * 部分文字列の一致では「10時」に対する「0時」のような数字の頭の欠けが通るため、完全一致だけを認める。
+ * 辞書の文節が読みの範囲の境界をまたぐ（一部だけ重なる）場合と、辞書が使えない場合は確かめられないため捨てる。
  * かなの位置の照合だけでは、「じゅうじ」から「11時」のような読みに合わない数字を捨てられないため必要になる。
  * cutsは`alignToReading`の返り値で、隣り合う二点の間が出力の一つの連なりと、それに対応する読みの範囲を表す。
  */
@@ -176,13 +179,18 @@ private fun hasDictionaryBackedDigitsAndLetters(
         val piece = outputClusters.subList(start.value, end.value).joinToString(separator = "")
         if (GraphemeClusters.split(piece).none(::isDigitOrLetterCluster)) return@all true
         val overlapping = dictionarySegments.indices.filter { ranges[it].first < end.key && ranges[it].last + 1 > start.key }
+        // 重なる文節がすべて読みの範囲の内側にあり、範囲の両端が文節の境界に一致するときだけ候補で確かめられる。
+        val coversExactly = overlapping.isNotEmpty() &&
+            ranges[overlapping.first()].first == start.key &&
+            ranges[overlapping.last()].last + 1 == end.key
+        if (!coversExactly) return@all false
         var combinations = listOf("")
         for (index in overlapping) {
             val segment = dictionarySegments[index]
             val candidates = (listOf(segment.surface) + segment.candidates).distinct()
             combinations = combinations.flatMap { prefix -> candidates.map { prefix + it } }.take(MAX_CANDIDATE_COMBINATIONS)
         }
-        combinations.any { piece in it }
+        piece in combinations
     }
 }
 
