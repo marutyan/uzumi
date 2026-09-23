@@ -11,6 +11,7 @@ import android.widget.LinearLayout
  * @param context コンテキスト
  * @param onAction キーボード操作イベントを通知するコールバック
  * @param lineDeleteLength 削除キーの左ドラッグで消える、カーソルから行頭までの文字数を返す。分からなければnull
+ * @param preferences 設定画面で選んだ高さ・拡大表示・振動・キー音・削除の左ドラッグ
  */
 // 必須コールバックを伴うプログラム生成専用Viewであり、XMLからは生成しない。
 @SuppressLint("ViewConstructor")
@@ -18,6 +19,7 @@ class KeyboardPanel(
     context: Context,
     private val onAction: (KeyboardAction) -> Unit,
     private val lineDeleteLength: () -> Int? = { null },
+    private val preferences: KeyboardPreferences = KeyboardPreferences(),
 ) : LinearLayout(context) {
 
     private val density = context.resources.displayMetrics.density
@@ -266,7 +268,7 @@ class KeyboardPanel(
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         }
 
-        val rowHeight = rowHeightPx(KeyboardDimens.ROW_HEIGHT_DP)
+        val rowHeight = rowHeightPx(preferences.rowHeightDp)
 
         // Row 0: [記号] [あ] [か] [さ] [削除]
         val row0 = createRow(rowHeight).apply {
@@ -326,7 +328,7 @@ class KeyboardPanel(
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         }
 
-        val rowHeight = rowHeightPx(KeyboardDimens.QWERTY_ROW_HEIGHT_DP)
+        val rowHeight = rowHeightPx(preferences.qwertyRowHeightDp)
         val (digits, upper, middle, lower) = KeyboardLayoutData.QWERTY_ROWS
 
         // Row 0〜2: 数字、q〜p、a〜l と '（各10キー）
@@ -389,7 +391,7 @@ class KeyboardPanel(
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         }
 
-        val rowHeight = rowHeightPx(KeyboardDimens.ROW_HEIGHT_DP)
+        val rowHeight = rowHeightPx(preferences.rowHeightDp)
 
         // Row 0: [1] [2] [3] [/] [削除]
         val row0 = createRow(rowHeight).apply {
@@ -449,7 +451,7 @@ class KeyboardPanel(
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         }
 
-        val rowHeight = rowHeightPx(KeyboardDimens.ROW_HEIGHT_DP)
+        val rowHeight = rowHeightPx(preferences.rowHeightDp)
         val pages = KeyboardLayoutData.SYMBOL_PAGES
 
         pages.forEachIndexed { index, page ->
@@ -546,7 +548,7 @@ class KeyboardPanel(
                 onShiftToggle = { toggleShift() },
                 onPageSwitch = { showNextSymbolPage() },
                 onPreview = { key, text ->
-                    if (text == null || isPasswordField) keyPreview.hide() else keyPreview.show(key, text)
+                    if (text == null || isPasswordField || !preferences.keyPreview) keyPreview.hide() else keyPreview.show(key, text)
                 },
                 onDeleteDrag = { key, state ->
                     // 文字数は閾値を超えたときだけ問い合わせ、ドラッグ中の毎回の問い合わせを避ける
@@ -555,6 +557,7 @@ class KeyboardPanel(
                 },
             )
         }
+        keyView.applyPreferences(preferences)
         allKeyViews.add(keyView)
         return keyView
     }

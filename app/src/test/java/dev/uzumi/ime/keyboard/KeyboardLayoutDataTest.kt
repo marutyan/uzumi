@@ -281,6 +281,19 @@ class KeyboardLayoutDataTest {
     }
 
     @Test
+    fun keyboardHeightChoicesKeepTouchTargetsAndQwertyRatio() {
+        assertEquals(KeyboardDimens.ROW_HEIGHT_DP, KeyboardPreferences().rowHeightDp)
+        assertEquals(KeyboardDimens.QWERTY_ROW_HEIGHT_DP, KeyboardPreferences().qwertyRowHeightDp)
+        assertEquals(listOf(52f, 60f, 66f), KeyboardPreferences.Height.entries.map { it.rowHeightDp })
+        // 4行の面の高さと5行のQWERTYの高さは、どの段階でも1dp程度しか違わない
+        KeyboardPreferences.Height.entries.forEach { height ->
+            val prefs = KeyboardPreferences(rowHeightDp = height.rowHeightDp)
+            assertTrue(Math.abs(prefs.rowHeightDp * 4 - prefs.qwertyRowHeightDp * 5) < 2f)
+            assertTrue("タップ領域が48dp未満: $height", prefs.rowHeightDp >= 48f)
+        }
+    }
+
+    @Test
     fun kanaKeysSwitchRoleOnlyWhileComposing() {
         // 入力前はSimejiと同じく数字面への切替と空白
         assertEquals(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), KeyboardLayoutData.kanaNumberKey(composing = false))

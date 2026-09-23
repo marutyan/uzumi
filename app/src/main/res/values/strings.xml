@@ -70,4 +70,22 @@
     <string name="close_keyboard">キーボードを閉じる</string>
     <string name="candidate_list_toggle">候補の一覧を開く、または閉じる</string>
     <string name="live_focused_reading">訂正中の文節、読み %1$s</string>
+    <string name="settings_title">Uzumiの設定</string>
+    <string name="settings_section_input">入力</string>
+    <string name="settings_section_display">表示</string>
+    <string name="settings_section_feedback">操作の反応</string>
+    <string name="settings_section_learning">学習と辞書</string>
+    <string name="settings_delete_drag">削除キーの左ドラッグ</string>
+    <string name="settings_delete_drag_description">左へ動かして離すと、カーソルから行頭までを削除します。候補バーの「元に戻す」で戻せます。</string>
+    <string name="settings_height">キーボードの高さ</string>
+    <string name="settings_height_description">次にキーボードを表示したときから変わります。</string>
+    <string name="settings_height_low">低</string>
+    <string name="settings_height_medium">中</string>
+    <string name="settings_height_high">高</string>
+    <string name="settings_key_preview">押したキーの拡大表示</string>
+    <string name="settings_key_preview_description">パスワード欄では表示しません。</string>
+    <string name="settings_vibration">振動</string>
+    <string name="settings_key_sound">キー音</string>
+    <string name="settings_learning">変換の学習</string>
+    <string name="settings_learning_description">オフにすると、確定した変換を覚えません。パスワード欄などでは常にオフです。</string>
 </resources>

@@ -28,6 +28,7 @@ import dev.uzumi.ime.keyboard.CandidateBarViews
 import dev.uzumi.ime.keyboard.CandidateGridView
 import dev.uzumi.ime.keyboard.KeyboardAction
 import dev.uzumi.ime.keyboard.KeyboardPanel
+import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.LiveConversionCore
@@ -47,6 +48,8 @@ class UzumiInputMethodService : InputMethodService() {
     private var barViews: CandidateBarViews? = null
     // ∨で開く候補一覧。キーボードの面を覆って表示する。
     private var candidateGrid: CandidateGridView? = null
+    // 入力Viewを作ったときのキーボード設定。設定画面で変わっていれば、次に表示するときに作り直す。
+    private var builtPreferences: KeyboardPreferences? = null
     private var currentPolicy: InputFieldPolicy? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var conversionExecutor: ExecutorService? = null
@@ -136,7 +139,14 @@ class UzumiInputMethodService : InputMethodService() {
 
         // 候補一覧はキーボードの面と同じ場所に重ね、開いている間はキーを覆う
         val keyboardArea = FrameLayout(this)
-        keyboardPanel = KeyboardPanel(this, ::handleKeyboardAction, lineDeleteLength = { session?.lineDeleteLength() }).also { panel ->
+        val preferences = UzumiSettings.keyboardPreferences(this)
+        builtPreferences = preferences
+        keyboardPanel = KeyboardPanel(
+            this,
+            ::handleKeyboardAction,
+            lineDeleteLength = { session?.lineDeleteLength() },
+            preferences = preferences,
+        ).also { panel ->
             keyboardArea.addView(panel, FrameLayout.LayoutParams(match, wrap))
         }
         candidateGrid = CandidateGridView(this).also { grid ->
@@ -168,7 +178,9 @@ class UzumiInputMethodService : InputMethodService() {
         refreshCandidates()
         val info = attribute ?: return
         val connection = currentInputConnection ?: return
+        // 設定で学習を止めている場合は、欄の種類によらず学習と履歴の保存を止める
         val policy = InputFieldPolicy.fromEditorInfo(info)
+            .copy(learningDisabledBySetting = !UzumiSettings.isLearningEnabled(this))
         currentPolicy = policy
         // ライブ変換の設定は入力開始ごとに読み、設定画面での変更を次の入力欄から反映する。
         val live = policy.usesLiveConversion(UzumiSettings.isLiveConversionEnabled(this))
@@ -190,6 +202,10 @@ class UzumiInputMethodService : InputMethodService() {
     /** 表示済みキーボードへ現在欄の種別と候補を反映する。 */
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        // 設定画面で高さや反応を変えた後は、新しい設定で入力Viewを作り直す
+        if (builtPreferences != null && builtPreferences != UzumiSettings.keyboardPreferences(this)) {
+            setInputView(onCreateInputView())
+        }
         applyPolicyToKeyboard()
         refreshCandidates()
     }
@@ -418,7 +434,7 @@ class UzumiInputMethodService : InputMethodService() {
 
     /** 設定画面を開く。IMEから開くため新しいtaskで起動する。 */
     private fun openSettings() {
-        startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        startActivity(Intent(this, SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
     /** 候補を出さない理由または候補バーの用途を短く返す。 */

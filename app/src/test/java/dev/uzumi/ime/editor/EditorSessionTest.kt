@@ -878,6 +878,23 @@ class EditorSessionTest {
         assertFalse(session.undoLineDelete())
     }
 
+    /** 設定で学習を止めても欄は機密ではないため、変換は学習禁止で送り、削除の「元に戻す」は使える。 */
+    @Test
+    fun learningDisabledBySettingIsNotTreatedAsSensitive() {
+        val policy = normalPolicy().copy(learningDisabledBySetting = true)
+        assertTrue(policy.suppressLearning)
+        assertFalse(policy.isSensitive)
+        val connection = ModelEditorConnection(text = "明日", selectionStart = 2, selectionEnd = 2)
+        val session = EditorSession(connection, policy, initialSelectionStart = 2, initialSelectionEnd = 2)
+        assertTrue(session.deleteToLineStart())
+        assertTrue(session.canUndoLineDelete)
+
+        val client = FakeLiveClient()
+        val live = liveSession(ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0), client, policy)
+        typeLive(live, client, "きょうは")
+        assertTrue(client.requests.none { it.second.learningAllowed })
+    }
+
     /** 入力中の左ドラッグは未確定の読みだけを消し、元に戻すと読みを入力し直す。 */
     @Test
     fun deleteToLineStartClearsOnlyCompositionAndUndoRetypesReading() {

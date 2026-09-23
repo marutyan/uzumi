@@ -25,6 +25,10 @@
         <activity
             android:name=".LicenseActivity"
             android:exported="false" />
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Uzumi.Settings" />
 
         <service
             android:name=".UzumiInputMethodService"

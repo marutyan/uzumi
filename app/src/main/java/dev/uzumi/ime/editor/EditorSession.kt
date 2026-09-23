@@ -236,7 +236,7 @@ class EditorSession(
 
     /** 消した文字列と、そのときのカーソルの前後の文字列を覚える。機密欄・学習禁止欄では覚えない。 */
     private fun rememberLineDeletion(removed: String, fromComposition: Boolean) {
-        if (policy.suppressLearning || removed.isEmpty()) return
+        if (policy.isSensitive || removed.isEmpty()) return
         val before = connection.textBeforeCursor(LINE_DELETE_CONTEXT_CHARS)?.toString() ?: return
         val after = connection.textAfterCursor(LINE_DELETE_CONTEXT_CHARS)?.toString() ?: return
         lineDeletion = LineDeletion(removed, before, after, fromComposition)

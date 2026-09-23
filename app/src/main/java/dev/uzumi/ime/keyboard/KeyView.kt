@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -109,6 +110,11 @@ class KeyView(context: Context) : View(context) {
         escapePx = DELETE_DRAG_ESCAPE_DP * density,
     )
 
+    // 設定画面で選んだ反応。振動・キー音・削除の左ドラッグを使うか。
+    private var vibrationEnabled = true
+    private var keySoundEnabled = false
+    private var deleteDragEnabled = true
+
     // 削除キーのドラッグ中の状態を、キーボードへ知らせて案内を出すコールバック。
     private var onDeleteDrag: ((View, DeleteDragState) -> Unit)? = null
 
@@ -118,14 +124,14 @@ class KeyView(context: Context) : View(context) {
             if (!isAttachedToWindow) return
             val action = repeatableAction() ?: return
             onAction?.invoke(action)
-            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            haptic(HapticFeedbackConstants.KEYBOARD_TAP)
             repeatCount += 1
             repeatHandler.postDelayed(this, KeyRepeatPolicy.intervalAfter(repeatCount))
         }
     }
     private val longPressRunnable = Runnable {
         if (isAttachedToWindow && gesture.longPressTimeout()) {
-            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            haptic(HapticFeedbackConstants.LONG_PRESS)
             updatePreview()
             invalidate()
         }
@@ -191,6 +197,32 @@ class KeyView(context: Context) : View(context) {
             updateContentDescription()
             invalidate()
         }
+    }
+
+    /**
+     * 設定画面で選んだ振動・キー音・削除の左ドラッグの有無を反映する。
+     */
+    fun applyPreferences(preferences: KeyboardPreferences) {
+        vibrationEnabled = preferences.vibration
+        keySoundEnabled = preferences.keySound
+        deleteDragEnabled = preferences.deleteDrag
+    }
+
+    /** 振動の設定がONのときだけ触覚フィードバックを返す。 */
+    private fun haptic(feedbackConstant: Int) {
+        if (vibrationEnabled) performHapticFeedback(feedbackConstant)
+    }
+
+    /** キー音の設定がONのとき、キーの種類に合う標準のキー音を鳴らす。 */
+    private fun playKeySound() {
+        if (!keySoundEnabled) return
+        val effect = when ((spec as? KeySpec.Action)?.action) {
+            KeyboardAction.Delete -> AudioManager.FX_KEYPRESS_DELETE
+            KeyboardAction.Enter -> AudioManager.FX_KEYPRESS_RETURN
+            KeyboardAction.Space -> AudioManager.FX_KEYPRESS_SPACEBAR
+            else -> AudioManager.FX_KEYPRESS_STANDARD
+        }
+        context.getSystemService(AudioManager::class.java)?.playSoundEffect(effect, -1f)
     }
 
     /**
@@ -290,7 +322,8 @@ class KeyView(context: Context) : View(context) {
                 activePointerId = event.getPointerId(0)
                 gesture.down(event.x, event.y)
                 currentDirection = FlickDirection.CENTER
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                haptic(HapticFeedbackConstants.KEYBOARD_TAP)
+                playKeySound()
                 updatePreview()
 
                 val repeatAction = repeatableAction()
@@ -337,7 +370,7 @@ class KeyView(context: Context) : View(context) {
                         updatePreview()
                         invalidate()
                     }
-                } else if (isDeleteKey() && repeatCount == 0) {
+                } else if (isDeleteKey() && repeatCount == 0 && deleteDragEnabled) {
                     // 連続削除が始まる前に左へ動かしたら、左ドラッグとして扱い連続削除を止める
                     val changed = deleteDrag.move(gesture.startX - curX, gesture.startY - curY)
                     if (deleteDrag.isDragging) repeatHandler.removeCallbacksAndMessages(null)
@@ -496,33 +529,33 @@ class KeyView(context: Context) : View(context) {
                 val char = KeyboardLayoutData.getKanaChar(currentSpec.type, FlickDirection.CENTER)
                 if (char.isNotEmpty()) {
                     onAction?.invoke(KeyboardAction.Text(char))
-                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    haptic(HapticFeedbackConstants.KEYBOARD_TAP)
                 }
             }
 
             is KeySpec.SimpleText -> {
                 onAction?.invoke(KeyboardAction.Text(shiftedText(currentSpec)))
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                haptic(HapticFeedbackConstants.KEYBOARD_TAP)
             }
 
             is KeySpec.Action -> {
                 onAction?.invoke(currentSpec.action)
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                haptic(HapticFeedbackConstants.KEYBOARD_TAP)
             }
 
             is KeySpec.ModeSwitch -> {
                 onModeSwitch?.invoke(currentSpec.targetMode)
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                haptic(HapticFeedbackConstants.KEYBOARD_TAP)
             }
 
             is KeySpec.Shift -> {
                 onShiftToggle?.invoke()
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                haptic(HapticFeedbackConstants.KEYBOARD_TAP)
             }
 
             is KeySpec.PageSwitch -> {
                 onPageSwitch?.invoke()
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                haptic(HapticFeedbackConstants.KEYBOARD_TAP)
             }
 
             null -> Unit
@@ -583,7 +616,7 @@ class KeyView(context: Context) : View(context) {
                     val char = KeyboardLayoutData.getKanaChar(currentSpec.type, direction)
                     if (char.isNotEmpty()) {
                         onAction?.invoke(KeyboardAction.Text(char))
-                        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        haptic(HapticFeedbackConstants.KEYBOARD_TAP)
                         sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                         return true
                     }
@@ -594,7 +627,7 @@ class KeyView(context: Context) : View(context) {
                 val alt = currentSpec.longPressText
                 if (action == AccessibilityNodeInfo.ACTION_LONG_CLICK && alt != null) {
                     onAction?.invoke(KeyboardAction.Text(alt))
-                    performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    haptic(HapticFeedbackConstants.LONG_PRESS)
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                     return true
                 }
@@ -603,7 +636,7 @@ class KeyView(context: Context) : View(context) {
             is KeySpec.Action -> {
                 if (action == ACTION_DELETE_TO_LINE_START && currentSpec.action == KeyboardAction.Delete) {
                     onAction?.invoke(KeyboardAction.DeleteToLineStart)
-                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    haptic(HapticFeedbackConstants.KEYBOARD_TAP)
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                     return true
                 }
@@ -613,7 +646,7 @@ class KeyView(context: Context) : View(context) {
                 val target = currentSpec.longPressTarget
                 if (action == AccessibilityNodeInfo.ACTION_LONG_CLICK && target != null) {
                     onModeSwitch?.invoke(target)
-                    performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    haptic(HapticFeedbackConstants.LONG_PRESS)
                     return true
                 }
             }

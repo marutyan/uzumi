@@ -13,11 +13,10 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.Switch
 import android.widget.TextView
 
 /**
- * IMEの有効化・切替導線、ユーザー辞書の管理画面とライセンス表示への導線、ライブ変換のON/OFFと、
+ * IMEの有効化・切替導線、ユーザー辞書の管理画面・設定画面・ライセンス表示への導線と、
  * 導入直後に入力を試せる欄を表示する。
  */
 class MainActivity : Activity() {
@@ -61,19 +60,11 @@ class MainActivity : Activity() {
                 startActivity(Intent(this@MainActivity, UserDictionaryActivity::class.java))
             }
         })
-        content.addView(Switch(this).apply {
-            text = getString(R.string.live_conversion_switch)
-            textSize = 16f
-            isChecked = UzumiSettings.isLiveConversionEnabled(this@MainActivity)
-            setPadding(0, (16 * density).toInt(), 0, 0)
-            setOnCheckedChangeListener { _, checked ->
-                UzumiSettings.setLiveConversionEnabled(this@MainActivity, checked)
+        content.addView(Button(this).apply {
+            text = getString(R.string.settings_title)
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
             }
-        })
-        content.addView(TextView(this).apply {
-            text = getString(R.string.live_conversion_description)
-            textSize = 14f
-            setPadding(0, (4 * density).toInt(), 0, (8 * density).toInt())
         })
         content.addView(Button(this).apply {
             text = getString(R.string.open_licenses)
