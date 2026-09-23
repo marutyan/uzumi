@@ -1,6 +1,12 @@
 package dev.uzumi.ime.editor
 
 import android.view.inputmethod.EditorInfo
+import dev.uzumi.ime.conversion.ConversionCandidate
+import dev.uzumi.ime.conversion.ConversionClient
+import dev.uzumi.ime.conversion.ConversionOutcome
+import dev.uzumi.ime.conversion.ConversionRequest
+import dev.uzumi.ime.conversion.ConversionResult
+import dev.uzumi.ime.conversion.ConversionSegment
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -327,6 +333,253 @@ class EditorSessionTest {
     }
 
     /** テスト対象に必要な通常欄の方針を作る。 */
+    /** 変換は結果を待たずに依頼し、一致する応答だけを表示と候補へ反映して確定する。 */
+    @Test
+    fun conversionResultIsAppliedAndCommitted() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), 0, 0, sessionEpoch = 3, conversionClient = client)
+        assertTrue(session.inputText("かんじ"))
+
+        assertTrue(session.convert())
+        val request = client.requests.single()
+        assertEquals(ConversionRequest(3, request.revision, "かんじ", incognito = false), request)
+        assertEquals("かんじ", connection.text)
+
+        assertTrue(session.applyConversionOutcome(converted(request, "漢字", "感じ")))
+        assertEquals("漢字", connection.text)
+        val options = session.candidateOptions()
+        assertEquals(listOf("漢字", "感じ"), options.map(CandidateOption::value))
+
+        assertTrue(session.selectConversionCandidate(options[1].conversionChoice!!))
+        assertEquals("感じ", connection.text)
+        assertTrue(session.compositionSnapshot().reading.isEmpty())
+        assertEquals(listOf(request to 1), client.committedCandidates)
+    }
+
+    /** 応答の前に読みが変わったら、古い応答で新しい入力を上書きしない。 */
+    @Test
+    fun staleConversionAfterTypingIsDiscarded() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), 0, 0, conversionClient = client)
+        session.inputText("かんじ")
+        session.convert()
+        val stale = client.requests.single()
+
+        assertTrue(session.inputText("を"))
+        assertFalse(session.applyConversionOutcome(converted(stale, "漢字")))
+
+        assertEquals("かんじを", connection.text)
+        assertEquals(listOf("かんじを", "カンジヲ"), session.candidateOptions().map(CandidateOption::value))
+    }
+
+    /** 別のフィールドの要求に対する応答は、同じ読み・revisionでも適用しない。 */
+    @Test
+    fun conversionFromOtherEpochIsDiscarded() {
+        val client = FakeConversionClient()
+        val oldSession = EditorSession(FakeEditorConnection(), normalPolicy(), sessionEpoch = 1, conversionClient = client)
+        oldSession.inputText("かんじ")
+        oldSession.convert()
+        val oldRequest = client.requests.single()
+        oldSession.close()
+
+        val connection = FakeEditorConnection()
+        val newSession = EditorSession(connection, normalPolicy(), sessionEpoch = 2, conversionClient = client)
+        newSession.inputText("かんじ")
+        newSession.convert()
+
+        assertFalse(newSession.applyConversionOutcome(converted(oldRequest, "漢字")))
+        assertFalse(oldSession.applyConversionOutcome(converted(oldRequest, "漢字")))
+        assertEquals(listOf("かんじ"), connection.composingTexts)
+    }
+
+    /** password欄では変換要求を送らず、学習禁止欄ではincognitoを指定した要求にする。 */
+    @Test
+    fun sensitiveFieldsControlRequestsBeforeSending() {
+        val passwordClient = FakeConversionClient()
+        val password = EditorSession(
+            FakeEditorConnection(),
+            normalPolicy().copy(isPassword = true),
+            conversionClient = passwordClient,
+        )
+        password.inputText("かんじ")
+        password.convert()
+        assertTrue(passwordClient.requests.isEmpty())
+
+        val noLearningClient = FakeConversionClient()
+        val noLearning = EditorSession(
+            FakeEditorConnection(),
+            normalPolicy().copy(noPersonalizedLearning = true),
+            conversionClient = noLearningClient,
+        )
+        noLearning.inputText("かんじ")
+        noLearning.convert()
+        assertTrue(noLearningClient.requests.single().incognito)
+    }
+
+    /** 時間超過後に届いた応答は捨て、次の変換操作では読みのカナ候補へ戻す。 */
+    @Test
+    fun timedOutConversionFallsBackToKana() {
+        val connection = FakeEditorConnection()
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("かんじ")
+        session.convert()
+        val request = client.requests.single()
+
+        assertTrue(session.abandonConversion(request))
+        assertFalse(session.applyConversionOutcome(converted(request, "漢字")))
+        assertEquals(listOf("かんじ", "カンジ"), session.candidateOptions().map(CandidateOption::value))
+
+        assertTrue(session.convert())
+        assertEquals(1, client.requests.size)
+        assertEquals("カンジ", connection.composingTexts.last())
+    }
+
+    /** 失敗応答や読みと一致しない文節は適用せず、読みの表示を保つ。 */
+    @Test
+    fun failedOrInconsistentConversionKeepsReading() {
+        val connection = FakeEditorConnection()
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("かんじ")
+        session.convert()
+        val request = client.requests.single()
+        val inconsistent = ConversionOutcome.Converted(
+            ConversionResult(request, listOf(ConversionSegment("かん", "漢")), listOf(ConversionCandidate(0, "漢", "かん"))),
+        )
+
+        assertFalse(session.applyConversionOutcome(inconsistent))
+        assertEquals(listOf("かんじ"), connection.composingTexts)
+
+        session.inputText("を")
+        session.convert()
+        assertFalse(session.applyConversionOutcome(ConversionOutcome.Failed(client.requests.last())))
+        assertEquals("かんじを", connection.composingTexts.last())
+    }
+
+    /** 先頭文節の候補を選ぶと、その文節だけ確定し、残りの読みを新しい要求として変換する。 */
+    @Test
+    fun selectingHeadCandidateKeepsRemainingReading() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), 0, 0, conversionClient = client)
+        session.inputText("きょうはてんき")
+        session.convert()
+        val first = client.requests.single()
+        val result = ConversionResult(
+            first,
+            listOf(ConversionSegment("きょうは", "今日は"), ConversionSegment("てんき", "天気")),
+            listOf(ConversionCandidate(0, "今日は", "きょうは"), ConversionCandidate(1, "京は", "きょうは")),
+        )
+        assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(result)))
+        assertEquals("今日は天気", connection.text)
+
+        assertTrue(session.selectConversionCandidate(ConversionChoice(first, 1)))
+
+        assertEquals("京はてんき", connection.text)
+        assertEquals("てんき", session.compositionSnapshot().reading)
+        val second = client.requests.last()
+        assertEquals("てんき", second.reading)
+        assertTrue(session.applyConversionOutcome(converted(second, "天気")))
+        assertEquals("京は天気", connection.text)
+    }
+
+    /** 複数の文節をまとめる候補を選ぶと、その候補が覆う読みを確定し、残りだけを再入力する。 */
+    @Test
+    fun selectingMultiSegmentCandidateDoesNotDuplicateReading() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), 0, 0, conversionClient = client)
+        session.inputText("きょうはいいてんき")
+        session.convert()
+        val first = client.requests.single()
+        val result = ConversionResult(
+            first,
+            listOf(
+                ConversionSegment("きょうは", "今日は"),
+                ConversionSegment("いい", "いい"),
+                ConversionSegment("てんき", "天気"),
+            ),
+            listOf(
+                ConversionCandidate(0, "今日は", "きょうは"),
+                ConversionCandidate(5, "今日はいい", "きょうはいい"),
+                ConversionCandidate(6, "今日はいい天気", "きょうはいいてんき"),
+            ),
+        )
+        assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(result)))
+
+        assertTrue(session.selectConversionCandidate(ConversionChoice(first, 5)))
+        assertEquals("今日はいいてんき", connection.text)
+        assertEquals("てんき", client.requests.last().reading)
+        assertTrue(session.applyConversionOutcome(converted(client.requests.last(), "天気")))
+        assertTrue(session.commitComposition())
+        assertEquals("今日はいい天気", connection.text)
+
+        session.inputText("きょうはいいてんき")
+        session.convert()
+        val full = client.requests.last()
+        assertTrue(
+            session.applyConversionOutcome(
+                ConversionOutcome.Converted(result.copy(request = full)),
+            ),
+        )
+        assertTrue(session.selectConversionCandidate(ConversionChoice(full, 6)))
+        assertEquals("今日はいい天気今日はいい天気", connection.text)
+        assertTrue(session.compositionSnapshot().reading.isEmpty())
+    }
+
+    /** 変換結果の表示中に次の文字を入力すると、表示中の変換を確定して新しい読みを始める。 */
+    @Test
+    fun typingAfterConversionCommitsConvertedText() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), 0, 0, conversionClient = client)
+        session.inputText("かんじ")
+        session.convert()
+        val request = client.requests.single()
+        session.applyConversionOutcome(converted(request, "漢字"))
+        session.updateSelection(0, 0, 2, 2, 0, 2)
+
+        assertTrue(session.inputText("を"))
+
+        assertEquals("漢字を", connection.text)
+        assertEquals("を", session.compositionSnapshot().reading)
+        assertEquals(listOf(request), client.committedAll)
+    }
+
+    /** 古い変換結果の候補をタップしても、現在の変換へ適用しない。 */
+    @Test
+    fun staleCandidateChoiceIsRejected() {
+        val connection = FakeEditorConnection()
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("かんじ")
+        session.convert()
+        val first = client.requests.single()
+        session.applyConversionOutcome(converted(first, "漢字", "感じ"))
+        val staleChoice = session.candidateOptions()[1].conversionChoice!!
+        session.deleteBackward()
+        session.inputText("じ")
+        session.convert()
+        session.applyConversionOutcome(converted(client.requests.last(), "漢字", "幹事"))
+
+        assertFalse(session.selectConversionCandidate(staleChoice))
+        assertTrue(connection.committedTexts.isEmpty())
+    }
+
+    /** 読み全体を一文節とする変換応答を作る。 */
+    private fun converted(request: ConversionRequest, vararg values: String): ConversionOutcome {
+        return ConversionOutcome.Converted(
+            ConversionResult(
+                request,
+                listOf(ConversionSegment(request.reading, values.first())),
+                values.mapIndexed { index, value -> ConversionCandidate(index, value, request.reading) },
+            ),
+        )
+    }
+
     private fun normalPolicy(
         isTypeNull: Boolean = false,
         imeAction: Int = EditorInfo.IME_ACTION_DONE,
@@ -349,6 +602,27 @@ private enum class CommitNotificationTiming {
     BEFORE_INPUT,
     BETWEEN_INPUTS,
     AFTER_INPUT,
+}
+
+/** 変換要求と学習通知を記録するだけの、常に利用可能な偽の変換窓口。 */
+private class FakeConversionClient : ConversionClient {
+    val requests = mutableListOf<ConversionRequest>()
+    val committedCandidates = mutableListOf<Pair<ConversionRequest, Int>>()
+    val committedAll = mutableListOf<ConversionRequest>()
+
+    override val isAvailable: Boolean = true
+
+    override fun requestConversion(request: ConversionRequest) {
+        requests += request
+    }
+
+    override fun commitCandidate(request: ConversionRequest, candidateId: Int) {
+        committedCandidates += request to candidateId
+    }
+
+    override fun commitAll(request: ConversionRequest) {
+        committedAll += request
+    }
 }
 
 /** EditorSessionが送った操作と失敗条件をメモリ上で記録する。 */

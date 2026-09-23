@@ -42,7 +42,7 @@ MacにはPython 3.14.7、JDK 25、Android SDK 36/37、Build Tools 36/37、Gradle
 ## 次の作業単位
 
 1. [試作結果](mozc-build-probe.md)の配布物に関するライセンス、NOTICE、実リンク閉包、Java lite runtimeを確定する。**完了**：[配布物監査](mozc-distribution-audit.md)と[`NOTICE.txt`](../third_party/mozc/NOTICE.txt)。
-2. 同じprotocol versionのJava lite生成物・runtimeと最小JNIブリッジを接続し、端末上でsession作成→読み入力→候補→確定→session破棄を検証する。
+2. 同じprotocol versionのJava lite生成物・runtimeと最小JNIブリッジを接続し、端末上でsession作成→読み入力→候補→確定→session破棄を検証する。2026-09-23に明示変換として接続し、[接続と検証の記録](mozc-conversion-validation.md)に残した。
 3. dataset不在・破損、低メモリ、接続切替、機密欄、連続入力を試験する。API 37ではOS memory limiterによる終了も確認する。
 4. 変換を組み込み、ユーザー辞書CRUDと保存・削除・再起動後復元を独立に実装・検証する。`commands.proto`の旧`user_dictionary_command`はreservedであるため、旧Androidコードの辞書操作をそのまま呼べると仮定しない。
 

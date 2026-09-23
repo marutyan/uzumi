@@ -50,6 +50,9 @@
     <string name="trial_input_hint">ここへ入力できます</string>
     <string name="candidate_button_label">%1$s　%2$s</string>
     <string name="candidate_hint_default">かな・カナ候補</string>
+    <string name="candidate_hint_conversion">変換キーで漢字候補</string>
+    <string name="candidate_hint_no_dictionary">辞書なし：かな・カナ候補のみ</string>
+    <string name="candidate_status_no_dictionary">辞書なし</string>
     <string name="candidate_hint_sensitive">機密入力：候補を表示しません</string>
     <string name="candidate_hint_compatibility">互換入力：候補を表示しません</string>
 </resources>
