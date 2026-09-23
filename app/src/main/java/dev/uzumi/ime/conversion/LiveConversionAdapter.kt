@@ -9,12 +9,15 @@ import dev.uzumi.ime.live.LiveConversionRules
 import dev.uzumi.ime.live.LiveConverter
 import dev.uzumi.ime.live.LiveSegment
 import dev.uzumi.ime.live.ResultSegment
+import dev.uzumi.ime.live.SegmentState
 
 /**
  * ライブ変換の要求を、保護範囲と入力カーソルで区切った自由な部分範囲ごとに変換する`LiveConverter`。
  * 各部分範囲を独立に変換するため、保護範囲の境界とカーソル位置は必ずsegment境界になり、
  * コアの照合（CROSSES_PROTECTED、CROSSES_CURSOR）で捨てられない結果だけを返す。
  * 変換そのものはconvertRangeへ任せ、Mozcでも辞書なしのかな・カナ候補でも同じ分割規則を使う。
+ * 部分範囲の先頭からの読みが学習した句に一致する場合は、句の終わりでも区切り、句と残りを別々に変換する。
+ * 句は部分範囲の中だけで探すため、保護範囲とカーソルの境界を越える句は使われない。
  */
 class SegmentedLiveConverter(
     // 一つの部分範囲の読みを変換する。読みの連結がその範囲に一致するsegment列を返し、失敗時はnull。
@@ -23,7 +26,17 @@ class SegmentedLiveConverter(
     private val userDictionary: UserDictionaryLookup? = null,
     // 読みに完全一致する学習語の表記を、優先する順に返す。nullなら学習語を加えない（学習禁止欄・学習OFF）。
     private val learnedSurfaces: ((String) -> List<String>)? = null,
+    // 読みに完全一致する学習した句の表記を、優先する順に返す。nullなら句で区切りを合わせない。
+    private val learnedPhrases: ((String) -> List<String>)? = null,
 ) : LiveConverter {
+    // 読みに完全一致する学習語と句の表記を合わせて引く。どちらも無ければnullで、学習語を合成しない。
+    private val exactSurfaces: ((String) -> List<String>)? =
+        if (learnedSurfaces == null && learnedPhrases == null) {
+            null
+        } else {
+            { reading -> (learnedSurfaces?.invoke(reading).orEmpty() + learnedPhrases?.invoke(reading).orEmpty()).distinct() }
+        }
+
     override fun convert(request: LiveRequest): LiveResult? {
         val identity = request.identity
         val clusters = GraphemeClusters.split(identity.reading)
@@ -41,14 +54,39 @@ class SegmentedLiveConverter(
             val chunkEnd = (identity.protectedRanges.map { it.readingStart } + identity.inputCursor)
                 .filter { it > position && it < identity.targetEnd }
                 .minOrNull() ?: identity.targetEnd
-            val chunk = clusters.subList(position, chunkEnd).joinToString("")
-            val converted = convertRange(chunk) ?: return null
-            // 並びは「ユーザー辞書 → 学習 → エンジン」。学習語を先に合成し、その上へ登録語を置く。
-            val learned = learnedSurfaces?.let { mergeExactSurfaces(chunk, converted, it) } ?: converted
-            segments += UserDictionaryCandidates.mergeLive(chunk, learned, userDictionary)
+            val chunkClusters = clusters.subList(position, chunkEnd)
+            val chunk = chunkClusters.joinToString("")
+            val phraseEnd = headPhraseEnd(chunk, chunkClusters)
+            if (phraseEnd == null) {
+                segments += convertMerged(chunk) ?: return null
+            } else {
+                // 句の読みを一つの範囲として変換すると、範囲全体に一致する句の表記の一segmentにまとまる。残りは別に変換する。
+                segments += convertMerged(chunkClusters.subList(0, phraseEnd).joinToString("")) ?: return null
+                segments += convertMerged(chunkClusters.subList(phraseEnd, chunkClusters.size).joinToString("")) ?: return null
+            }
             position = chunkEnd
         }
         return LiveResult(identity, segments)
+    }
+
+    /** 一つの読みを変換し、「ユーザー辞書 → 学習 → エンジン」の順に候補を合成する。学習語を先に合成し、その上へ登録語を置く。 */
+    private fun convertMerged(reading: String): List<ResultSegment>? {
+        val converted = convertRange(reading) ?: return null
+        val learned = exactSurfaces?.let { mergeExactSurfaces(reading, converted, it) } ?: converted
+        return UserDictionaryCandidates.mergeLive(reading, learned, userDictionary)
+    }
+
+    /**
+     * 部分範囲の先頭から始まり、範囲より短い学習した句のうち最も長いものの終わり（範囲内の書記素位置）を返す。
+     * 範囲全体の読みに登録語か学習語があれば、範囲を一segmentにまとめる既存の規則を優先するため句を探さない。
+     */
+    private fun headPhraseEnd(chunk: String, chunkClusters: List<String>): Int? {
+        val phrases = learnedPhrases ?: return null
+        if (userDictionary?.exactMatches(chunk)?.isNotEmpty() == true) return null
+        if (exactSurfaces?.invoke(chunk)?.isNotEmpty() == true) return null
+        return (chunkClusters.size - 1 downTo 1).firstOrNull { end ->
+            phrases(chunkClusters.subList(0, end).joinToString("")).isNotEmpty()
+        }
     }
 }
 
@@ -207,7 +245,7 @@ fun liveLearningUnits(segments: List<LiveSegment>): List<List<LearnedSegment>> {
             segment.reading != LiveConversionRules.SOFT_BOUNDARY &&
             !isAsciiOnly(segment.reading)
         if (learnable) {
-            current += LearnedSegment(segment.reading, segment.surface)
+            current += LearnedSegment(segment.reading, segment.surface, chosen = segment.state == SegmentState.CHOSEN)
         } else if (current.isNotEmpty()) {
             units += current
             current = mutableListOf()
