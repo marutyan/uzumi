@@ -1,6 +1,9 @@
 package dev.uzumi.ime.live
 
 import dev.uzumi.ime.editor.GraphemeClusters
+import dev.uzumi.ime.evaluation.OperationClassifier
+import dev.uzumi.ime.evaluation.OperationCounts
+import dev.uzumi.ime.evaluation.OperationKind
 
 /**
  * 決まった語彙で最長一致の分割を返す、試験用の変換器。
@@ -114,21 +117,8 @@ class FakeLiveEditor {
 }
 
 /**
- * ある文を入力し終えるまでの操作数。Phase 2cでライブON/OFFや既存IMEと比べるために数える。
- */
-data class OperationCounts(
-    /** 文字キー（句読点を含む）と削除キー。 */
-    val keys: Int = 0,
-    /** 変換を確定するためだけの操作。 */
-    val commits: Int = 0,
-    /** 過去segmentの選択、候補選択、末尾への復帰、Undo/Redo、カーソル移動。 */
-    val corrections: Int = 0,
-    /** 改行やSend等、本来の終端操作。確定操作とは分けて数える。 */
-    val terminators: Int = 0,
-)
-
-/**
  * コアを操作し、変換要求を変換器で即座に処理して結果を返しながら操作数を数える試験用の補助。
+ * 操作の分類はIMEの評価用計数と同じ[OperationClassifier]と[OperationCounts]を使う。
  * deliverImmediatelyをfalseにすると要求をpendingへためるため、結果の到着順を試験で決められる。
  */
 class LiveSessionDriver(
@@ -147,18 +137,18 @@ class LiveSessionDriver(
         if (!core.isActive) core.startField(LiveFieldPolicy.NORMAL)
     }
 
-    /** 文字列を一文字（書記素）ずつ打つ。各文字を一回のキー操作として数える。 */
+    /** 文字列を一文字（書記素）ずつ打つ。各文字を一回の押下として数え、句点は終端操作とする。 */
     fun type(text: String): LiveSessionDriver {
         for (cluster in GraphemeClusters.split(text)) {
-            counts = counts.copy(keys = counts.keys + 1)
+            counts += OperationClassifier.text(cluster)
             handle(core.inputText(cluster))
         }
         return this
     }
 
-    /** 削除キーを一回押す。 */
+    /** 削除キーを一回押す。削除は訂正操作として数える。 */
     fun backspace(): LiveUpdate {
-        counts = counts.copy(keys = counts.keys + 1)
+        counts += OperationKind.CORRECTION
         return handle(core.deleteBackward())
     }
 
@@ -195,13 +185,13 @@ class LiveSessionDriver(
 
     /** 確定キーを押す。 */
     fun commit(): LiveUpdate {
-        counts = counts.copy(commits = counts.commits + 1)
+        counts += OperationKind.COMMIT
         return handle(core.commitComposition())
     }
 
     /** Enter（改行またはEditor action）を押す。 */
     fun enter(kind: EnterKind): LiveUpdate {
-        counts = counts.copy(terminators = counts.terminators + 1)
+        counts += OperationKind.TERMINATOR
         return handle(core.enter(kind))
     }
 
@@ -225,6 +215,6 @@ class LiveSessionDriver(
 
     /** 訂正操作を一回数える。 */
     private fun correction() {
-        counts = counts.copy(corrections = counts.corrections + 1)
+        counts += OperationKind.CORRECTION
     }
 }

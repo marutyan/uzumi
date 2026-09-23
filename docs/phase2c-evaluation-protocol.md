@@ -84,7 +84,16 @@ H3は安全性の条件であり、件数の多少ではなく発生の有無で
 - 長押しを含む操作は使わない。`input motionevent`でDOWNとUPだけを送る方式は使わない（branch `fix/delete-repeat-guard`の変更後は、MOVEの無い押下でUzumiの削除キーが連続削除しないため、押下時間の指定が意味を持たない）。
 - 最終文：終端操作の後に`uiautomator dump`で試験欄の文字列を取り、許容表記と照合する。
 - 訂正：最終文が許容表記と一致しない場合は、目標表記と候補一覧を照合して必要な候補を選ぶ手順を機械的に行う。このときの訂正操作数は「必要な操作数の下限」であり、人の訂正コストとは別の値として報告する。目標表記は照合にだけ使い、IMEへは渡さない。
-- 評価用計数：Uzumiのdebug buildに、評価モードを明示的に有効にした間だけ、操作の種別ごとの回数、表示の自動変更の回数、誤書換えの判定に必要なsegmentの状態変化、時刻を記録する仕組みを設ける（実装は別作業）。評価モードは`adb`からの設定で入れ、試験の終了時に切る。記録には課題IDを付け、入力本文・候補の文字列は残さない。誤書換えの判定に表記が必要な場合は、課題文と照合した結果（正誤）だけを残す。
+- 評価用計数：Uzumiのdebug buildに、評価モードを明示的に有効にした間だけ、操作の種別ごとの回数、表示の自動変更の回数、誤書換えの判定に必要なsegmentの状態変化、時刻を記録する仕組みを設ける。評価モードは`adb`からの設定で入れ、試験の終了時に切る。記録には課題IDを付け、入力本文・候補の文字列は残さない。誤書換えの判定に表記が必要な場合は、課題文と照合した結果（正誤）だけを残す。
+  - 実装済みの範囲：課題ごとの操作数（キー操作数、確定操作数、訂正操作数、終端操作数）。表示の自動変更の回数、segmentの状態変化、時刻は未実装であり、flickerと誤書換えを測る前に別作業で足す。
+  - 操作の分類（計数の版1、`app/src/main/java/dev/uzumi/ime/evaluation/OperationCounts.kt`）：句点の入力とEnterは終端操作。明示変換の変換キーと第一候補の選択は確定操作。削除、行頭までの削除、カーソル・文節の移動、第一候補以外の候補選択、元に戻す、「末尾」、カナへの切り替え、ライブ変換中の変換キー（次の候補）は訂正操作。キー操作数は終端操作を除くすべての押下で、面の切替、Shift、候補一覧の開閉も含む。長押しの連続削除は、消えた回数ずつ数える（自動測定では長押しを使わない）。取り消した削除ドラッグのように、IMEへ操作が届かない押下は数えない。
+  - 課題ごとの手順（debug APKだけで使える）：
+    1. 試験欄を空にする：`adb shell am start -n dev.uzumi.ime/.compat.Phase2cTaskActivity --es task <課題ID>`。開くたびに欄（`dev.uzumi.ime:id/phase2c_task_field`）を空にし、課題IDを表示する。この操作は数えない。
+    2. 計数を始める：`adb shell am broadcast -n dev.uzumi.ime/.compat.EvaluationCounterReceiver -a dev.uzumi.ime.debug.EVAL_START --es task <課題ID>`。課題IDは英数字・`_`・`-`の16文字以内に限る。
+    3. 読みを入力し、終端操作まで行う。
+    4. 計数を終える：`adb shell am broadcast -n dev.uzumi.ime/.compat.EvaluationCounterReceiver -a dev.uzumi.ime.debug.EVAL_FINISH`。出力の`data`に1行（`counter_version`、`task_id`、`keys`、`commits`、`corrections`、`terminators`のTSV）が返り、端末内の`no_backup/phase2c-counts.tsv`へも追記される。
+    5. 最終文を`uiautomator dump`で試験欄から取る。
+  - 取り出しと消去：`-a dev.uzumi.ime.debug.EVAL_DUMP`で全行を、`-a dev.uzumi.ime.debug.EVAL_CLEAR`で記録の消去と計数の停止を行う（どちらも上と同じ`-n`で送る）。`adb shell run-as dev.uzumi.ime cat no_backup/phase2c-counts.tsv`でも読める。取り出した結果は`.local-build/phase2c/<実施日>/`へ置く。受信口はDUMP権限を持つ`adb shell`からだけ送れ、releaseビルドには入らない。
 - 実施：条件Oと条件Nで54文を同じ順に1回ずつ流す。条件ごとに学習履歴を消してから始める。
 
 ### ユーザー本人が操作する部分（条件S・O・N）
@@ -95,7 +104,7 @@ H3は安全性の条件であり、件数の多少ではなく発生の有無で
 - タッチの回数と時刻：`adb shell getevent -lt`で、試験中だけタッチの開始（`ABS_MT_TRACKING_ID`の新しい値）と時刻を記録する。キー操作数と完了時間はこの記録から数える。記録は課題文の入力中だけに限り、試験の終了時に止める。
 - 操作の分類：画面録画（`adb shell screenrecord`、開発者オプションの「タップを表示」）とタッチ座標から、各タッチを文字入力、変換・確定、候補選択、削除、その他へ分ける。キーの範囲は各IMEのスクリーンショットから実測して記録する。自動で決まらないタッチは録画を見て分類し、分類した人と判断を記録する。
 - 主観：各条件の終了時に、「このまま日常で使えるか」「訂正のしやすさ」「表示の揺れが気になったか」を5段階で答え、自由記述を1〜3行残す。
-- 課題の間に試験欄を空にする。空にする方法は試験用画面の実装時に決め、その操作は数えない。
+- 課題の間に試験欄を空にする。空にする方法は、試験画面（`Phase2cTaskActivity`）の「空にする」ボタン、または上の`am start`とし、その操作は数えない。
 
 ## 実施順と練習
 

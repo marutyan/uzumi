@@ -24,6 +24,9 @@ import dev.uzumi.ime.dictionary.UserDictionaries
 import dev.uzumi.ime.editor.AndroidInputConnectionPort
 import dev.uzumi.ime.editor.EditorSession
 import dev.uzumi.ime.editor.InputFieldPolicy
+import dev.uzumi.ime.evaluation.EvaluationCounter
+import dev.uzumi.ime.evaluation.OperationClassifier
+import dev.uzumi.ime.evaluation.OperationKind
 import dev.uzumi.ime.keyboard.CandidateBarViews
 import dev.uzumi.ime.keyboard.CandidateGridView
 import dev.uzumi.ime.keyboard.KeyboardAction
@@ -59,6 +62,8 @@ class UzumiInputMethodService : InputMethodService() {
     private var engineHealth: EngineHealth = EngineHealth.Loading
     // 編集セッションごとに増やす番号。古い変換応答や学習通知を別のフィールドへ適用しない。
     private var lastSessionEpoch = 0L
+    // Phase 2cの評価用計数。debugビルドの受信口で開始したときだけ数え、既定では何もしない。
+    private val evaluation = EvaluationCounter.shared
 
     /** 変換エンジンを専用の直列threadで読み込み始める。キー入力はこの完了を待たない。 */
     override fun onCreate() {
@@ -150,6 +155,7 @@ class UzumiInputMethodService : InputMethodService() {
             ::handleKeyboardAction,
             lineDeleteLength = { session?.lineDeleteLength() },
             preferences = preferences,
+            onPanelKey = { evaluation.record(OperationKind.OTHER) },
         ).also { panel ->
             keyboardArea.addView(panel, FrameLayout.LayoutParams(match, wrap))
         }
@@ -261,6 +267,7 @@ class UzumiInputMethodService : InputMethodService() {
     /** キーボード操作を現在の編集セッションへ一度だけ送る。 */
     private fun handleKeyboardAction(action: KeyboardAction) {
         val current = session ?: return
+        evaluation.record(OperationClassifier.keyboardAction(action, current.isLiveMode))
         // 左ドラッグで消した文字列は、次の操作をした時点で戻せなくする
         if (action != KeyboardAction.DeleteToLineStart) current.forgetLineDelete()
         when (action) {
@@ -336,6 +343,7 @@ class UzumiInputMethodService : InputMethodService() {
         val current = session
         if (current?.canUndoLineDelete == true) {
             leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.line_delete_undo_description), true) {
+                evaluation.record(OperationKind.CORRECTION)
                 if (session === current) current.undoLineDelete()
                 refreshCandidates()
             })
@@ -354,9 +362,12 @@ class UzumiInputMethodService : InputMethodService() {
         if (engineHealth is EngineHealth.Unavailable && current?.policy?.suppressSuggestions == false) {
             row.addView(views.hint(getString(R.string.candidate_status_no_dictionary)))
         }
-        entries.forEach { entry -> row.addView(views.item(entry.label, entry.selected) { pickCandidate(current, entry) }) }
+        entries.forEachIndexed { index, entry ->
+            row.addView(views.item(entry.label, entry.selected) { pickCandidate(current, entry, index) })
+        }
         trailing.addView(views.divider())
         trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
+            evaluation.record(OperationKind.OTHER)
             if (grid?.isShowing == true) grid.hide() else showCandidateGrid(current, entries)
             refreshCandidates()
         })
@@ -369,15 +380,16 @@ class UzumiInputMethodService : InputMethodService() {
         val grid = candidateGrid ?: return
         grid.show(entries.map { it.label }, entries.indexOfFirst { it.selected }) { index ->
             grid.hide()
-            pickCandidate(current, entries[index])
+            pickCandidate(current, entries[index], index)
         }
     }
 
     /** 候補バーの一項目。押したときの操作を持つ。 */
     private class CandidateEntry(val label: String, val selected: Boolean, val onPick: () -> Unit)
 
-    /** 候補を選ぶ。表示したときと別の編集セッションになっていれば何もしない。 */
-    private fun pickCandidate(shown: EditorSession?, entry: CandidateEntry) {
+    /** [index]番目の候補を選ぶ。表示したときと別の編集セッションになっていれば何もしない。 */
+    private fun pickCandidate(shown: EditorSession?, entry: CandidateEntry, index: Int) {
+        evaluation.record(OperationClassifier.candidatePick(index))
         if (shown == null || session !== shown) return
         shown.forgetLineDelete()
         entry.onPick()
@@ -411,6 +423,7 @@ class UzumiInputMethodService : InputMethodService() {
         val state = current.liveCandidateState() ?: return emptyList()
         if (state.canUndo && !current.canUndoLineDelete) {
             leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.live_undo), true) {
+                evaluation.record(OperationKind.CORRECTION)
                 if (session === current) current.undoLive()
                 refreshCandidates()
             })
@@ -420,6 +433,7 @@ class UzumiInputMethodService : InputMethodService() {
                 leading.addView(views.chip(reading, getString(R.string.live_focused_reading, reading), false, null))
             }
             trailing.addView(views.symbolButton(getString(R.string.live_return_label), getString(R.string.live_return_to_input)) {
+                evaluation.record(OperationKind.CORRECTION)
                 if (session === current) current.returnLiveFocusToInput()
                 refreshCandidates()
             })
@@ -432,9 +446,15 @@ class UzumiInputMethodService : InputMethodService() {
     /** 入力していない間の候補バー。左端に設定、中央に案内、右端にキーボードを閉じるボタンを置く。 */
     private fun showIdleBar(current: EditorSession?, leading: LinearLayout, trailing: LinearLayout) {
         val views = barViews ?: return
-        leading.addView(views.symbolButton("⚙", getString(R.string.open_settings)) { openSettings() })
+        leading.addView(views.symbolButton("⚙", getString(R.string.open_settings)) {
+            evaluation.record(OperationKind.OTHER)
+            openSettings()
+        })
         candidateRow?.addView(views.hint(hintText(current?.policy, current?.isLiveMode == true)))
-        trailing.addView(views.symbolButton("⌄", getString(R.string.close_keyboard)) { requestHideSelf(0) })
+        trailing.addView(views.symbolButton("⌄", getString(R.string.close_keyboard)) {
+            evaluation.record(OperationKind.OTHER)
+            requestHideSelf(0)
+        })
     }
 
     /** 設定画面を開く。IMEから開くため新しいtaskで起動する。 */

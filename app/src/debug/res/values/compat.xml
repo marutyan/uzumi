@@ -5,6 +5,10 @@
     <string name="compat_webview_title">互換試験（WebView）</string>
     <string name="compat_action_log">action %1$s id=%2$d #%3$d</string>
     <string name="compat_masked_echo">masked=[%1$s] pin=[%2$s]</string>
+    <string name="phase2c_task_title">Phase 2c 課題入力</string>
+    <string name="phase2c_task_label">課題 %1$s</string>
+    <string name="phase2c_task_unset">未指定</string>
+    <string name="phase2c_task_reset">空にする</string>
     <item name="compat_log" type="id" />
     <item name="compat_masked_echo" type="id" />
     <item name="compat_search" type="id" />
@@ -22,4 +26,7 @@
     <item name="compat_webview" type="id" />
     <item name="compat_phone_format" type="id" />
     <item name="compat_max_length" type="id" />
+    <item name="phase2c_task_label" type="id" />
+    <item name="phase2c_task_field" type="id" />
+    <item name="phase2c_task_reset" type="id" />
 </resources>
