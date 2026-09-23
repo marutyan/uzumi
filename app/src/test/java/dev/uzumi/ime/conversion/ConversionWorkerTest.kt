@@ -411,6 +411,39 @@ class ConversionWorkerTest {
         assertNull(learning.exactMatches("かんじ").firstOrNull { it.surface == "感じ" })
     }
 
+    /** ライブ変換で登録語を表示したまま確定しても、登録語は学習へ記録しない。 */
+    @Test
+    fun liveCommitDoesNotRecordUserDictionaryWords() {
+        val learning = learningStore()
+        val fixture = Fixture(dictionary = FakeLookup("うずみ" to "渦見", "かん" to "缶"), learning = learning)
+        fixture.startReady()
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "うずみかん"))
+        fixture.executor.runAll()
+
+        fixture.worker.learnCommitted(7, listOf(listOf(LearnedSegment("うずみ", "渦見"), LearnedSegment("かん", "缶"))))
+        fixture.executor.runAll()
+
+        assertTrue(learning.allWords().isEmpty())
+    }
+
+    /** エンジンがReadyでなければ、全消去はworkerへ依頼せず、エンジンの学習ファイルを直接消す経路へ回す。 */
+    @Test
+    fun clearAllFallsBackToFilesWhenEngineIsNotReady() {
+        var fileClears = 0
+        val learning = LearningStore(learningFile, clock = { now }, clearEngineFiles = { fileClears += 1 })
+        val fixture = Fixture(learning = learning)
+        fixture.engine.loadResult = { EngineHealth.Unavailable(EngineUnavailableReason.MINIMAL_ENGINE) }
+        fixture.worker.start()
+        fixture.executor.runAll()
+        fixture.engine.calls.clear()
+
+        learning.clearAll()
+        fixture.executor.runAll()
+
+        assertEquals(1, fileClears)
+        assertFalse(fixture.engine.calls.contains("clearLearning"))
+    }
+
     /** 学習の全消去は、動いているworkerを通じてエンジンの学習も消す。 */
     @Test
     fun clearAllClearsEngineLearningThroughWorker() {

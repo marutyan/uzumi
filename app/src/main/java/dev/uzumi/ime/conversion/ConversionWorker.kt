@@ -108,10 +108,11 @@ class ConversionWorker(
     }
 
     /**
-     * エンジンの学習の消去をworkerのキューへ積む。workerが止まっていて積めなければfalseを返し、
-     * 呼び出し側（学習キャッシュ）がエンジンの保存ファイルを直接消す。
+     * エンジンの学習の消去をworkerのキューへ積む。エンジンがReadyでない、またはworkerが止まっていて積めなければ
+     * falseを返し、呼び出し側（学習キャッシュ）がエンジンの保存ファイルを直接消す。
      */
     private fun requestEngineLearningClear(): Boolean {
+        if (currentHealth !is EngineHealth.Ready) return false
         return try {
             executor.execute { runCatching { engine.clearLearning() } }
             true
@@ -134,7 +135,15 @@ class ConversionWorker(
         executor.execute {
             val sessionId = engineSessions[sessionEpoch] ?: return@execute
             // 表示のまま確定したsegmentをIME側の学習にも記録する。対象外の表記は記録の規則が除く。
-            lookupLearningStore()?.let { store -> units.flatten().forEach { store.record(it.reading, it.surface) } }
+            // ユーザー辞書の登録語を表示したsegmentは記録しない。辞書から消した後も学習から表示され続けるのを防ぐ。
+            lookupLearningStore()?.let { store ->
+                val dictionary = lookupUserDictionary()
+                units.flatten()
+                    .filterNot { segment ->
+                        dictionary?.exactMatches(segment.reading)?.any { it.surface == segment.surface } == true
+                    }
+                    .forEach { store.record(it.reading, it.surface) }
+            }
             if (!runCatching { engine.setIncognito(false) }.getOrDefault(false)) return@execute
             lastConverted.remove(sessionEpoch)
             for (unit in units) {

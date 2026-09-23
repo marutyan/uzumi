@@ -121,7 +121,7 @@ karukan（MIT OR Apache-2.0）の設定文書にある学習の仕組みを参�
 
 | 項目 | 仕様 |
 | --- | --- |
-| 記録するもの | 明示変換で選んだ候補（エンジンの候補・学習語・予測）と、ライブ変換で表示のまま確定したsegmentの読みと表記。表記がひらがなだけ・ASCIIだけ・読みと同じ・50文字を超える・タブや改行を含むものは記録しない。自動変換の途中、明示変換の第一候補のままの確定、登録語の確定では記録しない。 |
+| 記録するもの | 明示変換で選んだ候補（エンジンの候補・学習語・予測）と、ライブ変換で表示のまま確定したsegmentの読みと表記。表記がひらがなだけ・ASCIIだけ・読みと同じ・50文字を超える・タブや改行を含むものは記録しない。自動変換の途中、明示変換の第一候補のままの確定、登録語の確定（ライブ変換で登録語を表示したまま確定した場合を含む）では記録しない。 |
 | 順位 | `最後に使った時刻 + ln(回数) × 1日`の降順。回数がe倍になるごとに1日新しく使ったものとして扱う。 |
 | 参照 | 読みの完全一致と前方一致で最大3件。ライブ変換では、完全一致の最上位の語を表示し、候補は「ユーザー辞書 → 学習 → Mozc」の順。登録語がある読みでは登録語を表示する。明示変換では表示を変えず、完全一致（読み全体と先頭文節）をMozcの候補の前へ、前方一致の予測を候補の最後へ置く。学習語がMozcの候補と同じならMozcの候補を前へ移し、確定をMozcへも送る。 |
 | 上限 | 10,000語。超えたら順位が最も低い語から捨てる。 |
@@ -133,7 +133,7 @@ karukan（MIT OR Apache-2.0）の設定文書にある学習の仕組みを参�
 - `isEnabled`、`setEnabled(Boolean)`：学習のON/OFF。OFFの間は記録も参照もせず、保存済みの語は残す。
 - `allWords()`：保存している語を順位の順に返す。
 - `remove(reading, surface)`：一語を削除する。
-- `clearAll()`：学習をすべて消し、Mozcの学習も消す。IMEが動いていれば変換workerの順番で`CLEAR_USER_HISTORY`と`CLEAR_USER_PREDICTION`を送り、動いていなければprofileの`segment.db`、`boundary.db`、`history.db`、`.history.db`を消す。
+- `clearAll()`：学習をすべて消し、Mozcの学習も消す。IMEが動いていてMozcがReadyなら変換workerの順番で`CLEAR_USER_HISTORY`と`CLEAR_USER_PREDICTION`を送り、それ以外はprofileの`segment.db`、`boundary.db`、`history.db`、`.history.db`を消す。
 
 `UzumiInputMethodService.onCreate`で`ConversionWorker`へ`learningStore = { LearningStores.get(this) }`を渡す1行を加えた（別commit）。
 
@@ -160,3 +160,9 @@ Pixel 10 Pro（Android 17/API 37）、2026-09-23 22:38〜22:42。開始時の既
 | アプリを停止して開き直し、「こうえんにいく」 | 「校園に行く」が表示された |
 
 アプリの停止で既定IMEがGboardへ変わり、一度だけGboardで意味のないかなが入力された。Gboardの学習へ残った可能性があるが、確認していない。試験後は`learning.tsv`とprofileの複製を消し、Mozcのprofileを複製から戻した（5ファイルのSHA-256が開始時と一致）。既定IMEと`enabled_input_methods`は開始時の値へ戻し、`cmp`で一致を確認した。ただし最初の書き戻しでは、値に含まれる`;`を端末のshellが区切りとして扱い、22:42:31から22:42:41まで`enabled_input_methods`が先頭3件だけ（Uzumiが無い状態）になっていた。値全体を引用して書き直し、一致を確認した。
+
+### レビュー指摘の修正
+
+- ライブ変換で登録語を表示したまま確定すると、登録語が学習キャッシュへ複製され、辞書から消した後も表示され続けていた。記録の前に、同じ読みの登録語と同じ表記のsegmentを除くようにした（回帰テスト`liveCommitDoesNotRecordUserDictionaryWords`）。
+- Mozcが`Ready`でない間の`clearAll`は、workerへ依頼したと扱われ、profileの学習ファイルが消えなかった。`Ready`でなければprofileの学習ファイルを直接消す経路へ回すようにした（回帰テスト`clearAllFallsBackToFilesWhenEngineIsNotReady`）。
+- 修正前のコードでは、この2件のテストが失敗することを確かめた。`./gradlew testDebugUnitTest assembleDebug lintDebug`は成功し、JVMテストは183件で失敗0件、lintはerror 0件・警告4件で変わらない。実機では確かめていない。
