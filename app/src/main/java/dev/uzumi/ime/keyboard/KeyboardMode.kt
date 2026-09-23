@@ -10,4 +10,6 @@ enum class KeyboardMode {
     QWERTY,
     /** 数字・記号テンキーモード */
     NUMERIC,
+    /** 句読点・括弧・記号を並べた記号面モード */
+    SYMBOL,
 }
