@@ -88,6 +88,9 @@ class KeyView(context: Context) : View(context) {
     private var onShiftToggle: (() -> Unit)? = null
     private var onPageSwitch: (() -> Unit)? = null
 
+    // 押下中の文字の拡大表示を出す・消すコールバック。文字がnullなら消す。拡大表示を使わない面ではnull。
+    private var onPreview: ((View, String?) -> Unit)? = null
+
     // 長押しの取り消し距離は端末の標準touch slopに合わせる。フリック閾値とは別の値である。
     private val gesture = KeyGestureState(ViewConfiguration.get(context).scaledTouchSlop.toFloat())
     private var isShifted = false
@@ -113,6 +116,7 @@ class KeyView(context: Context) : View(context) {
     private val longPressRunnable = Runnable {
         if (isAttachedToWindow && gesture.longPressTimeout()) {
             performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            updatePreview()
             invalidate()
         }
     }
@@ -144,12 +148,14 @@ class KeyView(context: Context) : View(context) {
         onModeSwitch: ((KeyboardMode) -> Unit)? = null,
         onShiftToggle: (() -> Unit)? = null,
         onPageSwitch: (() -> Unit)? = null,
+        onPreview: ((View, String?) -> Unit)? = null,
     ) {
         this.spec = spec
         this.onAction = onAction
         this.onModeSwitch = onModeSwitch
         this.onShiftToggle = onShiftToggle
         this.onPageSwitch = onPageSwitch
+        this.onPreview = onPreview
         updateContentDescription()
         invalidate()
     }
@@ -203,6 +209,7 @@ class KeyView(context: Context) : View(context) {
     fun cancelPendingInput() {
         repeatHandler.removeCallbacksAndMessages(null)
         removeCallbacks(longPressRunnable)
+        if (gesture.isPressed) onPreview?.invoke(this, null)
         if (gesture.isPressed || activePointerId != MotionEvent.INVALID_POINTER_ID) {
             gesture.reset()
             currentDirection = FlickDirection.CENTER
@@ -214,6 +221,24 @@ class KeyView(context: Context) : View(context) {
     override fun onDetachedFromWindow() {
         cancelPendingInput()
         super.onDetachedFromWindow()
+    }
+
+    /**
+     * 押下中に離すと入力される文字を返す。フリック中はその向きの文字、長押し成立後は長押し文字とする。
+     * 文字を入力しないキー（切替・削除など）ではnullを返し、拡大表示を出さない。
+     */
+    private fun previewText(): String? = when (val currentSpec = spec) {
+        is KeySpec.Kana -> KeyboardLayoutData.getKanaChar(currentSpec.type, currentDirection)
+            .ifEmpty { KeyboardLayoutData.getKanaChar(currentSpec.type, FlickDirection.CENTER) }
+        is KeySpec.SimpleText -> currentSpec.longPressText?.takeIf { gesture.isLongPressActive } ?: shiftedText(currentSpec)
+        else -> null
+    }
+
+    /** 押下中なら拡大表示を今の文字へ更新する。 */
+    private fun updatePreview() {
+        val callback = onPreview ?: return
+        val text = previewText() ?: return
+        if (gesture.isPressed) callback(this, text)
     }
 
     /** 押下中に連続実行するアクションキーであれば、そのアクションを返す。 */
@@ -247,6 +272,7 @@ class KeyView(context: Context) : View(context) {
                 gesture.down(event.x, event.y)
                 currentDirection = FlickDirection.CENTER
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                updatePreview()
 
                 val repeatAction = repeatableAction()
                 if (repeatAction != null) {
@@ -284,6 +310,7 @@ class KeyView(context: Context) : View(context) {
                     val newDirection = determineFlickDirection(curX - gesture.startX, curY - gesture.startY, thresholdPx)
                     if (newDirection != currentDirection) {
                         currentDirection = newDirection
+                        updatePreview()
                         invalidate()
                     }
                 } else if (repeatableAction() != null) {
@@ -337,6 +364,7 @@ class KeyView(context: Context) : View(context) {
     private fun handleActivePointerUp(event: MotionEvent, pointerIndex: Int) {
         repeatHandler.removeCallbacksAndMessages(null)
         removeCallbacks(longPressRunnable)
+        onPreview?.invoke(this, null)
         val wasPressed = gesture.isPressed
         val wasLongPressed = gesture.isLongPressActive
         val startX = gesture.startX
@@ -665,12 +693,13 @@ class KeyView(context: Context) : View(context) {
 
         // メイン文字の描画（フリック中は選択中文字を表示）
         mainTextPaint.color = if (currentDirection != FlickDirection.CENTER) colors.accent else colors.text
-        mainTextPaint.textSize = if (currentDirection != FlickDirection.CENTER) 24f * density else 20f * density
+        mainTextPaint.textSize = if (currentDirection != FlickDirection.CENTER) 26f * density else KANA_LABEL_DP * density
         mainTextPaint.typeface = if (currentDirection != FlickDirection.CENTER) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         val textY = centerY - (mainTextPaint.descent() + mainTextPaint.ascent()) / 2f
         canvas.drawText(selectedChar, centerX, textY, mainTextPaint)
 
-        // ガイド文字（非押下中またはタップ時に薄く表示）
+        // フリックの案内文字は押している間だけ出し、普段はキーの文字だけを見せる（Simejiと同じ見た目）
+        if (!gesture.isPressed) return
         guideTextPaint.textSize = 11f * density
 
         val leftChar = map[FlickDirection.LEFT]
@@ -752,6 +781,9 @@ class KeyView(context: Context) : View(context) {
     }
 
     companion object {
+        /** かなキーの文字の大きさ（dp）。Simejiの実測（約23〜24dp）に合わせる。 */
+        private const val KANA_LABEL_DP = 23f
+
         // TalkBack用カスタムAccessibilityAction ID（0x01000000番台）
         const val ACTION_INPUT_CENTER = 0x01000001
         const val ACTION_INPUT_LEFT = 0x01000002

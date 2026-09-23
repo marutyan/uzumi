@@ -226,6 +226,18 @@ class KeyboardLayoutDataTest {
     }
 
     @Test
+    fun keyPreviewSitsAboveKeyAndStaysInsideInputView() {
+        // 中央のキー：キーの中心の真上、隙間8を空けて置く
+        assertEquals(PreviewPlacement(left = 218f, top = 132f), placeKeyPreview(200f, 200f, 100f, 1000f, 64f, 60f, 8f))
+        // 右端のキー：入力Viewの右端からはみ出さない
+        assertEquals(936f, placeKeyPreview(950f, 200f, 50f, 1000f, 64f, 60f, 8f).left)
+        // 左端のキー：左端からはみ出さない
+        assertEquals(0f, placeKeyPreview(0f, 200f, 40f, 1000f, 64f, 60f, 8f).left)
+        // 最上段のキー：上端より上へ出さず、候補バーへ重ねる
+        assertEquals(0f, placeKeyPreview(200f, 30f, 100f, 1000f, 64f, 60f, 8f).top)
+    }
+
+    @Test
     fun kanaKeysSwitchRoleOnlyWhileComposing() {
         // 入力前はSimejiと同じく数字面への切替と空白
         assertEquals(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), KeyboardLayoutData.kanaNumberKey(composing = false))

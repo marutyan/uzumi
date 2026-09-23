@@ -49,6 +49,9 @@ class KeyboardPanel(
     private var symbolPageIndex = 0
     private val symbolPageContainers = mutableListOf<LinearLayout>()
 
+    // 押したキーの拡大表示。password欄では入力した文字を画面に大きく出さないため使わない。
+    private val keyPreview = KeyPreviewPopup(this, KeyboardColors.from(context))
+
     private lateinit var kanaContainer: LinearLayout
     private lateinit var qwertyContainer: LinearLayout
     private lateinit var numericContainer: LinearLayout
@@ -113,6 +116,7 @@ class KeyboardPanel(
      */
     fun cancelPendingInput() {
         allKeyViews.forEach { it.cancelPendingInput() }
+        keyPreview.hide()
     }
 
     override fun onDetachedFromWindow() {
@@ -535,6 +539,9 @@ class KeyboardPanel(
                 },
                 onShiftToggle = { toggleShift() },
                 onPageSwitch = { showNextSymbolPage() },
+                onPreview = { key, text ->
+                    if (text == null || isPasswordField) keyPreview.hide() else keyPreview.show(key, text)
+                },
             )
         }
         allKeyViews.add(keyView)
