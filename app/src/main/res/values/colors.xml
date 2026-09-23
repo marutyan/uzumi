@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- キーボードのライト配色。ダーク配色は values-night/colors.xml に同じ名前で置く。 -->
+<resources>
+    <color name="kb_background">#FFE4E7EB</color>
+    <color name="kb_key">#FFFFFFFF</color>
+    <color name="kb_key_pressed">#FFD3D9E1</color>
+    <color name="kb_function">#FFCDD3DA</color>
+    <color name="kb_function_pressed">#FFB5BDC7</color>
+    <!-- Shiftなど、有効な状態を示すキーの背景 -->
+    <color name="kb_key_active">#FFD6E1F3</color>
+    <color name="kb_accent">#FF345995</color>
+    <color name="kb_accent_pressed">#FF2A4A7C</color>
+    <color name="kb_on_accent">#FFFFFFFF</color>
+    <color name="kb_text">#FF1B1F24</color>
+    <color name="kb_text_secondary">#FF59626E</color>
+    <!-- 押したキーの拡大表示 -->
+    <color name="kb_popup">#FF345995</color>
+    <color name="kb_on_popup">#FFFFFFFF</color>
+</resources>

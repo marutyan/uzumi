@@ -52,7 +52,7 @@ class KeyboardPanel(
 
     init {
         orientation = VERTICAL
-        setBackgroundColor(0xFFD7DADC.toInt())
+        setBackgroundColor(KeyboardColors.from(context).keyboardBackground)
         val pad = (3f * density).toInt()
         setPadding(pad, pad, pad, pad)
 

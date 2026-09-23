@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- キーボードのダーク配色。端末のダークモード設定が有効なときにAndroidが選ぶ。 -->
+<resources>
+    <color name="kb_background">#FF17191D</color>
+    <color name="kb_key">#FF34373D</color>
+    <color name="kb_key_pressed">#FF4A4F58</color>
+    <color name="kb_function">#FF262A30</color>
+    <color name="kb_function_pressed">#FF3B4048</color>
+    <color name="kb_key_active">#FF2D3C57</color>
+    <color name="kb_accent">#FF9DB8EA</color>
+    <color name="kb_accent_pressed">#FFB7CBEF</color>
+    <color name="kb_on_accent">#FF10203A</color>
+    <color name="kb_text">#FFE8EAED</color>
+    <color name="kb_text_secondary">#FFA6AEB8</color>
+    <color name="kb_popup">#FF9DB8EA</color>
+    <color name="kb_on_popup">#FF10203A</color>
+</resources>

@@ -6,6 +6,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 /**
  * キーボード配列データ [KeyboardLayoutData] の単体テスト。
@@ -209,5 +210,44 @@ class KeyboardLayoutDataTest {
         val names = KeyboardMode.entries.map(KeySpeech::modeName)
         assertEquals(KeyboardMode.entries.size, names.toSet().size)
         assertEquals("記号入力へ切り替え", KeySpeech.modeSwitchDescription(KeyboardMode.SYMBOL))
+    }
+
+    @Test
+    fun lightAndDarkPalettesDefineSameColorsWithReadableText() {
+        val light = readKeyboardColors("src/main/res/values/colors.xml")
+        val dark = readKeyboardColors("src/main/res/values-night/colors.xml")
+        // ダーク側に欠けた色があると、その色だけライトの値で描かれてしまう
+        assertEquals(light.keys, dark.keys)
+        listOf(light, dark).forEach { palette ->
+            listOf(
+                "kb_text" to "kb_key",
+                "kb_text" to "kb_function",
+                "kb_text" to "kb_key_pressed",
+                "kb_text" to "kb_key_active",
+                "kb_text_secondary" to "kb_key",
+                "kb_on_accent" to "kb_accent",
+                "kb_on_popup" to "kb_popup",
+            ).forEach { (fg, bg) ->
+                val ratio = contrastRatio(palette.getValue(fg), palette.getValue(bg))
+                assertTrue("$fg / $bg のコントラスト比が不足: $ratio", ratio >= 4.5)
+            }
+        }
+    }
+
+    /** 色resourceのXMLから、キーボード用の色名とRGB値を読む。テスト専用の簡易な読み取り。 */
+    private fun readKeyboardColors(path: String): Map<String, Int> {
+        val pattern = Regex("""<color name="(kb_[a-z_]+)">#FF([0-9A-Fa-f]{6})</color>""")
+        return pattern.findAll(File(path).readText()).associate { it.groupValues[1] to it.groupValues[2].toInt(16) }
+    }
+
+    /** WCAG 2の式で二色のコントラスト比を求める。 */
+    private fun contrastRatio(a: Int, b: Int): Double {
+        fun luminance(rgb: Int): Double {
+            val channels = listOf(rgb shr 16 and 0xFF, rgb shr 8 and 0xFF, rgb and 0xFF).map { it / 255.0 }
+                .map { if (it <= 0.03928) it / 12.92 else Math.pow((it + 0.055) / 1.055, 2.4) }
+            return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+        }
+        val (high, low) = listOf(luminance(a), luminance(b)).sortedDescending()
+        return (high + 0.05) / (low + 0.05)
     }
 }

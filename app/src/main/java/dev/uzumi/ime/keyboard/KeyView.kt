@@ -77,7 +77,10 @@ class KeyView(context: Context) : View(context) {
 
     private val density = context.resources.displayMetrics.density
     private val thresholdPx = 20f * density
-    private val cornerRadius = 6f * density
+    private val cornerRadius = KeyboardDimens.KEY_CORNER_DP * density
+
+    // 端末のライト／ダーク設定に合う配色。入力Viewは構成変更のたびに作り直されるため、生成時に一度読む。
+    private val colors = KeyboardColors.from(context)
 
     private var spec: KeySpec? = null
     private var onAction: ((KeyboardAction) -> Unit)? = null
@@ -527,7 +530,7 @@ class KeyView(context: Context) : View(context) {
 
         val w = width.toFloat()
         val h = height.toFloat()
-        val pad = 2f * density
+        val pad = KeyboardDimens.KEY_INSET_DP * density
         rectF.set(pad, pad, w - pad, h - pad)
 
         val currentSpec = spec ?: return
@@ -545,12 +548,12 @@ class KeyView(context: Context) : View(context) {
 
         // 背景色の決定
         val bgColor = when {
-            isAccent -> if (isKeyPressed) 0xFF1565C0.toInt() else 0xFF1976D2.toInt()
+            isAccent -> if (isKeyPressed) colors.accentPressed else colors.accent
             currentSpec is KeySpec.Shift && (isShifted || isCapsLock) -> {
-                if (isKeyPressed) 0xFF90CAF9.toInt() else 0xFFBBDEFB.toInt()
+                if (isKeyPressed) colors.functionPressed else colors.keyActive
             }
-            isFunctionKey -> if (isKeyPressed) 0xFFB0BEC5.toInt() else 0xFFCFD8DC.toInt()
-            else -> if (isKeyPressed) 0xFFB0BEC5.toInt() else 0xFFFFFFFF.toInt()
+            isFunctionKey -> if (isKeyPressed) colors.functionPressed else colors.functionBackground
+            else -> if (isKeyPressed) colors.keyPressed else colors.keyBackground
         }
 
         backgroundPaint.color = bgColor
@@ -558,9 +561,8 @@ class KeyView(context: Context) : View(context) {
 
         // テキスト色とサイズの決定
         val textColor = when {
-            isAccent -> 0xFFFFFFFF.toInt()
-            isFunctionKey -> 0xFF37474F.toInt()
-            else -> 0xFF212121.toInt()
+            isAccent -> colors.onAccent
+            else -> colors.text
         }
 
         val centerX = rectF.centerX()
@@ -575,7 +577,7 @@ class KeyView(context: Context) : View(context) {
                 val alt = currentSpec.longPressText
                 if (isLongPressed && alt != null) {
                     // 長押し成立中は、離したときに入力される文字を強調して示す
-                    drawCenteredText(canvas, alt, centerX, centerY, 0xFF1976D2.toInt(), 24f, Typeface.DEFAULT_BOLD)
+                    drawCenteredText(canvas, alt, centerX, centerY, colors.accent, 24f, Typeface.DEFAULT_BOLD)
                 } else {
                     drawCenteredText(canvas, shiftedText(currentSpec), centerX, centerY, textColor, 20f, Typeface.DEFAULT)
                     alt?.let { drawCornerHint(canvas, it, rectF) }
@@ -590,7 +592,7 @@ class KeyView(context: Context) : View(context) {
             is KeySpec.ModeSwitch -> {
                 val longLabel = currentSpec.longPressLabel
                 if (isLongPressed && longLabel != null) {
-                    drawCenteredText(canvas, longLabel, centerX, centerY, 0xFF1976D2.toInt(), 14f, Typeface.DEFAULT_BOLD)
+                    drawCenteredText(canvas, longLabel, centerX, centerY, colors.accent, 14f, Typeface.DEFAULT_BOLD)
                 } else {
                     drawCenteredText(canvas, currentSpec.label, centerX, centerY, textColor, 14f, Typeface.DEFAULT)
                     longLabel?.let { drawCornerHint(canvas, it, rectF) }
@@ -632,7 +634,7 @@ class KeyView(context: Context) : View(context) {
     /** 長押しで入力できる文字をキー右上へ小さく描画し、長押しの存在を見て分かるようにする。 */
     private fun drawCornerHint(canvas: Canvas, text: String, rect: RectF) {
         guideTextPaint.textSize = 10f * density
-        guideTextPaint.color = 0xFF757575.toInt()
+        guideTextPaint.color = colors.textSecondary
         canvas.drawText(text, rect.right - 8f * density, rect.top + 12f * density, guideTextPaint)
     }
 
@@ -650,7 +652,7 @@ class KeyView(context: Context) : View(context) {
         val selectedChar = map[currentDirection] ?: map[FlickDirection.CENTER] ?: ""
 
         // メイン文字の描画（フリック中は選択中文字を表示）
-        mainTextPaint.color = if (currentDirection != FlickDirection.CENTER) 0xFF1976D2.toInt() else 0xFF212121.toInt()
+        mainTextPaint.color = if (currentDirection != FlickDirection.CENTER) colors.accent else colors.text
         mainTextPaint.textSize = if (currentDirection != FlickDirection.CENTER) 24f * density else 20f * density
         mainTextPaint.typeface = if (currentDirection != FlickDirection.CENTER) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         val textY = centerY - (mainTextPaint.descent() + mainTextPaint.ascent()) / 2f
@@ -661,28 +663,28 @@ class KeyView(context: Context) : View(context) {
 
         val leftChar = map[FlickDirection.LEFT]
         if (!leftChar.isNullOrEmpty()) {
-            guideTextPaint.color = if (currentDirection == FlickDirection.LEFT) 0xFF1976D2.toInt() else 0xFF9E9E9E.toInt()
+            guideTextPaint.color = if (currentDirection == FlickDirection.LEFT) colors.accent else colors.textSecondary
             val gy = centerY - (guideTextPaint.descent() + guideTextPaint.ascent()) / 2f
             canvas.drawText(leftChar, rect.left + 10f * density, gy, guideTextPaint)
         }
 
         val upChar = map[FlickDirection.UP]
         if (!upChar.isNullOrEmpty()) {
-            guideTextPaint.color = if (currentDirection == FlickDirection.UP) 0xFF1976D2.toInt() else 0xFF9E9E9E.toInt()
+            guideTextPaint.color = if (currentDirection == FlickDirection.UP) colors.accent else colors.textSecondary
             val gy = rect.top + 13f * density
             canvas.drawText(upChar, centerX, gy, guideTextPaint)
         }
 
         val rightChar = map[FlickDirection.RIGHT]
         if (!rightChar.isNullOrEmpty()) {
-            guideTextPaint.color = if (currentDirection == FlickDirection.RIGHT) 0xFF1976D2.toInt() else 0xFF9E9E9E.toInt()
+            guideTextPaint.color = if (currentDirection == FlickDirection.RIGHT) colors.accent else colors.textSecondary
             val gy = centerY - (guideTextPaint.descent() + guideTextPaint.ascent()) / 2f
             canvas.drawText(rightChar, rect.right - 10f * density, gy, guideTextPaint)
         }
 
         val downChar = map[FlickDirection.DOWN]
         if (!downChar.isNullOrEmpty()) {
-            guideTextPaint.color = if (currentDirection == FlickDirection.DOWN) 0xFF1976D2.toInt() else 0xFF9E9E9E.toInt()
+            guideTextPaint.color = if (currentDirection == FlickDirection.DOWN) colors.accent else colors.textSecondary
             val gy = rect.bottom - 5f * density
             canvas.drawText(downChar, centerX, gy, guideTextPaint)
         }
