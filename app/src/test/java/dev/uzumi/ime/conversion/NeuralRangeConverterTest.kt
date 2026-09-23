@@ -180,6 +180,21 @@ class NeuralRangeConverterTest {
         assertEquals(listOf("京は", "天気"), result!!.segments.map { it.surface })
     }
 
+    /** 学習禁止欄・機密欄では、部分範囲より前の表示も同じ部分範囲の先の表記も、左文脈としてモデルへ渡さない。 */
+    @Test
+    fun leftContextIsWithheldWhenDisabled() {
+        val calls = mutableListOf<Pair<String, String>>()
+        val model = NeuralKanaKanjiModel { reading, context ->
+            calls += reading to context
+            output(mapOf("ねんです" to "年です")[reading])
+        }
+        val converter = NeuralRangeConverter(model, ::lexiconSegments, useLeftContext = false)
+
+        converter.convert("2026ねんです", leftContext = "保護範囲")
+
+        assertEquals(listOf("ねんです" to ""), calls)
+    }
+
     /** 30文字を超えるかなの連なりは、30文字以内で最も後ろの辞書の文節境界で区切り、前の表記を後ろの左文脈にする。 */
     @Test
     fun longKanaRunIsSplitAtLastDictionaryBoundaryWithinLimit() {

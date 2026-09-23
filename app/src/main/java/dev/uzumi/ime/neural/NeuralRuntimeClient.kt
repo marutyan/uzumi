@@ -10,6 +10,7 @@ import dev.uzumi.ime.conversion.NeuralModelOutput
 import dev.uzumi.ime.conversion.NeuralModelSpec
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * IMEのプロセスで、別プロセスの推論serviceとの受け渡しを行う。変換workerのthreadから[modelFor]のモデルを呼ぶと、
@@ -29,7 +30,6 @@ class NeuralRuntimeClient(
     // 以下はlockの中だけで読み書きする。
     private var port: NeuralRuntimePort? = null
     private var ready = false
-    private var nextRequestId = 1L
     private var inFlight: InFlight? = null
 
     // プロンプトごとの結果。変換workerのthreadだけから使う。greedyのため同じプロンプトは同じ結果になる。
@@ -49,6 +49,9 @@ class NeuralRuntimeClient(
         @Volatile var inferenceMicros: Long = 0
 
         @Volatile var cancelled: Boolean = false
+
+        // 結果を受け取った時刻（nanoTime）。期限を過ぎて届いた結果を使わないために見る。
+        @Volatile var arrivedAtNanos: Long = Long.MAX_VALUE
     }
 
     /** モデルを読み込み、結果を受けられる状態か。 */
@@ -70,6 +73,7 @@ class NeuralRuntimeClient(
             ready = false
             inFlight?.let {
                 it.termination = NeuralTermination.NOT_LOADED
+                it.arrivedAtNanos = nanoTime()
                 it.done.countDown()
             }
         }
@@ -85,6 +89,7 @@ class NeuralRuntimeClient(
             current.termination = termination
             current.text = text
             current.inferenceMicros = inferenceMicros
+            current.arrivedAtNanos = nanoTime()
             current.done.countDown()
         }
     }
@@ -108,7 +113,11 @@ class NeuralRuntimeClient(
         call(spec.format.build(reading, leftContext), deadlineNanos, owner, isSuperseded, record)
     }
 
-    /** プロンプト一つを推論する。cacheにあればそれを返し、無ければ送って期限まで待つ。 */
+    /**
+     * プロンプト一つを推論する。期限を過ぎていれば、cacheにあっても使わず時間超過を返す。期限内ならcacheを使い、
+     * 無ければ送って期限まで待つ。期限の後に届いた結果は、届いていても使わない（評価条件の「300 msを超えたらMozcの結果」）。
+     * cache hitも同じ期限に従うのは、期限が入力の受理からの時間で、適用までの時間（cache hitを含む）の目標と同じ起点だからである。
+     */
     private fun call(
         prompt: String,
         deadlineNanos: Long,
@@ -116,6 +125,10 @@ class NeuralRuntimeClient(
         isSuperseded: () -> Boolean,
         record: (NeuralCallRecord) -> Unit,
     ): NeuralModelOutput {
+        if (deadlineNanos - nanoTime() <= 0) {
+            record(NeuralCallRecord(sent = false, cacheHit = false, millis = 0.0, outcome = NeuralCallOutcome.TIMEOUT))
+            return NeuralModelOutput.Failed(NeuralFailure.TIMEOUT)
+        }
         cache[prompt]?.let {
             record(NeuralCallRecord(sent = false, cacheHit = true, millis = 0.0, outcome = NeuralCallOutcome.COMPLETED))
             return it
@@ -130,19 +143,17 @@ class NeuralRuntimeClient(
                 record(NeuralCallRecord(sent = false, cacheHit = false, millis = 0.0, outcome = NeuralCallOutcome.UNAVAILABLE))
                 return NeuralModelOutput.Failed(NeuralFailure.UNAVAILABLE)
             }
-            val now = nanoTime()
-            if (deadlineNanos - now <= 0) {
-                record(NeuralCallRecord(sent = false, cacheHit = false, millis = 0.0, outcome = NeuralCallOutcome.TIMEOUT))
-                return NeuralModelOutput.Failed(NeuralFailure.TIMEOUT)
-            }
-            val created = InFlight(nextRequestId++, owner, now)
+            val created = InFlight(REQUEST_IDS.incrementAndGet(), owner, nanoTime())
             inFlight = created
             current to created
         }
         val sent = runCatching {
             target.convert(pending.requestId, prompt.toByteArray(Charsets.UTF_8), spec.format.parseSpecial, NeuralInferenceSettings.MAX_TOKENS)
         }.isSuccess
-        val finished = sent && pending.done.await((deadlineNanos - nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)
+        // 期限までに届き、かつ届いた時刻が期限以内の結果だけを使う。await(0)は期限後に届いた結果でも成功するため時刻も見る。
+        val finished = sent &&
+            pending.done.await((deadlineNanos - nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS) &&
+            (pending.cancelled || pending.arrivedAtNanos - deadlineNanos <= 0)
         synchronized(lock) { if (inFlight === pending) inFlight = null }
         val waitedMillis = (nanoTime() - pending.sentAtNanos) / 1_000_000.0
         return when {
@@ -172,5 +183,9 @@ class NeuralRuntimeClient(
     private companion object {
         /** cacheに残すプロンプトの数の既定値。1文の入力で作られる要求（数十件）が収まる大きさにする。 */
         const val DEFAULT_CACHE_CAPACITY = 256
+
+        // 要求番号。接続やモデルごとではなくIMEのプロセスの中で単調に増やし、別プロセス（native）が覚えている
+        // 中断済みの番号と、モデルを切り替えた後の新しい要求の番号が重ならないようにする。
+        private val REQUEST_IDS = AtomicLong(0)
     }
 }

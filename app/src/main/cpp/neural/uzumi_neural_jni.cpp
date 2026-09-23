@@ -108,6 +108,10 @@ void free_model_locked() {
     }
     g_vocab = nullptr;
     g_n_ctx = 0;
+    // 前のモデルの要求番号を消し、モデルを切り替えた後の要求が中断済みと判定されないようにする。
+    // IME側も要求番号をプロセスの中で単調に増やすが、IMEのプロセスが作り直された場合に備えてここでも消す。
+    g_latest.store(0, std::memory_order_relaxed);
+    g_cancelled_through.store(0, std::memory_order_relaxed);
 }
 
 // greedyで生成し、終わり方と出力を返す。g_mutexの中で呼ぶ。

@@ -327,7 +327,13 @@ class ConversionWorker(
                 isSuperseded = { latestLiveRequest.get() != null },
                 record = { collector?.onCall(it) },
             )
-            NeuralRangeConverter(model, mozcRange, collector ?: NeuralConversionObserver.NONE)
+            // 学習禁止欄と機密欄では、保護範囲や先に変換した表記を左文脈としてモデルへ渡さない。
+            NeuralRangeConverter(
+                model,
+                mozcRange,
+                collector ?: NeuralConversionObserver.NONE,
+                useLeftContext = request.learningAllowed,
+            )
         }
         val converter = SegmentedLiveConverter(
             convertRange = { chunk, leftContext ->

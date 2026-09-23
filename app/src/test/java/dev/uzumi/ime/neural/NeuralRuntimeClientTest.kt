@@ -78,7 +78,7 @@ class NeuralRuntimeClientTest {
 
         assertEquals(NeuralModelOutput.Failed(NeuralFailure.TIMEOUT), result)
         assertTrue("waited $waited ms", waited in 40..250)
-        assertEquals(listOf(1L), service.cancels)
+        assertEquals(1, service.cancels.size)
         assertEquals(NeuralCallOutcome.TIMEOUT, records.single().outcome)
         // 遅れた結果が届いた後の次の要求は、番号が合う自分の結果だけを受け取る。
         service.delayMillis = 0
@@ -104,7 +104,7 @@ class NeuralRuntimeClientTest {
         canceller.shutdown()
 
         assertEquals(NeuralModelOutput.Cancelled, result)
-        assertEquals(listOf(1L), service.cancels)
+        assertEquals(1, service.cancels.size)
         assertEquals(NeuralCallOutcome.CANCELLED, records.single().outcome)
     }
 
@@ -132,6 +132,80 @@ class NeuralRuntimeClientTest {
         detacher.shutdown()
 
         assertEquals(NeuralModelOutput.Failed(NeuralFailure.UNAVAILABLE), result)
+    }
+
+    /**
+     * 期限の後に届いた結果は、待ち終えた時点で届いていても使わない（時間超過としてMozcへ戻す）。
+     * 時計を差し替え、serviceが答える間に期限（300 ms）を過ぎた場合を作る。
+     */
+    @Test
+    fun resultArrivingAfterDeadlineIsNotUsed() {
+        var now = 0L
+        val late = NeuralRuntimeClient(NeuralModelSpec.JINEN_XSMALL, nanoTime = { now })
+        val port = object : NeuralRuntimePort {
+            val cancels = mutableListOf<Long>()
+            override fun convert(requestId: Long, prompt: ByteArray, parseSpecial: Boolean, maxTokens: Int) {
+                now += TimeUnit.MILLISECONDS.toNanos(400)
+                late.onResult(requestId, NeuralTermination.EOG, "遅い".toByteArray(), 1_000)
+            }
+
+            override fun cancel(requestId: Long) {
+                cancels += requestId
+            }
+        }
+        late.attach(port)
+        late.onLoaded(true)
+        val deadline = TimeUnit.MILLISECONDS.toNanos(300)
+
+        val result = late.modelFor(deadline, 1, { false }) { records += it }.convert("おそい", "")
+
+        assertEquals(NeuralModelOutput.Failed(NeuralFailure.TIMEOUT), result)
+        assertEquals(1, port.cancels.size)
+        assertEquals(NeuralCallOutcome.TIMEOUT, records.single().outcome)
+        // 遅れた結果はcacheにも入らない：期限内の次の要求はもう一度送る
+        now = 0
+        late.modelFor(deadline, 2, { false }) { records += it }.convert("おそい", "")
+        assertEquals(false, records.last().cacheHit)
+    }
+
+    /** cacheにある結果も、期限を過ぎた要求には使わない。 */
+    @Test
+    fun cacheHitAfterDeadlineIsTimeout() {
+        connect()
+        service.reply = { _ -> NeuralTermination.EOG to "今日" }
+        assertEquals(NeuralModelOutput.Completed("今日"), model(1_000).convert("きょう", ""))
+
+        val expired = client.modelFor(System.nanoTime() - 1, 2, { false }) { records += it }.convert("きょう", "")
+
+        assertEquals(NeuralModelOutput.Failed(NeuralFailure.TIMEOUT), expired)
+        assertEquals(NeuralCallOutcome.TIMEOUT, records.last().outcome)
+        assertEquals(1, service.prompts.size)
+    }
+
+    /** 要求番号は接続やモデルをまたいでIMEのプロセスの中で単調に増える（モデルを切り替えても前の番号と重ならない）。 */
+    @Test
+    fun requestIdsIncreaseAcrossClients() {
+        val ids = mutableListOf<Long>()
+        fun clientRecording(spec: NeuralModelSpec): NeuralRuntimeClient {
+            val c = NeuralRuntimeClient(spec)
+            c.attach(object : NeuralRuntimePort {
+                override fun convert(requestId: Long, prompt: ByteArray, parseSpecial: Boolean, maxTokens: Int) {
+                    ids += requestId
+                    c.onResult(requestId, NeuralTermination.EOG, "x".toByteArray(), 1)
+                }
+
+                override fun cancel(requestId: Long) = Unit
+            })
+            c.onLoaded(true)
+            return c
+        }
+        val first = clientRecording(NeuralModelSpec.JINEN_XSMALL)
+        first.modelFor(System.nanoTime() + 1_000_000_000, 1, { false }) {}.convert("あ", "")
+        val second = clientRecording(NeuralModelSpec.ZENZ_XSMALL)
+        second.modelFor(System.nanoTime() + 1_000_000_000, 1, { false }) {}.convert("あ", "")
+
+        assertEquals(2, ids.size)
+        assertTrue(ids[1] > ids[0])
     }
 
     /**

@@ -100,6 +100,8 @@ class NeuralRangeConverter(
     private val observer: NeuralConversionObserver = NeuralConversionObserver.NONE,
     // 検査4を行うか。falseは、評価用計数が検査と独立に違反を数えることをJVMテストで確かめるためだけに使う。
     private val checkDigitsWithDictionary: Boolean = true,
+    // 左文脈をモデルへ渡すか。学習禁止欄と機密欄ではfalseにし、保護範囲や先に変換した表記をモデルへ渡さない。
+    private val useLeftContext: Boolean = true,
 ) {
     /**
      * 部分範囲の読みを、読みの連結が部分範囲と一致するsegment列へ変換する。モデルと辞書が使えなくても読みのまま返す。
@@ -111,7 +113,8 @@ class NeuralRangeConverter(
         for (run in scriptRuns(chunk)) {
             segments += if (run.isKana) {
                 // 部分範囲より前の表示と、同じ部分範囲で先に出した表記（数字などを含む）を左文脈にする。
-                convertKanaRun(run.text, leftContext + segments.joinToString(separator = "") { it.surface })
+                val context = if (useLeftContext) leftContext + segments.joinToString(separator = "") { it.surface } else ""
+                convertKanaRun(run.text, context)
             } else {
                 listOf(ResultSegment(run.text, run.text))
             }
@@ -142,7 +145,8 @@ class NeuralRangeConverter(
         val tail = clusters.subList(cut, clusters.size).joinToString(separator = "")
         observer.onKanaRun(head, split = true)
         val headSegments = convertKana(head, leftContext, lookupDictionary(head))
-        return headSegments + convertKanaRun(tail, leftContext + headSegments.joinToString(separator = "") { it.surface })
+        val tailContext = if (useLeftContext) leftContext + headSegments.joinToString(separator = "") { it.surface } else ""
+        return headSegments + convertKanaRun(tail, tailContext)
     }
 
     /** 辞書で変換し、読みの連結が入力と一致する結果だけを返す。 */

@@ -676,6 +676,26 @@ class ConversionWorkerTest {
         assertTrue(fixture.reports.isEmpty())
     }
 
+    /** 学習禁止欄では、保護範囲の表記を含む左文脈をモデルへ渡さない。通常の欄では渡す。 */
+    @Test
+    fun learningForbiddenFieldWithholdsLeftContext() {
+        for (learningAllowed in listOf(true, false)) {
+            val fixture = Fixture()
+            fixture.startReady()
+            val backend = FakeNeuralBackend { reading, _ -> NeuralModelOutput.Completed(reading) }
+            fixture.worker.setNeuralBackend(backend)
+            val identity = RequestIdentity(
+                1, 1, "かんじです", 0, 5, listOf(ProtectedRange(0, 3, "漢字")), 5, 0,
+            )
+
+            fixture.worker.requestLiveConversion(1, LiveRequest(identity, "かんじです", learningAllowed))
+            fixture.executor.runAll()
+
+            val expected = if (learningAllowed) "漢字" else ""
+            assertEquals("learningAllowed=$learningAllowed", listOf("です" to expected), backend.calls)
+        }
+    }
+
     /** 新しいライブ変換の要求は、前の要求の推論を止める（通し番号が増える）。 */
     @Test
     fun newLiveRequestCancelsPreviousInference() {

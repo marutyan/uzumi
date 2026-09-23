@@ -6,7 +6,7 @@
 
 - llama.cpp（azooKey fork `66afb885`）とJNIの橋渡しを、Gradleの外でビルドする（`tools/neural/build_android.sh`）。生成物の場所をGradle property `uzumi.neuralArtifactsDir`で受け取り、jniLibsとして取り込む。指定しなければ、ニューラル変換なしでビルドとJVMテストが通り、IMEはMozcだけで動く。
 - 推論は別プロセス`:neural`のbound service（`NeuralRuntimeService`、exportしない）で行う。IMEとの受け渡しはoneway AIDLで、要求番号を付けて送る。新しい入力が来たら、古い要求の推論をllama.cppの中断callbackで止める。入力の受理から300 msを超えたら、モデルを待たずにMozcの結果を使う。
-- `NeuralRangeConverter`を`SegmentedLiveConverter`の部分範囲の変換へつないだ。保護範囲の表記と前の部分範囲の表記は、左文脈としてモデルへ渡る。30文字を超えるかなの連なりは、30文字以内で最も後ろにあるMozcの文節境界で区切る。
+- `NeuralRangeConverter`を`SegmentedLiveConverter`の部分範囲の変換へつないだ。保護範囲の表記と前の部分範囲の表記は、左文脈としてモデルへ渡る。学習禁止欄と機密欄では、左文脈を渡さない。30文字を超えるかなの連なりは、30文字以内で最も後ろにあるMozcの文節境界で区切る。
 - 評価の条件の切り替え（Mozcだけ／ZS／ZX／JS／JX）は、debugビルドだけで有効な選択としてadbから行う。製品の設定画面には出さない。INTERNET権限は足していない。
 - 評価条件が求める計数（H3の3つの件数と最終文の数字の並び、正→誤の遷移、分割とfallbackの回数、推論時間、適用までの時間、PSS）を足した。本文は記録しない。
 
@@ -37,8 +37,9 @@
 
 1. UIスレッドがライブ変換の要求を受けると、通し番号を付けてworkerへ積む。あわせて、それより前の要求の推論を`NeuralRuntimeClient.cancelInFlight`で止める。待っている推論は中断として終わり、その要求は結果を返さない。serviceへは`cancel`を送る。
 2. service側では、binderのthreadが新しい要求番号をnativeへ知らせる（`markLatest`）。実行中の古い推論は、llama.cppの中断callbackとtokenごとの確認で止まる。
-3. workerは、要求の受理から300 msを期限として結果を待つ。期限を過ぎたら`cancel`を送り、そのかなの連なりはMozcの結果にする。後から届いた結果は要求番号が合わないため捨てる。期限を過ぎた後の同じ要求のかなの連なりは、送らずにMozcの結果にする。
-4. 一つの要求には、ニューラルとMozcを合成した一つの結果だけを返す（二段の表示はしない）。
+3. workerは、要求の受理から300 msを期限として結果を待つ。期限を過ぎたら`cancel`を送り、そのかなの連なりはMozcの結果にする。期限の後に届いた結果は、待ち終えた時点で届いていても使わず、cacheにも入れない。期限を過ぎた後は、cacheにある結果も使わない。期限は入力の受理からの時間であり、cache hitを含む「適用までの時間」の目標と同じ起点だからである（推論時間の母集団は送った要求だけで、この規則で変わらない）。
+4. 要求番号はIMEのプロセスの中で単調に増やし、nativeはモデルの読み込みと解放で中断済みの番号を消す。同じ`:neural`でモデルを切り替えても、新しいモデルの要求が中断済みと判定されない。
+5. 一つの要求には、ニューラルとMozcを合成した一つの結果だけを返す（二段の表示はしない）。
 
 ## ビルド
 
@@ -59,7 +60,7 @@ Gradleの依存は増やしていない。AIDLを使うため`buildFeatures.aidl
 
 | 生成物 | bytes | SHA-256 |
 | --- | ---: | --- |
-| `libuzumi_neural.so` | 37,264 | `ecf0625f074d1578dcae02307af70c5dd6e197efa6a4113fedcca0780634e06a` |
+| `libuzumi_neural.so` | 37,312 | `9dcdd0843368638a29f399b04782bfd9ea426bca442ee83323d22fdd54b4f59c` |
 | `libllama.so` | 2,653,040 | `a4ce36f05e1ca85aeb56524fd2e04c078be4230d833593a69a76d12f3d2bd13a` |
 | `libggml-base.so` | 1,056,136 | `f3fed93ec40e4e27a91f2cca35300ee0a9841008fb205eea94ad4e2d6e9f622c` |
 | `libggml-cpu.so` | 898,096 | `8bbd8d27a77a9e34eb8eda9bad7b7fe70d29be2fd51fb1ca1ce61d19e2b6600d` |
@@ -67,7 +68,7 @@ Gradleの依存は増やしていない。AIDLを使うため`buildFeatures.aidl
 
 `libuzumi_neural.so`の依存は、llama.cppとggmlの4本、`libm`、`libdl`、`libc`だけである。全LOAD segmentのalignmentは`0x4000`（16 KB page対応）。
 
-debug APK（arm64-v8a、Mozcの辞書を含む）は、生成物なしで34,807,173 bytes、生成物ありで40,143,535 bytes（+5,336,362）だった。`.so`は圧縮せずに入る。
+debug APK（arm64-v8a、Mozcの辞書を含む）は、生成物なしで34,807,173 bytes、生成物ありで40,143,583 bytes（+5,336,410）だった（レビュー後の修正を入れた版）。`.so`は圧縮せずに入る。
 
 同じ橋渡しのソースをMac向けにビルドし、JVMから同じnative関数を呼んで確かめた（一時の検査で、リポジトリには入れていない）。jinen v2 xsmallの「きょうはいいてんきですね」→「今日はいい天気ですね」、「かんじ」→「感じ」、zenz v3.2 xsmallの「ゆう」→「You」（区切り記号で停止）、「あしたのかいぎはじゅうじからです」→「明日の会議は10時からです」が、段階0の出力と一致した。あわせて次を確かめた。
 
