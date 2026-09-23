@@ -88,6 +88,8 @@ class UzumiInputMethodService : InputMethodService() {
         conversionExecutor = executor
         conversionWorker = worker
         worker.start()
+        // 学習の保存ファイルを変換threadで先に読み、入力開始時にUI threadでファイルを読まないようにする
+        executor.execute { LearningStores.get(this) }
     }
 
     /** 保留中のUI更新を捨て、エンジン側sessionを破棄してからworkerを止める。 */
@@ -180,9 +182,9 @@ class UzumiInputMethodService : InputMethodService() {
         refreshCandidates()
         val info = attribute ?: return
         val connection = currentInputConnection ?: return
-        // 設定で学習を止めている場合は、欄の種類によらず学習と履歴の保存を止める
+        // 設定で学習を止めている場合は、欄の種類によらずMozcの学習も止める（学習の設定はLearningStoreだけが持つ）
         val policy = InputFieldPolicy.fromEditorInfo(info)
-            .copy(learningDisabledBySetting = !UzumiSettings.isLearningEnabled(this))
+            .copy(learningDisabledBySetting = !LearningStores.get(this).isEnabled)
         currentPolicy = policy
         // ライブ変換の設定は入力開始ごとに読み、設定画面での変更を次の入力欄から反映する。
         val live = policy.usesLiveConversion(UzumiSettings.isLiveConversionEnabled(this))

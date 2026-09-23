@@ -18,13 +18,12 @@ object UzumiSettings {
     /** ライブ変換の既定値。確定操作を省ける入力から始められるようONにする。 */
     const val DEFAULT_LIVE_CONVERSION = true
 
-    // キーボードの高さ（KeyboardPreferences.Heightの名前）、拡大表示、振動、キー音、削除ドラッグ、学習を保存するキー。
+    // キーボードの高さ（KeyboardPreferences.Heightの名前）、拡大表示、振動、キー音、削除ドラッグを保存するキー。
     private const val KEY_HEIGHT = "keyboard_height"
     private const val KEY_PREVIEW = "key_preview"
     private const val KEY_VIBRATION = "vibration"
     private const val KEY_SOUND = "key_sound"
     private const val KEY_DELETE_DRAG = "delete_drag"
-    private const val KEY_LEARNING = "learning_enabled"
 
     /** キーボードの見た目と反応の設定を読む。未設定の項目は既定値にする。 */
     fun keyboardPreferences(context: Context): KeyboardPreferences {
@@ -61,12 +60,6 @@ object UzumiSettings {
 
     /** 削除キーの左ドラッグを保存する。 */
     fun setDeleteDrag(context: Context, enabled: Boolean) = putBoolean(context, KEY_DELETE_DRAG, enabled)
-
-    /** 変換の学習がONか。OFFなら全ての欄で学習と履歴の保存を止める。 */
-    fun isLearningEnabled(context: Context): Boolean = preferences(context).getBoolean(KEY_LEARNING, true)
-
-    /** 変換の学習のON/OFFを保存する。 */
-    fun setLearningEnabled(context: Context, enabled: Boolean) = putBoolean(context, KEY_LEARNING, enabled)
 
     /** 真偽値の設定を一つ保存する。 */
     private fun putBoolean(context: Context, key: String, value: Boolean) {

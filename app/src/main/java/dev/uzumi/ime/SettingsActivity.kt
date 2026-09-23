@@ -1,6 +1,7 @@
 package dev.uzumi.ime
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
@@ -11,7 +12,9 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
+import android.widget.Toast
 import dev.uzumi.ime.keyboard.KeyboardPreferences
+import dev.uzumi.ime.learning.LearningStores
 
 /**
  * Uzumiの設定画面。入力・表示・操作の反応・学習と辞書に分けて並べ、値はUzumiSettingsだけに保存する。
@@ -49,8 +52,8 @@ class SettingsActivity : Activity() {
             UzumiSettings.keyboardPreferences(this).keySound) { UzumiSettings.setKeySound(this, it) })
 
         content.addView(section(R.string.settings_section_learning))
-        content.addView(switchRow(R.string.settings_learning, R.string.settings_learning_description,
-            UzumiSettings.isLearningEnabled(this)) { UzumiSettings.setLearningEnabled(this, it) })
+        content.addView(learningRow())
+        content.addView(linkRow(R.string.settings_clear_learning) { confirmClearLearning() })
         content.addView(linkRow(R.string.open_user_dictionary) {
             startActivity(Intent(this, UserDictionaryActivity::class.java))
         })
@@ -105,6 +108,53 @@ class SettingsActivity : Activity() {
             // 行のどこを押しても切り替わるようにし、小さなスイッチだけを狙わなくてよくする
             setOnClickListener { switch.toggle() }
         }
+    }
+
+    /**
+     * 変換の学習のON/OFF。学習の保存ファイルはUI thread外で読み、読み終わるまでスイッチを押せなくする。
+     */
+    private fun learningRow(): View {
+        var ready = false
+        val row = switchRow(R.string.settings_learning, R.string.settings_learning_description, true) { enabled ->
+            if (ready) background { LearningStores.get(this).setEnabled(enabled) }
+        }
+        row.isEnabled = false
+        background {
+            val enabled = LearningStores.get(this).isEnabled
+            runOnUiThread {
+                row.findSwitch()?.isChecked = enabled
+                ready = true
+                row.isEnabled = true
+                row.findSwitch()?.isEnabled = true
+            }
+        }
+        row.findSwitch()?.isEnabled = false
+        return row
+    }
+
+    /** 学習履歴を消す前に確認する。消去はファイルを書き換えるためUI thread外で行う。 */
+    private fun confirmClearLearning() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.settings_clear_learning)
+            .setMessage(R.string.settings_clear_learning_confirm)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.settings_clear_learning_ok) { _, _ ->
+                background {
+                    LearningStores.get(this).clearAll()
+                    runOnUiThread { Toast.makeText(this, R.string.settings_clear_learning_done, Toast.LENGTH_SHORT).show() }
+                }
+            }
+            .show()
+    }
+
+    /** ファイルI/Oを伴う処理をUI thread外で一度だけ行う。 */
+    private fun background(work: () -> Unit) {
+        Thread(work, "uzumi-settings").start()
+    }
+
+    /** 行の中のスイッチを探す。 */
+    private fun View.findSwitch(): Switch? = (this as? LinearLayout)?.let { row ->
+        (0 until row.childCount).map(row::getChildAt).filterIsInstance<Switch>().firstOrNull()
     }
 
     /** キーボードの高さの「低・中・高」。選ぶとすぐ保存する。 */

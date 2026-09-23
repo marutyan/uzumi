@@ -88,4 +88,8 @@
     <string name="settings_key_sound">キー音</string>
     <string name="settings_learning">変換の学習</string>
     <string name="settings_learning_description">オフにすると、確定した変換を覚えません。パスワード欄などでは常にオフです。</string>
+    <string name="settings_clear_learning">学習履歴を消す</string>
+    <string name="settings_clear_learning_confirm">Uzumiが覚えた変換をすべて消します。元に戻せません。</string>
+    <string name="settings_clear_learning_ok">消す</string>
+    <string name="settings_clear_learning_done">学習履歴を消しました</string>
 </resources>
