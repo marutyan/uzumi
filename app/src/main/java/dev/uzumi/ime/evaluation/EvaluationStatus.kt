@@ -50,6 +50,11 @@ data class ImeEvaluationStatus(
 data class NeuralRuntimeStatus(
     /** モデルを選んでいるか（debugの選択）。falseならMozcだけ。 */
     val selected: Boolean = false,
+    /**
+     * 選んでいるモデルの識別子（`NeuralModelSpec.generation`、モデルのSHA-256の先頭48 bitとプロンプト形式の版から作る数値）。
+     * Mozcだけなら0。自動測定の道具が、条件のモデルと一致することを確かめるために読む。
+     */
+    val modelGeneration: Long = 0,
     /** モデルの読み込みを終え、推論を受け付けるか。 */
     val ready: Boolean = false,
     /** モデルの読み込みの結果の番号（`NeuralRuntimeService`の定数）。未完了なら-1。 */

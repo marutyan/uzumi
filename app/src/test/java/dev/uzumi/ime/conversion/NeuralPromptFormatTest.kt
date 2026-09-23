@@ -39,5 +39,7 @@ class NeuralPromptFormatTest {
         assertNull(NeuralModelSpec.fromKey("M"))
         assertEquals(4, NeuralModelSpec.entries.map { it.generation }.toSet().size)
         assertNotEquals(0L, NeuralModelSpec.ZENZ_XSMALL.generation)
+        // 段階2の道具（tools/phase3a/run_stage2.py）が同じ計算で条件のモデルを確かめる値
+        assertEquals(734620824642353L, NeuralModelSpec.ZENZ_SMALL.generation)
     }
 }

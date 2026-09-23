@@ -595,6 +595,7 @@ class UzumiInputMethodService : InputMethodService() {
             neural = neuralConnection?.let { connection ->
                 NeuralRuntimeStatus(
                     selected = true,
+                    modelGeneration = connection.spec.generation,
                     ready = connection.client.isReady,
                     loadReason = connection.loadReason,
                     coldStartMillis = connection.coldStartMillis,

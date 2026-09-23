@@ -10,20 +10,25 @@ Phase 2cの自動測定の道具（`tools/phase2c/run_automated.py`、版2）を
 - 全条件で同じAPKを使うことを、各条件の開始時にAPKのSHA-256で確かめる。
 - 課題ごとに許容表記（`accepted_b64`）と最終文（`final_b64`）を受信口へ渡し、正→誤の遷移と数字の並びを端末内で判定させる。
 - 条件ごとに評価用計数（`EVAL_DUMP`）、時間の記録（`EVAL_DUMP_TIMINGS`）、PSS（`EVAL_MEMORY`と1秒ごとの`dumpsys meminfo`）を残す。
-- cold start（10回）と電池（10分の再生、`dumpsys batterystats`）の手順。
+- cold start（10回）と電池の手順。電池は評価条件どおり各条件3回（基準の1.2をまたげば5回）、回ごとに方格の別の行の順番で、
+  回どうしは別の日または4時間以上離して測る。
 
 **試験用の集合は一度だけ使う。** 既定の課題は開発用の30文（`docs/phase3a-dev-tasks.tsv`）で、試験用の54文
-（`docs/phase2c-tasks.tsv`）は`--test-set`と最終設定の識別名（`--fixed-config`）を付けたときだけ読む。同じ識別名で
-同じ回・条件を二度流そうとしたら止める（不具合を直した後は、新しい識別名で全条件を流し直す）。
+（`docs/phase2c-tasks.tsv`）は`--test-set`を付けたときだけ読む。記録は課題集合（ファイルの内容のSHA-256）ごとに一つで、
+設定を変えても同じ回・条件を二度流そうとしたら止める。流し直しは`--exploration <名前>`で探索として別の記録へ分ける
+（評価条件の規則どおり、探索の結果は採用の判断に使わない）。最初の実行の設定（APK、モデル、プロンプト形式の版、
+道具のcommit）を記録し、以後の実行ではそれと一致しなければ止める。
 記録には本文・候補を残さない（課題ごとの正誤と件数だけ）。外部の依存は使わない（python3の標準ライブラリだけ）。
 """
 
 import argparse
 import base64
+import hashlib
 import json
 import random
 import re
 import statistics
+import subprocess
 import sys
 import threading
 import time
@@ -209,26 +214,64 @@ class MemInfoSampler:
         self.thread.join(timeout=10)
 
 
+# ---- モデルの識別 ----
+
+NEURAL_MODELS_KT = REPO / "app" / "src" / "main" / "java" / "dev" / "uzumi" / "ime" / "conversion" / "NeuralModels.kt"
+
+
+def model_table(source: Path = NEURAL_MODELS_KT) -> Tuple[Dict[str, str], int]:
+    """アプリの`NeuralModels.kt`から、条件名→モデルのSHA-256の表とプロンプト形式の版を読む（値を二か所に置かないため）。"""
+    text = source.read_text(encoding="utf-8")
+    table = dict(re.findall(r'\("(ZS|ZX|JS|JX)",\s*"[^"]+",\s*"([0-9a-f]{64})"', text))
+    version = re.search(r"const val VERSION = (\d+)", text)
+    if len(table) != 4 or version is None:
+        raise p2c.Abort("cannot read model table from NeuralModels.kt")
+    return table, int(version.group(1))
+
+
+def expected_generation(condition: str) -> int:
+    """条件のモデルの識別子（アプリの`NeuralModelSpec.generation`と同じ計算）。Mは0。"""
+    if condition == "M":
+        return 0
+    table, version = model_table()
+    return (int(table[condition][:12], 16) << 4) | version
+
+
 # ---- 条件の準備 ----
 
 def prepare_neural_condition(condition: str, work: Path) -> Dict[str, int]:
-    """学習を消してライブ変換をONにし（Phase 2cの条件Nと同じ準備）、モデルを選んで準備ができるまで待つ。"""
-    p2c.prepare_condition("N", work)
+    """モデルを選んでから、学習を消してライブ変換をONにし（Phase 2cの条件Nと同じ準備）、試験画面を開く。
+
+    選択は入力欄の開始ごとに読まれる。先に選んでおけば、準備の最後に試験画面を開いた時点で新しい条件のモデルになる。
+    始める前に`EVAL_STATUS`で、選ばれたモデルの識別子が条件と一致し、モデルの準備ができたことを確かめる。一致しなければ止める。
+    """
     p2c.broadcast("NEURAL_SELECT", extras={"model": condition})
-    # 選択は入力欄の開始ごとに読まれるため、試験画面を開き直す。
-    p2c.shell(f"am start -n {p2c.TASK_ACTIVITY} --es task SETUP3")
+    p2c.prepare_condition("N", work)
+    expected = expected_generation(condition)
     deadline = time.monotonic() + MODEL_READY_TIMEOUT_S
     while True:
         status = parse_status(p2c.broadcast("EVAL_STATUS"))
-        if condition == "M" and status.get("neural_selected") == 0:
+        check_selected_model(condition, status, expected)
+        if condition == "M" or status.get("neural_ready") == 1:
             return status
-        if condition != "M" and status.get("neural_ready") == 1:
-            return status
-        if condition != "M" and status.get("neural_load_reason", -1) > 0:
+        if status.get("neural_load_reason", -1) > 0:
             raise p2c.Abort(f"model load failed (reason {status['neural_load_reason']})")
         if time.monotonic() > deadline:
             raise p2c.Abort(f"model {condition} was not ready in {MODEL_READY_TIMEOUT_S:.0f}s")
         time.sleep(0.5)
+
+
+def check_selected_model(condition: str, status: Dict[str, int], expected: int) -> None:
+    """状態の確認口が示す選択が、条件と一致するか確かめる。IMEの状態が読めない場合と一致しない場合は止める。"""
+    if status.get("ime") != 1:
+        raise p2c.Abort("IME status is not available")
+    selected = status.get("neural_selected")
+    generation = status.get("neural_model_generation")
+    if condition == "M":
+        if selected != 0 or generation != 0:
+            raise p2c.Abort("a model is still selected for condition M")
+    elif selected != 1 or generation != expected:
+        raise p2c.Abort(f"selected model does not match condition {condition}")
 
 
 def memory_line() -> Dict[str, int]:
@@ -238,46 +281,80 @@ def memory_line() -> Dict[str, int]:
     return parse_status(p2c.broadcast("EVAL_MEMORY"))
 
 
-# ---- 試験用の集合の一度だけの使用 ----
+# ---- 試験用の集合の一度だけの使用と、同じ設定の確認 ----
 
-def claim_test_run(fixed_config: str, round_index: int, condition: str) -> Path:
-    """試験用の集合で、同じ最終設定・回・条件を二度流さないための記録を作る。既にあれば止める。"""
-    ledger = LOCAL / "test-set-ledger"
+def task_set_id(path: Path) -> str:
+    """課題集合の識別名（ファイル名と内容のSHA-256の先頭12桁）。設定の内容に関係なく、集合ごとに一つ。"""
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    return f"{path.stem}-{digest}"
+
+
+def tool_commit() -> str:
+    """道具とアプリのソースのcommit（作業ツリーに変更があれば末尾に`+dirty`を付ける）。"""
+    head = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    dirty = subprocess.run(["git", "-C", str(REPO), "status", "--porcelain"], capture_output=True, text=True).stdout.strip()
+    return head + ("+dirty" if dirty else "")
+
+
+def ledger_directory(task_set: str, exploration: Optional[str]) -> Path:
+    """記録の置き場。試験用の集合の本番は集合ごとに一つ、探索は探索の名前ごとに別の場所へ分ける。"""
+    if exploration:
+        return LOCAL / "exploration" / exploration / task_set
+    return LOCAL / "test-set-ledger" / task_set
+
+
+def claim_run(ledger: Path, round_index: int, condition: str, config: Dict[str, str]) -> Path:
+    """回・条件の一回だけの使用を記録する。既にあれば止める（試験用の集合は設定を変えても一度しか使えない）。"""
     ledger.mkdir(parents=True, exist_ok=True)
-    marker = ledger / f"{fixed_config}-round{round_index}-{condition}.json"
+    marker = ledger / f"round{round_index}-{condition}.json"
     if marker.exists():
-        raise p2c.Abort(f"test set already used for {marker.name}; use a new --fixed-config after a fix")
-    marker.write_text(json.dumps({"started": time.strftime("%Y-%m-%dT%H:%M:%S"), "tool_version": TOOL_VERSION}))
+        raise p2c.Abort(f"{marker.name} was already run for this task set; re-runs must be recorded as exploration")
+    marker.write_text(json.dumps(dict(config, started=time.strftime("%Y-%m-%dT%H:%M:%S")), indent=1))
     return marker
+
+
+def check_manifest(path: Path, current: Dict[str, str]) -> None:
+    """最初の実行の設定（APK、モデル、プロンプト形式の版、道具のcommit）を記録し、以後の実行ではそれと一致するか確かめる。"""
+    if path.exists():
+        recorded = json.loads(path.read_text())
+        differing = sorted(k for k in current if recorded.get(k) != current[k])
+        if differing:
+            raise p2c.Abort(f"configuration differs from the first run: {','.join(differing)}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(current, indent=1))
+
+
+def current_config(apk: str) -> Dict[str, str]:
+    """固定した設定の内容。試験の途中で変わっていないことを確かめ、記録に残す。"""
+    table, version = model_table()
+    config = {"apk_sha256": apk, "prompt_format_version": str(version), "tool_commit": tool_commit(),
+              "tool_version": str(TOOL_VERSION), "phase2c_tool_version": str(p2c.TOOL_VERSION)}
+    config.update({f"model_{key}_sha256": sha for key, sha in sorted(table.items())})
+    return config
 
 
 # ---- 1条件の再生 ----
 
-def select_tasks(test_set: bool, task_ids: Optional[str]) -> List["p2c.Task"]:
-    """流す課題。試験用の集合はPhase 2cと同じ順番（seed 20261001）、開発用はファイルの順。"""
-    if test_set:
-        selected = p2c.automated_order(p2c.load_tasks(TEST_TASKS))
-    else:
-        selected = p2c.load_tasks(DEV_TASKS)
+def select_tasks(test_set: bool, task_ids: Optional[str]) -> Tuple[List["p2c.Task"], Path]:
+    """流す課題とそのファイル。試験用の集合はPhase 2cと同じ順番（seed 20261001）、開発用はファイルの順。"""
+    path = TEST_TASKS if test_set else DEV_TASKS
+    selected = p2c.automated_order(p2c.load_tasks(path)) if test_set else p2c.load_tasks(path)
     if task_ids:
         by_id = {t.task_id: t for t in selected}
         selected = [by_id[i] for i in task_ids.split(",")]
-    return selected
+    return selected, path
 
 
-def run_condition(condition: str, round_index: int, tasks: List["p2c.Task"], work: Path,
-                  layouts, expected_apk: Optional[str]) -> str:
-    """1条件を流し、結果・計数・時間・PSSをファイルへ残す。使ったAPKのSHA-256を返す。"""
-    apk = apk_sha256()
-    if expected_apk is not None and apk != expected_apk:
-        raise p2c.Abort("APK changed between conditions")
+def run_condition(condition: str, round_index: int, tasks: List["p2c.Task"], work: Path, layouts,
+                  config: Dict[str, str]) -> None:
+    """1条件を流し、結果・計数・時間・PSSをファイルへ残す。"""
     prefix = work / f"round{round_index}-{condition}"
     ready = prepare_neural_condition(condition, work)
     previous = p2c.broadcast("EVAL_DUMP")
     Path(f"{prefix}-counts-before.tsv").write_text(previous, encoding="utf-8")
     p2c.broadcast("EVAL_CLEAR")
-    meta = {"condition": condition, "round": round_index, "tool_version": TOOL_VERSION,
-            "phase2c_tool_version": p2c.TOOL_VERSION, "apk_sha256": apk, "key_interval_s": p2c.KEY_INTERVAL_S,
+    meta = {"condition": condition, "round": round_index, "config": config, "key_interval_s": p2c.KEY_INTERVAL_S,
             "ready_status": ready, "memory_before": memory_line(), "device": device_conditions(),
             "tasks": [t.task_id for t in tasks]}
     kb = p2c.Keyboard(layouts)
@@ -294,8 +371,7 @@ def run_condition(condition: str, round_index: int, tasks: List["p2c.Task"], wor
                 status = "abort"
                 break
             result.wall_ms = int((time.monotonic() - begin) * 1000)
-            row = dict(result.__dict__, round=round_index)
-            out.write(json.dumps(row, ensure_ascii=False) + "\n")
+            out.write(json.dumps(dict(result.__dict__, round=round_index), ensure_ascii=False) + "\n")
             out.flush()
     meta["memory_after"] = memory_line()
     meta["status"] = status
@@ -304,15 +380,22 @@ def run_condition(condition: str, round_index: int, tasks: List["p2c.Task"], wor
     Path(f"{prefix}-meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     if status != "ok":
         raise p2c.Abort(f"condition {condition} round {round_index} aborted")
-    return apk
 
 
-# ---- cold startと電池 ----
+def rest_and_cool(first: bool, skip_rest: bool) -> None:
+    """条件の間に5分以上空け、温度状態がNONEに戻るまで待つ。"""
+    if not first and not skip_rest:
+        log(f"rest {REST_BETWEEN_CONDITIONS_S}s")
+        time.sleep(REST_BETWEEN_CONDITIONS_S)
+    wait_thermal_none()
+
+
+# ---- cold start ----
 
 def cold_start(condition: str, work: Path) -> List[int]:
     """`:neural`が無い状態からbindし、最初の推論結果が返るまでの時間をCOLD_START_TRIALS回測る（ミリ秒）。
 
-    毎回アプリを止めて学習を消し、試験画面を開いてモデルを選ぶ。準備ができたら開発用の文ではない固定の1文字（「あ」）を
+    毎回アプリを止めて学習を消し、モデルを選んで試験画面を開く。準備ができたら開発用の文ではない固定の1文字（「あ」）を
     入れ、最初の結果が届くまで待つ。値はIMEが測ったbindから最初の結果までで、準備の確認の間隔（0.5秒）の分だけ長く出得る。
     """
     values = []
@@ -337,7 +420,61 @@ def cold_start(condition: str, work: Path) -> List[int]:
     return values
 
 
-def battery(condition: str, round_index: int, tasks: List["p2c.Task"], work: Path) -> Optional[float]:
+# ---- 電池 ----
+
+# 電池の判定の基準（候補÷Mの比）と回数。評価条件の「電池の測り方」：各条件3回、3回の比の最小と最大が基準をまたげば
+# 2回を足して5回の平均で判定し、なおまたげば不合格とする。
+BATTERY_LIMIT = 1.2
+BATTERY_BASE_ROUNDS = 3
+BATTERY_MAX_ROUNDS = 5
+# 各回を「別の日または時間帯」に分けるための、前の回の開始からの最短の間隔（秒）。日付が変わっていれば間隔を問わない。
+BATTERY_MIN_GAP_S = 4 * 3600
+
+
+def battery_judgement(ratios: List[float]) -> str:
+    """一つの候補の、回ごとのMとの比から判定する。`pass`、`fail`、`need_more`（2回を足す）、`incomplete`を返す。"""
+    if len(ratios) < BATTERY_BASE_ROUNDS:
+        return "incomplete"
+    straddles = min(ratios) <= BATTERY_LIMIT < max(ratios)
+    if straddles:
+        if len(ratios) < BATTERY_MAX_ROUNDS:
+            return "need_more"
+        return "fail"
+    return "pass" if statistics.mean(ratios) <= BATTERY_LIMIT else "fail"
+
+
+def battery_ratios(records: List[Dict]) -> Dict[str, List[float]]:
+    """回ごとの記録（条件→推定消費）から、候補ごとのMとの比の列を作る。消費が読めない回は止める。"""
+    ratios: Dict[str, List[float]] = {c: [] for c in CONDITIONS if c != "M"}
+    for record in sorted(records, key=lambda r: r["round"]):
+        drains = record["drain_mah"]
+        if any(drains.get(c) is None for c in CONDITIONS):
+            raise p2c.Abort(f"battery round {record['round']} has unreadable drain")
+        for candidate in ratios:
+            ratios[candidate].append(drains[candidate] / drains["M"])
+    return ratios
+
+
+def next_battery_round(records: List[Dict], now: float) -> int:
+    """次に測る電池の回。3回までは順に、4回目と5回目は判定が`need_more`の候補がある場合だけ許す。
+    前の回と同じ日で、開始から[BATTERY_MIN_GAP_S]秒たっていなければ止める（別の日または時間帯に分ける）。
+    """
+    done = len(records)
+    if done >= BATTERY_MAX_ROUNDS:
+        raise p2c.Abort("all battery rounds are done")
+    if done >= BATTERY_BASE_ROUNDS:
+        judgements = {c: battery_judgement(r) for c, r in battery_ratios(records).items()}
+        if "need_more" not in judgements.values():
+            raise p2c.Abort(f"no candidate needs more battery rounds: {judgements}")
+    if records:
+        last = max(records, key=lambda r: r["started_epoch"])["started_epoch"]
+        same_day = time.strftime("%Y-%m-%d", time.localtime(last)) == time.strftime("%Y-%m-%d", time.localtime(now))
+        if same_day and now - last < BATTERY_MIN_GAP_S:
+            raise p2c.Abort("battery rounds must be on another day or at least 4 hours apart")
+    return done + 1
+
+
+def battery_condition(condition: str, tasks: List["p2c.Task"], work: Path) -> Optional[float]:
     """充電を切った状態で課題の再生を10分間くり返し、端末全体の推定消費（mAh）を返す。終わったら充電の状態を戻す。"""
     layouts = load_layouts(work)
     prepare_neural_condition(condition, work)
@@ -346,20 +483,38 @@ def battery(condition: str, round_index: int, tasks: List["p2c.Task"], work: Pat
     kb = p2c.Keyboard(layouts)
     try:
         deadline = time.monotonic() + BATTERY_DURATION_S
-        repeats = 0
         while time.monotonic() < deadline:
             for task in tasks:
                 if time.monotonic() >= deadline:
                     break
                 p2c.run_task(kb, task, condition)
-            repeats += 1
         stats = p2c.shell("dumpsys batterystats", timeout=120)
     finally:
         p2c.shell("dumpsys battery reset")
-    drain = parse_computed_drain(stats)
-    (work / f"battery-round{round_index}-{condition}.json").write_text(json.dumps(
-        {"condition": condition, "round": round_index, "repeats": repeats, "computed_drain_mah": drain}))
-    return drain
+    return parse_computed_drain(stats)
+
+
+def battery_round(tasks: List["p2c.Task"], task_file: Path, work: Path, skip_rest: bool) -> Dict:
+    """電池の次の回を一つ測る。条件の順番はその回のラテン方格の行で、条件の間に5分空けて温度を戻す。"""
+    ledger = LOCAL / "battery" / task_set_id(task_file)
+    ledger.mkdir(parents=True, exist_ok=True)
+    records = [json.loads(p.read_text()) for p in sorted(ledger.glob("round*.json"))]
+    now = time.time()
+    round_index = next_battery_round(records, now)
+    order = latin_schedule()[round_index - 1]
+    drains: Dict[str, Optional[float]] = {}
+    for position, condition in enumerate(order):
+        rest_and_cool(position == 0, skip_rest)
+        drains[condition] = battery_condition(condition, tasks, work)
+    record = {"round": round_index, "order": order, "started_epoch": now, "drain_mah": drains,
+              "config": current_config(apk_sha256())}
+    (ledger / f"round{round_index}.json").write_text(json.dumps(record, indent=1))
+    records.append(record)
+    if len(records) >= BATTERY_BASE_ROUNDS:
+        judgements = {c: battery_judgement(r) for c, r in battery_ratios(records).items()}
+        (ledger / "judgement.json").write_text(json.dumps(judgements, indent=1))
+        log(f"battery judgement: {judgements}")
+    return record
 
 
 def load_layouts(work: Path):
@@ -374,11 +529,11 @@ def main() -> int:
     parser.add_argument("command", choices=["plan", "probe", "run", "coldstart", "battery"])
     parser.add_argument("--work", default=str(LOCAL / time.strftime("%Y-%m-%d")))
     parser.add_argument("--rounds", default=",".join(str(i + 1) for i in range(ROUNDS)),
-                        help="流す回（1〜5）をカンマ区切りで。既定はすべて")
-    parser.add_argument("--conditions", default=",".join(CONDITIONS), help="coldstart・batteryで測る条件")
-    parser.add_argument("--tasks", help="課題IDをカンマ区切りで指定（開発の確認用）")
-    parser.add_argument("--test-set", action="store_true", help="試験用の54文を使う（最終設定の固定後に一度だけ）")
-    parser.add_argument("--fixed-config", help="--test-setで必須。固定した最終設定の識別名（例：Uzumiのcommit）")
+                        help="runで流す回（1〜5）をカンマ区切りで。既定はすべて")
+    parser.add_argument("--conditions", default=",".join(CONDITIONS), help="coldstartで測る条件")
+    parser.add_argument("--tasks", help="課題IDをカンマ区切りで指定（開発用の集合の確認だけ）")
+    parser.add_argument("--test-set", action="store_true", help="試験用の54文を使う（最終設定の固定後、集合ごとに一度だけ）")
+    parser.add_argument("--exploration", help="試験用の集合を探索として流し直す場合の名前。本番の記録とは別に残す")
     parser.add_argument("--no-rest", action="store_true", help="条件の間の5分の休みを省く（開発用の集合の確認だけ）")
     args = parser.parse_args()
     schedule = latin_schedule()
@@ -387,10 +542,10 @@ def main() -> int:
         for index, row in enumerate(schedule, start=1):
             print(f"round{index}\t" + "\t".join(row))
         return 0
-    if args.test_set and not args.fixed_config:
-        parser.error("--test-set requires --fixed-config")
     if args.test_set and (args.no_rest or args.tasks):
         parser.error("--test-set cannot be combined with --no-rest or --tasks")
+    if args.exploration and not args.test_set:
+        parser.error("--exploration is only for the test set")
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
     # 課題の開始と終了で、許容表記と最終文を受信口へ渡す。計数の行は版3の列で読む。
@@ -401,38 +556,36 @@ def main() -> int:
         layouts = p2c.probe_layouts()
         (work / "layouts.json").write_text(json.dumps(layouts, ensure_ascii=False, indent=1), encoding="utf-8")
         return 0
-    tasks = select_tasks(args.test_set, args.tasks)
-    if args.command == "coldstart":
-        for condition in args.conditions.split(","):
-            if condition != "M":
-                cold_start(condition, work)
-        return 0
-    if args.command == "battery":
+    tasks, task_file = select_tasks(args.test_set, args.tasks)
+    try:
+        if args.command == "coldstart":
+            for condition in args.conditions.split(","):
+                if condition != "M":
+                    cold_start(condition, work)
+            return 0
+        if args.command == "battery":
+            battery_round(tasks, task_file, work, args.no_rest)
+            return 0
+        layouts = load_layouts(work)
+        task_set = task_set_id(task_file)
+        # 試験用の集合は集合ごとの記録へ、開発用の集合は作業場所の記録へ、最初の実行の設定を残して以後と照合する。
+        ledger = ledger_directory(task_set, args.exploration) if args.test_set else work / "dev-ledger" / task_set
+        (work / "schedule.json").write_text(json.dumps(
+            {"seed": LATIN_SEED, "tool_version": TOOL_VERSION, "rows": schedule, "test_set": args.test_set,
+             "task_set": task_set, "exploration": args.exploration}, ensure_ascii=False, indent=1))
+        first = True
         for round_index in [int(r) for r in args.rounds.split(",")]:
             for condition in schedule[round_index - 1]:
-                wait_thermal_none()
-                battery(condition, round_index, tasks, work)
-        return 0
-    layouts = load_layouts(work)
-    (work / "schedule.json").write_text(json.dumps(
-        {"seed": LATIN_SEED, "tool_version": TOOL_VERSION, "rows": schedule, "test_set": args.test_set,
-         "fixed_config": args.fixed_config}, ensure_ascii=False, indent=1))
-    expected_apk: Optional[str] = None
-    first = True
-    for round_index in [int(r) for r in args.rounds.split(",")]:
-        for condition in schedule[round_index - 1]:
-            if not first and not args.no_rest:
-                log(f"rest {REST_BETWEEN_CONDITIONS_S}s before {condition}")
-                time.sleep(REST_BETWEEN_CONDITIONS_S)
-            first = False
-            wait_thermal_none()
-            if args.test_set:
-                claim_test_run(args.fixed_config, round_index, condition)
-            try:
-                expected_apk = run_condition(condition, round_index, tasks, work, layouts, expected_apk)
-            except p2c.Abort as error:
-                log(f"STOP: {error}")
-                return 2
+                rest_and_cool(first, args.no_rest)
+                first = False
+                config = current_config(apk_sha256())
+                check_manifest(ledger / "manifest.json", config)
+                if args.test_set:
+                    claim_run(ledger, round_index, condition, config)
+                run_condition(condition, round_index, tasks, work, layouts, config)
+    except p2c.Abort as error:
+        log(f"STOP: {error}")
+        return 2
     return 0
 
 

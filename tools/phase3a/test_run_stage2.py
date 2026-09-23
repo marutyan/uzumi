@@ -77,20 +77,100 @@ class ParseTest(unittest.TestCase):
 
 
 class TestSetLedgerTest(unittest.TestCase):
-    """試験用の集合を同じ最終設定で二度流さない。"""
+    """試験用の集合は、設定の内容に関係なく課題集合ごとに一度しか使えない。流し直しは探索として別に残す。"""
 
-    def test_same_round_and_condition_is_refused(self):
+    def test_same_round_and_condition_is_refused_whatever_the_config(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(s2, "LOCAL", Path(tmp)):
-            s2.claim_test_run("abc123", 1, "ZS")
-            s2.claim_test_run("abc123", 1, "ZX")
+            ledger = s2.ledger_directory("phase2c-tasks-abc", None)
+            s2.claim_run(ledger, 1, "ZS", {"apk_sha256": "a"})
+            s2.claim_run(ledger, 1, "ZX", {"apk_sha256": "a"})
             with self.assertRaises(s2.p2c.Abort):
-                s2.claim_test_run("abc123", 1, "ZS")
-            s2.claim_test_run("def456", 1, "ZS")
+                s2.claim_run(s2.ledger_directory("phase2c-tasks-abc", None), 1, "ZS", {"apk_sha256": "other"})
+            # 探索は別の記録へ分かれ、本番の記録を使わない
+            exploration = s2.ledger_directory("phase2c-tasks-abc", "prompt-v2")
+            self.assertNotEqual(exploration, ledger)
+            s2.claim_run(exploration, 1, "ZS", {"apk_sha256": "other"})
+
+    def test_task_set_id_depends_on_file_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "phase2c-tasks.tsv"
+            path.write_text("a")
+            first = s2.task_set_id(path)
+            path.write_text("b")
+            self.assertNotEqual(first, s2.task_set_id(path))
+            self.assertTrue(first.startswith("phase2c-tasks-"))
+
+    def test_manifest_rejects_changed_apk_on_later_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "manifest.json"
+            s2.check_manifest(manifest, {"apk_sha256": "a", "tool_commit": "c"})
+            s2.check_manifest(manifest, {"apk_sha256": "a", "tool_commit": "c"})
+            with self.assertRaises(s2.p2c.Abort):
+                s2.check_manifest(manifest, {"apk_sha256": "b", "tool_commit": "c"})
 
     def test_default_tasks_are_development_set(self):
-        tasks = s2.select_tasks(test_set=False, task_ids=None)
+        tasks, path = s2.select_tasks(test_set=False, task_ids=None)
+        self.assertEqual(path, s2.DEV_TASKS)
         self.assertEqual(len(tasks), 30)
         self.assertTrue(all(t.list_name == "開発" for t in tasks))
+
+
+class ModelSelectionTest(unittest.TestCase):
+    """条件のモデルを選んでから試験画面を開き、選ばれたモデルが条件と一致することを確かめる。"""
+
+    def test_generation_matches_app_formula(self):
+        # アプリのNeuralModelSpec.generation（NeuralPromptFormatTestで同じ値を固定）
+        self.assertEqual(s2.expected_generation("ZS"), 734620824642353)
+        self.assertEqual(s2.expected_generation("M"), 0)
+
+    def test_select_happens_before_screen_is_opened(self):
+        calls = []
+        ready = "ime=1\tneural_selected=1\tneural_ready=1\tneural_load_reason=0\tneural_model_generation=%d" % s2.expected_generation("JX")
+        with mock.patch.object(s2.p2c, "broadcast", side_effect=lambda action, *a, **k: calls.append(action) or ready), \
+                mock.patch.object(s2.p2c, "prepare_condition", side_effect=lambda *a: calls.append("prepare")):
+            s2.prepare_neural_condition("JX", Path("."))
+        self.assertEqual(calls[:3], ["NEURAL_SELECT", "prepare", "EVAL_STATUS"])
+
+    def test_mismatched_model_stops(self):
+        previous = "ime=1\tneural_selected=1\tneural_ready=1\tneural_load_reason=0\tneural_model_generation=%d" % s2.expected_generation("ZS")
+        with mock.patch.object(s2.p2c, "broadcast", return_value=previous), \
+                mock.patch.object(s2.p2c, "prepare_condition"):
+            with self.assertRaises(s2.p2c.Abort):
+                s2.prepare_neural_condition("JX", Path("."))
+        with self.assertRaises(s2.p2c.Abort):
+            s2.check_selected_model("M", {"ime": 1, "neural_selected": 1, "neural_model_generation": 5}, 0)
+        s2.check_selected_model("M", {"ime": 1, "neural_selected": 0, "neural_model_generation": 0}, 0)
+
+
+class BatteryRuleTest(unittest.TestCase):
+    """電池：各条件3回、基準をまたげば5回、なおまたげば不合格。回どうしは別の日または時間帯。"""
+
+    def test_judgement(self):
+        self.assertEqual(s2.battery_judgement([1.1, 1.0]), "incomplete")
+        self.assertEqual(s2.battery_judgement([1.1, 1.0, 1.15]), "pass")
+        self.assertEqual(s2.battery_judgement([1.3, 1.25, 1.4]), "fail")
+        self.assertEqual(s2.battery_judgement([1.1, 1.3, 1.0]), "need_more")
+        self.assertEqual(s2.battery_judgement([1.1, 1.3, 1.0, 1.0, 1.1]), "fail")
+
+    def record(self, index, epoch, ratio):
+        drains = {c: 10.0 * (ratio if c != "M" else 1.0) for c in s2.CONDITIONS}
+        return {"round": index, "started_epoch": epoch, "drain_mah": drains}
+
+    def test_rounds_need_gap_and_extra_rounds_need_straddle(self):
+        day = 1_800_000_000.0
+        self.assertEqual(s2.next_battery_round([], day), 1)
+        with self.assertRaises(s2.p2c.Abort):
+            s2.next_battery_round([self.record(1, day, 1.0)], day + 3600)
+        self.assertEqual(s2.next_battery_round([self.record(1, day, 1.0)], day + 5 * 3600), 2)
+        three = [self.record(1, day, 1.0), self.record(2, day + 86400, 1.1), self.record(3, day + 2 * 86400, 1.05)]
+        with self.assertRaises(s2.p2c.Abort):
+            s2.next_battery_round(three, day + 3 * 86400)
+        straddling = three[:2] + [self.record(3, day + 2 * 86400, 1.3)]
+        self.assertEqual(s2.next_battery_round(straddling, day + 3 * 86400), 4)
+
+    def test_each_battery_round_uses_its_own_latin_row(self):
+        rows = s2.latin_schedule()
+        self.assertEqual(len({tuple(r) for r in rows[:3]}), 3)
 
 
 if __name__ == "__main__":

@@ -23,13 +23,15 @@ object NeuralSelection {
         return NeuralModelSpec.fromKey(preferences(context).getString(KEY_MODEL, null))
     }
 
-    /** モデルを選ぶ。nullならMozcだけに戻す。選択を使えないビルドではfalseを返し、何もしない。 */
+    /**
+     * モデルを選ぶ。nullならMozcだけに戻す。選択を使えないビルドではfalseを返し、何もしない。
+     * 自動測定の道具が選んだ直後にアプリを止めるため、非同期のapplyではなくcommitでファイルへ書き終えてから返す。
+     */
     fun select(context: Context, spec: NeuralModelSpec?): Boolean {
         if (!isEnabled(context)) return false
-        preferences(context).edit().apply {
+        return preferences(context).edit().apply {
             if (spec == null) remove(KEY_MODEL) else putString(KEY_MODEL, spec.key)
-        }.apply()
-        return true
+        }.commit()
     }
 
     /** 選択の保存先。 */

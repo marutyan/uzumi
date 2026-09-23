@@ -98,6 +98,7 @@ class EvaluationCounterReceiver : BroadcastReceiver() {
             "live_result_revision=${progress.liveResultRevision}",
             "candidates_outstanding=${flag(progress.candidatesOutstanding)}",
             "neural_selected=${flag(status.neural.selected)}",
+            "neural_model_generation=${status.neural.modelGeneration}",
             "neural_ready=${flag(status.neural.ready)}",
             "neural_load_reason=${status.neural.loadReason}",
         ).joinToString("\t")

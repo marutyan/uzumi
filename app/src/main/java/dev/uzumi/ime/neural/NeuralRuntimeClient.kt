@@ -114,9 +114,10 @@ class NeuralRuntimeClient(
     }
 
     /**
-     * プロンプト一つを推論する。期限を過ぎていれば、cacheにあっても使わず時間超過を返す。期限内ならcacheを使い、
-     * 無ければ送って期限まで待つ。期限の後に届いた結果は、届いていても使わない（評価条件の「300 msを超えたらMozcの結果」）。
+     * プロンプト一つを推論する。結果を返す直前の一か所（[deadlineGate]）で期限を確かめ直し、期限を過ぎていれば、
+     * cache hitでもserviceの結果でも使わず時間超過を返す（評価条件の「300 msを超えたらMozcの結果」）。
      * cache hitも同じ期限に従うのは、期限が入力の受理からの時間で、適用までの時間（cache hitを含む）の目標と同じ起点だからである。
+     * 推論時間の母集団（送った要求だけ）は、この規則では変わらない。
      */
     private fun call(
         prompt: String,
@@ -125,24 +126,49 @@ class NeuralRuntimeClient(
         isSuperseded: () -> Boolean,
         record: (NeuralCallRecord) -> Unit,
     ): NeuralModelOutput {
+        val (output, callRecord) = produce(prompt, deadlineNanos, owner, isSuperseded)
+        val (gated, gatedRecord) = deadlineGate(output, callRecord, deadlineNanos)
+        record(gatedRecord)
+        return gated
+    }
+
+    /**
+     * 結果を返す直前の期限の関門。表示に使える結果（Completed）を、同じ時計で期限を確かめ直してから通す。
+     * 期限を過ぎていれば時間超過に変える。失敗・中断はそのまま通す。
+     */
+    private fun deadlineGate(
+        output: NeuralModelOutput,
+        callRecord: NeuralCallRecord,
+        deadlineNanos: Long,
+    ): Pair<NeuralModelOutput, NeuralCallRecord> {
+        if (output !is NeuralModelOutput.Completed || deadlineNanos - nanoTime() >= 0) return output to callRecord
+        return NeuralModelOutput.Failed(NeuralFailure.TIMEOUT) to
+            callRecord.copy(cacheHit = false, outcome = NeuralCallOutcome.TIMEOUT)
+    }
+
+    /** cacheか別プロセスから結果を得る。期限の最終の判定は[deadlineGate]が行い、ここでは送る前と待つ間だけ期限を見る。 */
+    private fun produce(
+        prompt: String,
+        deadlineNanos: Long,
+        owner: Long,
+        isSuperseded: () -> Boolean,
+    ): Pair<NeuralModelOutput, NeuralCallRecord> {
+        // 期限を過ぎていれば送らない（関門でも時間超過になるが、推論の無駄を省く）。
         if (deadlineNanos - nanoTime() <= 0) {
-            record(NeuralCallRecord(sent = false, cacheHit = false, millis = 0.0, outcome = NeuralCallOutcome.TIMEOUT))
-            return NeuralModelOutput.Failed(NeuralFailure.TIMEOUT)
+            return NeuralModelOutput.Failed(NeuralFailure.TIMEOUT) to
+                NeuralCallRecord(sent = false, cacheHit = false, millis = 0.0, outcome = NeuralCallOutcome.TIMEOUT)
         }
         cache[prompt]?.let {
-            record(NeuralCallRecord(sent = false, cacheHit = true, millis = 0.0, outcome = NeuralCallOutcome.COMPLETED))
-            return it
+            return it to NeuralCallRecord(sent = false, cacheHit = true, millis = 0.0, outcome = NeuralCallOutcome.COMPLETED)
         }
         // 送る前の判定はlockの中で行い、UIスレッドの中断（cancelInFlight）と入れ違いにならないようにする。
         val (target, pending) = synchronized(lock) {
             if (isSuperseded()) {
-                record(NeuralCallRecord(sent = false, cacheHit = false, millis = 0.0, outcome = NeuralCallOutcome.CANCELLED))
-                return NeuralModelOutput.Cancelled
+                return NeuralModelOutput.Cancelled to
+                    NeuralCallRecord(sent = false, cacheHit = false, millis = 0.0, outcome = NeuralCallOutcome.CANCELLED)
             }
-            val current = port?.takeIf { ready } ?: run {
-                record(NeuralCallRecord(sent = false, cacheHit = false, millis = 0.0, outcome = NeuralCallOutcome.UNAVAILABLE))
-                return NeuralModelOutput.Failed(NeuralFailure.UNAVAILABLE)
-            }
+            val current = port?.takeIf { ready } ?: return NeuralModelOutput.Failed(NeuralFailure.UNAVAILABLE) to
+                NeuralCallRecord(sent = false, cacheHit = false, millis = 0.0, outcome = NeuralCallOutcome.UNAVAILABLE)
             val created = InFlight(REQUEST_IDS.incrementAndGet(), owner, nanoTime())
             inFlight = created
             current to created
@@ -157,25 +183,25 @@ class NeuralRuntimeClient(
         synchronized(lock) { if (inFlight === pending) inFlight = null }
         val waitedMillis = (nanoTime() - pending.sentAtNanos) / 1_000_000.0
         return when {
-            !sent -> {
-                record(NeuralCallRecord(sent = false, cacheHit = false, millis = 0.0, outcome = NeuralCallOutcome.UNAVAILABLE))
-                NeuralModelOutput.Failed(NeuralFailure.UNAVAILABLE)
-            }
-            pending.cancelled -> {
-                record(NeuralCallRecord(sent = true, cacheHit = false, millis = waitedMillis, outcome = NeuralCallOutcome.CANCELLED))
-                NeuralModelOutput.Cancelled
-            }
+            !sent -> NeuralModelOutput.Failed(NeuralFailure.UNAVAILABLE) to
+                NeuralCallRecord(sent = false, cacheHit = false, millis = 0.0, outcome = NeuralCallOutcome.UNAVAILABLE)
+            pending.cancelled -> NeuralModelOutput.Cancelled to
+                NeuralCallRecord(sent = true, cacheHit = false, millis = waitedMillis, outcome = NeuralCallOutcome.CANCELLED)
             !finished -> {
                 runCatching { target.cancel(pending.requestId) }
-                record(NeuralCallRecord(sent = true, cacheHit = false, millis = waitedMillis, outcome = NeuralCallOutcome.TIMEOUT))
-                NeuralModelOutput.Failed(NeuralFailure.TIMEOUT)
+                NeuralModelOutput.Failed(NeuralFailure.TIMEOUT) to
+                    NeuralCallRecord(sent = true, cacheHit = false, millis = waitedMillis, outcome = NeuralCallOutcome.TIMEOUT)
             }
             else -> {
-                val outcome = NeuralTermination.toCallOutcome(pending.termination)
-                record(NeuralCallRecord(sent = true, cacheHit = false, millis = pending.inferenceMicros / 1000.0, outcome = outcome))
-                NeuralTermination.toOutput(pending.termination, pending.text).also { output ->
-                    if (output is NeuralModelOutput.Completed) cache[prompt] = output
-                }
+                val output = NeuralTermination.toOutput(pending.termination, pending.text)
+                // 期限内に届いた結果だけをcacheへ入れる。
+                if (output is NeuralModelOutput.Completed) cache[prompt] = output
+                output to NeuralCallRecord(
+                    sent = true,
+                    cacheHit = false,
+                    millis = pending.inferenceMicros / 1000.0,
+                    outcome = NeuralTermination.toCallOutcome(pending.termination),
+                )
             }
         }
     }

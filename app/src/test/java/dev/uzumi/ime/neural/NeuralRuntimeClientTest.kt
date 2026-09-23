@@ -182,6 +182,56 @@ class NeuralRuntimeClientTest {
         assertEquals(1, service.prompts.size)
     }
 
+    /**
+     * 結果を返す直前の関門：期限の確認の後にthreadが止まって期限を越えた場合、cache hitでもserviceの結果でも使わない。
+     * 時計を差し替え、確認（送る前・cacheを読む前）の後に時計が期限を越える場合を作る。
+     */
+    @Test
+    fun gateRechecksDeadlineBeforeReturning() {
+        var now = 50L
+        var jumpTo: Long? = null
+        val gated = NeuralRuntimeClient(NeuralModelSpec.JINEN_XSMALL, nanoTime = { now })
+        gated.attach(object : NeuralRuntimePort {
+            override fun convert(requestId: Long, prompt: ByteArray, parseSpecial: Boolean, maxTokens: Int) {
+                // 結果は期限内（時刻50）に届き、その後で時計が期限を越える。
+                gated.onResult(requestId, NeuralTermination.EOG, "今日".toByteArray(), 1_000)
+                jumpTo?.let { now = it }
+            }
+
+            override fun cancel(requestId: Long) = Unit
+        })
+        gated.onLoaded(true)
+
+        // serviceの結果：期限100の内に届いたが、返す前に時計が150になった
+        jumpTo = 150
+        assertEquals(NeuralModelOutput.Failed(NeuralFailure.TIMEOUT), gated.modelFor(100, 1, { false }) { records += it }.convert("きょう", ""))
+        assertEquals(NeuralCallOutcome.TIMEOUT, records.last().outcome)
+
+        // cache hit：cacheを読む前の確認（時刻50）は期限内だが、読んだ後に時計が期限を越えた
+        now = 50
+        jumpTo = null
+        val readings = ArrayDeque(listOf(99L, 101L))
+        val cached = NeuralRuntimeClient(NeuralModelSpec.JINEN_XSMALL, nanoTime = { readings.removeFirstOrNull() ?: 0L })
+        cached.attach(object : NeuralRuntimePort {
+            override fun convert(requestId: Long, prompt: ByteArray, parseSpecial: Boolean, maxTokens: Int) {
+                cached.onResult(requestId, NeuralTermination.EOG, "今日".toByteArray(), 1_000)
+            }
+
+            override fun cancel(requestId: Long) = Unit
+        })
+        cached.onLoaded(true)
+        val readingsDuringFill = readings.toList()
+        readings.clear()
+        assertEquals(NeuralModelOutput.Completed("今日"), cached.modelFor(1_000, 2, { false }) {}.convert("きょう", ""))
+        readings.addAll(readingsDuringFill)
+        val hit = cached.modelFor(100, 3, { false }) { records += it }.convert("きょう", "")
+
+        assertEquals(NeuralModelOutput.Failed(NeuralFailure.TIMEOUT), hit)
+        assertEquals(false, records.last().cacheHit)
+        assertEquals(NeuralCallOutcome.TIMEOUT, records.last().outcome)
+        assertTrue(readings.isEmpty())
+    }
+
     /** 要求番号は接続やモデルをまたいでIMEのプロセスの中で単調に増える（モデルを切り替えても前の番号と重ならない）。 */
     @Test
     fun requestIdsIncreaseAcrossClients() {
