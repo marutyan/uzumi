@@ -152,6 +152,11 @@ object KeyboardLayoutData {
         }
     }
 
+    /**
+     * QWERTYの文字キーの行。1行目は数字、4行目の両脇には切替と削除が入る。Simejiの5行配列に合わせる。
+     */
+    val QWERTY_ROWS: List<String> = listOf("1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm")
+
     // QWERTYの英字キーを長押ししたときに入力する数字・記号。一般的な英語キーボードの配置に倣う。
     private val QWERTY_LONG_PRESS: Map<Char, String> = mapOf(
         'q' to "1", 'w' to "2", 'e' to "3", 'r' to "4", 't' to "5",

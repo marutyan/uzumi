@@ -213,6 +213,19 @@ class KeyboardLayoutDataTest {
     }
 
     @Test
+    fun qwertyRowsHaveDigitRowAndEveryLetterOnce() {
+        val rows = KeyboardLayoutData.QWERTY_ROWS
+        assertEquals(listOf(10, 10, 10, 7), rows.map { it.length })
+        assertEquals("1234567890", rows.first())
+        val letters = rows.drop(1).joinToString("").filter { it.isLetter() }
+        assertEquals(('a'..'z').toList(), letters.toList().sorted())
+        // 文字キーに置く記号は読み上げ名を持つ
+        rows.joinToString("").filterNot { it.isLetterOrDigit() }.forEach { symbol ->
+            assertTrue("読み上げ名がない: $symbol", KeySpeech.hasSymbolName(symbol.toString()))
+        }
+    }
+
+    @Test
     fun kanaKeysSwitchRoleOnlyWhileComposing() {
         // 入力前はSimejiと同じく数字面への切替と空白
         assertEquals(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), KeyboardLayoutData.kanaNumberKey(composing = false))
