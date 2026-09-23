@@ -7,7 +7,7 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 
 /**
- * 日本語12キーフリック・英語QWERTY・数字記号キーボードを提供するメインUIパネル。
+ * 日本語12キーフリック・英語QWERTY・数字・記号面のキーボードを提供するメインUIパネル。
  *
  * @param context コンテキスト
  * @param onAction キーボード操作イベントを通知するコールバック
@@ -36,12 +36,19 @@ class KeyboardPanel(
     private val qwertyKeyViews = mutableListOf<KeyView>()
     private val shiftKeyViews = mutableListOf<KeyView>()
 
-    private var qwertySwitchKey: KeyView? = null
     private var numericSwitchKey: KeyView? = null
+
+    // かな配列へ戻るキー。password欄ではかな入力を使わないため非表示にする。
+    private val kanaSwitchKeyViews = mutableListOf<KeyView>()
+
+    // 記号面で表示中のページ番号。KeyboardLayoutData.SYMBOL_PAGESの添字。
+    private var symbolPageIndex = 0
+    private val symbolPageContainers = mutableListOf<LinearLayout>()
 
     private lateinit var kanaContainer: LinearLayout
     private lateinit var qwertyContainer: LinearLayout
     private lateinit var numericContainer: LinearLayout
+    private lateinit var symbolContainer: LinearLayout
 
     init {
         orientation = VERTICAL
@@ -105,11 +112,19 @@ class KeyboardPanel(
         kanaContainer = buildKanaLayout()
         qwertyContainer = buildQwertyLayout()
         numericContainer = buildNumericLayout()
+        symbolContainer = buildSymbolLayout()
+
+        // 表示が切り替わったときにTalkBackが面の名前を読み上げるよう、各面をpaneとして名前を付ける
+        kanaContainer.accessibilityPaneTitle = KeySpeech.modeName(KeyboardMode.KANA)
+        qwertyContainer.accessibilityPaneTitle = KeySpeech.modeName(KeyboardMode.QWERTY)
+        numericContainer.accessibilityPaneTitle = KeySpeech.modeName(KeyboardMode.NUMERIC)
+        symbolContainer.accessibilityPaneTitle = KeySpeech.modeName(KeyboardMode.SYMBOL)
 
         val lp = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         addView(kanaContainer, lp)
         addView(qwertyContainer, lp)
         addView(numericContainer, lp)
+        addView(symbolContainer, lp)
     }
 
     /**
@@ -138,12 +153,12 @@ class KeyboardPanel(
      */
     private fun updateSwitchKeys() {
         if (isPasswordField) {
-            qwertySwitchKey?.updateModeSwitch("123", KeyboardMode.NUMERIC)
             numericSwitchKey?.updateModeSwitch("ABC", KeyboardMode.QWERTY)
         } else {
-            qwertySwitchKey?.updateModeSwitch("あ/123", KeyboardMode.KANA)
             numericSwitchKey?.updateModeSwitch("あ/A", KeyboardMode.KANA)
         }
+        val kanaKeyVisibility = if (isPasswordField) View.GONE else View.VISIBLE
+        kanaSwitchKeyViews.forEach { it.visibility = kanaKeyVisibility }
     }
 
     /**
@@ -153,6 +168,25 @@ class KeyboardPanel(
         kanaContainer.visibility = if (currentMode == KeyboardMode.KANA) View.VISIBLE else View.GONE
         qwertyContainer.visibility = if (currentMode == KeyboardMode.QWERTY) View.VISIBLE else View.GONE
         numericContainer.visibility = if (currentMode == KeyboardMode.NUMERIC) View.VISIBLE else View.GONE
+        symbolContainer.visibility = if (currentMode == KeyboardMode.SYMBOL) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * 記号面の次のページを表示する。最後のページの次は最初のページへ戻る。
+     */
+    private fun showNextSymbolPage() {
+        cancelPendingInput()
+        symbolPageIndex = (symbolPageIndex + 1) % symbolPageContainers.size
+        updateSymbolPageVisibility()
+    }
+
+    /**
+     * 記号面の各ページのうち、選択中のページだけを表示する。
+     */
+    private fun updateSymbolPageVisibility() {
+        symbolPageContainers.forEachIndexed { index, page ->
+            page.visibility = if (index == symbolPageIndex) View.VISIBLE else View.GONE
+        }
     }
 
     /**
@@ -236,12 +270,22 @@ class KeyboardPanel(
             addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 1.0f))
         }
 
-        // Row 3: [数字切替] [記号] [わ] [小゛゜] [Enter]
+        // Row 3: [数字切替（長押しで記号面）] [記号] [わ] [小゛゜] [Enter]
         val row3 = createRow(rowHeight).apply {
-            addView(createKey(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), 1.0f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.PUNCT), 1.2f))
-            addView(createKey(KeySpec.Kana(KanaKeyType.WA), 1.2f))
+            addView(
+                createKey(
+                    KeySpec.ModeSwitch(
+                        label = "123",
+                        targetMode = KeyboardMode.NUMERIC,
+                        longPressTarget = KeyboardMode.SYMBOL,
+                        longPressLabel = "記号",
+                    ),
+                    1.0f,
+                ),
+            )
             addView(createKey(KeySpec.Action(KeyboardAction.TransformKana, "小゛゜"), 1.2f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.WA), 1.2f))
+            addView(createKey(KeySpec.Kana(KanaKeyType.PUNCT), 1.2f))
             val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1.0f)
             enterKeyViews.add(enterKey)
             addView(enterKey)
@@ -269,7 +313,7 @@ class KeyboardPanel(
         val row0Keys = listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p")
         val row0 = createRow(rowHeight)
         row0Keys.forEach { char ->
-            val key = createKey(KeySpec.SimpleText(char), 1.0f)
+            val key = createKey(qwertyLetterSpec(char), 1.0f)
             qwertyKeyViews.add(key)
             row0.addView(key)
         }
@@ -279,7 +323,7 @@ class KeyboardPanel(
         val row1 = createRow(rowHeight)
         row1.addView(createSpacer(0.5f))
         row1Keys.forEach { char ->
-            val key = createKey(KeySpec.SimpleText(char), 1.0f)
+            val key = createKey(qwertyLetterSpec(char), 1.0f)
             qwertyKeyViews.add(key)
             row1.addView(key)
         }
@@ -293,7 +337,7 @@ class KeyboardPanel(
         row2.addView(shiftKey)
 
         row2Keys.forEach { char ->
-            val key = createKey(KeySpec.SimpleText(char), 1.0f)
+            val key = createKey(qwertyLetterSpec(char), 1.0f)
             qwertyKeyViews.add(key)
             row2.addView(key)
         }
@@ -301,22 +345,25 @@ class KeyboardPanel(
         val delKey = createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.5f)
         row2.addView(delKey)
 
-        // Row 3: [切替] [,] [Space] [.] [Enter]
+        // Row 3: [かな] [数字] [記号] [,] [Space] [.] [Enter]
+        // かな配列を経由せずに数字・記号へ切り替えられるよう、切替先ごとにキーを分ける
         val row3 = createRow(rowHeight)
-        val switchKey = createKey(KeySpec.ModeSwitch("あ/123", KeyboardMode.KANA), 1.5f)
-        qwertySwitchKey = switchKey
-        row3.addView(switchKey)
+        val kanaKey = createKey(KeySpec.ModeSwitch("あ", KeyboardMode.KANA), 1.1f)
+        kanaSwitchKeyViews.add(kanaKey)
+        row3.addView(kanaKey)
+        row3.addView(createKey(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), 1.1f))
+        row3.addView(createKey(KeySpec.ModeSwitch("記号", KeyboardMode.SYMBOL), 1.1f))
 
-        val commaKey = createKey(KeySpec.SimpleText(","), 1.0f)
+        val commaKey = createKey(KeySpec.SimpleText(","), 0.9f)
         row3.addView(commaKey)
 
-        val spaceKey = createKey(KeySpec.Action(KeyboardAction.Space, "Space"), 4.0f)
+        val spaceKey = createKey(KeySpec.Action(KeyboardAction.Space, "Space"), 2.6f)
         row3.addView(spaceKey)
 
-        val periodKey = createKey(KeySpec.SimpleText("."), 1.0f)
+        val periodKey = createKey(KeySpec.SimpleText("."), 0.9f)
         row3.addView(periodKey)
 
-        val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 2.0f)
+        val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1.8f)
         enterKeyViews.add(enterKey)
         row3.addView(enterKey)
 
@@ -365,15 +412,15 @@ class KeyboardPanel(
             addView(createKey(KeySpec.SimpleText("+"), 1.0f))
         }
 
-        // Row 3: [かな/英字切替] [0] [.] [,] [Enter]
+        // Row 3: [かな/英字切替] [記号] [0] [.（長押しで,）] [Enter]
         val row3 = createRow(rowHeight).apply {
             val returnKey = createKey(KeySpec.ModeSwitch("あ/A", KeyboardMode.KANA), 1.0f)
             numericSwitchKey = returnKey
             addView(returnKey)
 
+            addView(createKey(KeySpec.ModeSwitch("記号", KeyboardMode.SYMBOL), 1.0f))
             addView(createKey(KeySpec.SimpleText("0"), 1.0f))
-            addView(createKey(KeySpec.SimpleText("."), 1.0f))
-            addView(createKey(KeySpec.SimpleText(","), 1.0f))
+            addView(createKey(KeySpec.SimpleText(".", longPressText = ","), 1.0f))
             val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1.0f)
             enterKeyViews.add(enterKey)
             addView(enterKey)
@@ -384,6 +431,73 @@ class KeyboardPanel(
         container.addView(row2)
         container.addView(row3)
         return container
+    }
+
+    /**
+     * 記号面を構築する。各ページの3行と、全ページ共通の切替・空白・Enterの行からなる（4行構成）。
+     * QWERTYや数字からかな配列を経由せずに句読点・括弧・記号を入力するために使う。
+     */
+    private fun buildSymbolLayout(): LinearLayout {
+        val container = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+        }
+
+        val rowHeight = (48f * density).toInt()
+        val pages = KeyboardLayoutData.SYMBOL_PAGES
+
+        pages.forEachIndexed { index, page ->
+            val pageContainer = LinearLayout(context).apply {
+                orientation = VERTICAL
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+            }
+            // 切替キーには次のページ名を表示し、押すと何が出るかを示す
+            val nextPage = pages[(index + 1) % pages.size]
+            page.rows.forEachIndexed { rowIndex, symbols ->
+                val row = createRow(rowHeight)
+                val isLastRow = rowIndex == page.rows.lastIndex
+                if (isLastRow) {
+                    row.addView(
+                        createKey(
+                            KeySpec.PageSwitch(
+                                label = nextPage.label,
+                                description = "${nextPage.spokenName}のページへ切り替え、現在は${page.spokenName}",
+                            ),
+                            1.0f,
+                        ),
+                    )
+                }
+                symbols.forEach { symbol -> row.addView(createKey(KeySpec.SimpleText(symbol), 1.0f)) }
+                if (isLastRow) {
+                    row.addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.0f))
+                }
+                pageContainer.addView(row)
+            }
+            symbolPageContainers.add(pageContainer)
+            container.addView(pageContainer)
+        }
+        updateSymbolPageVisibility()
+
+        // 最下段: [かな] [英字] [数字] [空白] [Enter]
+        val bottomRow = createRow(rowHeight)
+        val kanaKey = createKey(KeySpec.ModeSwitch("あ", KeyboardMode.KANA), 1.2f)
+        kanaSwitchKeyViews.add(kanaKey)
+        bottomRow.addView(kanaKey)
+        bottomRow.addView(createKey(KeySpec.ModeSwitch("ABC", KeyboardMode.QWERTY), 1.2f))
+        bottomRow.addView(createKey(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), 1.2f))
+        bottomRow.addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 3.9f))
+        val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 2.5f)
+        enterKeyViews.add(enterKey)
+        bottomRow.addView(enterKey)
+        container.addView(bottomRow)
+        return container
+    }
+
+    /**
+     * QWERTYの英字キーの定義を作る。長押しで数字・記号を入力できるよう長押し文字を付ける。
+     */
+    private fun qwertyLetterSpec(char: String): KeySpec.SimpleText {
+        return KeySpec.SimpleText(char, longPressText = KeyboardLayoutData.getQwertyLongPress(char[0]))
     }
 
     /**
@@ -426,6 +540,7 @@ class KeyboardPanel(
                     switchMode(actualTarget)
                 },
                 onShiftToggle = { toggleShift() },
+                onPageSwitch = { showNextSymbolPage() },
             )
         }
         allKeyViews.add(keyView)

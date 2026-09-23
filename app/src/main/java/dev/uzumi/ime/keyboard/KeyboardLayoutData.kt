@@ -151,4 +151,65 @@ object KeyboardLayoutData {
             char.lowercaseChar().toString()
         }
     }
+
+    // QWERTYの英字キーを長押ししたときに入力する数字・記号。一般的な英語キーボードの配置に倣う。
+    private val QWERTY_LONG_PRESS: Map<Char, String> = mapOf(
+        'q' to "1", 'w' to "2", 'e' to "3", 'r' to "4", 't' to "5",
+        'y' to "6", 'u' to "7", 'i' to "8", 'o' to "9", 'p' to "0",
+        'a' to "@", 's' to "#", 'd' to "$", 'f' to "_", 'g' to "&",
+        'h' to "-", 'j' to "+", 'k' to "(", 'l' to ")",
+        'z' to "*", 'x' to "\"", 'c' to "'", 'v' to ":", 'b' to ";",
+        'n' to "!", 'm' to "?",
+    )
+
+    /**
+     * QWERTYの英字キーの長押しで入力する文字を返す。Shift状態によらず同じ文字を返し、対象外ならnullを返す。
+     */
+    fun getQwertyLongPress(char: Char): String? = QWERTY_LONG_PRESS[char.lowercaseChar()]
+
+    /**
+     * 記号面の一ページ分の配列。
+     *
+     * @property label 切替キーに表示する短い名前
+     * @property spokenName TalkBackで読み上げるページ名
+     * @property rows 上から順の各行の記号。1・2行目は10個、3行目は切替・削除キーを挟むため8個とする
+     */
+    data class SymbolPage(
+        val label: String,
+        val spokenName: String,
+        val rows: List<List<String>>,
+    )
+
+    /**
+     * 記号面のページ一覧。日本語の句読点・括弧、全角の記号、半角の記号の順に並べる。
+     */
+    val SYMBOL_PAGES: List<SymbolPage> = listOf(
+        SymbolPage(
+            label = "全角",
+            spokenName = "句読点と括弧",
+            rows = listOf(
+                listOf("、", "。", "・", "：", "；", "？", "！", "ー", "〜", "…"),
+                listOf("「", "」", "『", "』", "（", "）", "【", "】", "［", "］"),
+                listOf("＠", "＃", "％", "＆", "＊", "＋", "＝", "／"),
+            ),
+        ),
+        SymbolPage(
+            label = "記号",
+            spokenName = "記号と矢印",
+            rows = listOf(
+                listOf("￥", "＄", "＿", "｜", "＜", "＞", "《", "》", "〈", "〉"),
+                listOf("※", "〒", "♪", "☆", "★", "○", "●", "◎", "△", "▲"),
+                listOf("→", "←", "↑", "↓", "×", "÷", "±", "〃"),
+            ),
+        ),
+        SymbolPage(
+            label = "半角",
+            spokenName = "半角記号",
+            rows = listOf(
+                listOf("!", "?", "@", "#", "$", "%", "&", "*", "(", ")"),
+                listOf("-", "_", "=", "+", "/", "\\", "|", "~", "'", "\""),
+                listOf(":", ";", "<", ">", "[", "]", "{", "}"),
+            ),
+        ),
+    )
 }
