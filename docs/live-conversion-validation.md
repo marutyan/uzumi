@@ -74,3 +74,19 @@ Pixel 10 Pro（Android 17/API 37）、2026-09-23 21:04〜21:15。開始時の`de
 - 学習禁止欄（`IME_FLAG_NO_PERSONALIZED_LEARNING`）での実機確認（JVMテストだけ）。
 - 数字・英字・記号が混ざる読みのライブ変換。ASCIIだけの範囲はMozcへ送らないが、混在する範囲はMozcの正規化によって範囲全体が一segmentになる場合がある。
 - ライブ変換で登録語を表示したまま確定すると、その単位のMozcへの学習は表記を合わせられず取り消される（登録語はMozcの辞書に無いため）。登録語以外の隣のsegmentは、segmentごとの学習し直しで学習される。
+
+## レビュー指摘の修正（2026-09-23）
+
+独立レビューの指摘を受け、commit `ad7aeb5`で次を直した。
+
+- 明示変換の表示中の削除で、自動の再変換をやめた。表示は読みへ戻るだけにした（回帰テスト`explicitDeleteDuringConversionReturnsToReadingWithoutReconverting`を追加）。
+- 読みが完全に一致する登録語は、登録順で最初の語を表示するようにした。対象はライブ変換のsegmentと部分範囲、明示変換の読み全体。登録語を表示したまま確定しても、Mozcへは学習させない。
+- `MAX_STALE_COMPOSITIONS`を8から32にした（理由は「構成」の節）。
+
+`./gradlew clean testDebugUnitTest assembleDebug lintDebug`は成功した。JVMテストは165件で失敗0件、lintの警告は起点と同じ4件。APKは34,408,076 bytes、SHA-256は`fbf0dbb2e25bd6e8b33aef7cbe8be2e9cfc828ea30c0dd80dcaab7dffbfcf3fc`で、端末へ入れた。`libmozc.so`、`mozc.data`、NOTICEが入っていることを確認した。前回とのサイズ差は、cleanビルドによるdexの分割の違いである。
+
+実機（21:26〜21:30）での確認結果は次のとおり。開始時の既定IMEはSimejiだった。
+
+- ライブ変換OFFで「よい」→変換「良い」→削除→「る」と操作すると、「よ」の後に「よる」が入力中のまま残った。確定された文字は無い。
+- 「うずみ→UzumiTest」を登録すると、明示変換（辞書画面の検索欄）では変換キーで「UzumiTest」になった。ライブ変換（試用欄）では入力だけで「UzumiTest」が表示され、「。」で確定した。
+- 試験後は、辞書ファイルと設定ファイルを消し、Mozcのprofileを開始時の複製へ戻した。既定IMEはSimejiへ戻し、`settings get`の出力は2項目とも開始時とbyte単位で一致した。
