@@ -166,6 +166,20 @@ class MozcConversionEngineTest {
         assertTrue(input.request.isIncognitoMode)
     }
 
+    /** 学習の消去は、文節履歴と予測の履歴を消す二つの命令をsessionなしで送る。 */
+    @Test
+    fun clearLearningSendsHistoryAndPredictionClears() {
+        val native = FakeMozcNative()
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        assertTrue(engine.clearLearning())
+
+        assertEquals(
+            listOf(Input.CommandType.CLEAR_USER_HISTORY, Input.CommandType.CLEAR_USER_PREDICTION),
+            native.inputs.map { it.type },
+        )
+    }
+
     /** 先頭文節の確定はSUBMIT_CANDIDATEに候補IDを付けて送る。 */
     @Test
     fun commitCandidateSendsCandidateId() {

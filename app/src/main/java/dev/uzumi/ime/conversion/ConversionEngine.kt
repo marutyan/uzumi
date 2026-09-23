@@ -37,4 +37,7 @@ interface ConversionEngine {
      * 区切りか表記を合わせられなければ確定せずに取り消し、falseを返す。
      */
     fun learnSegments(sessionId: Long, segments: List<LearnedSegment>): Boolean
+
+    /** エンジンが確定から学習した内容（文節履歴と予測の履歴）をすべて消す。 */
+    fun clearLearning(): Boolean
 }

@@ -31,6 +31,8 @@ data class ConversionCandidate(
     val reading: String,
     // ユーザー辞書の登録語か。エンジンの候補ではないため、確定してもエンジンへ学習を通知しない。
     val fromUserDictionary: Boolean = false,
+    // IME側の学習語だけから作った候補なら、その学習語の読み。エンジンの候補ではないため、確定時はエンジンへ送らない。
+    val learnedReading: String? = null,
 )
 
 /**
