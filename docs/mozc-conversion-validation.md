@@ -7,13 +7,13 @@
 | 役割 | 実装 | 要点 |
 | --- | --- | --- |
 | JNI | `com.google.android.apps.inputmethod.libs.mozc.session.MozcJni` | 公式`mozcjni.cc`の登録先に合わせたclass名と`initialize()`、`onPostLoad(profilePath, dataPath)`、`evalCommand(byte[])`、`getDataVersion()`だけを持つ。 |
-| 命令列 | `MozcConversionEngine` | 変換ごとに`REVERT`→読みの各文字を`KeyEvent.key_string`（`AS_IS`）で送る→`SPACE`で変換し、preeditの文節とfocus中文節の`all_candidate_words`を取り出す。確定は`SUBMIT_CANDIDATE`（先頭文節）と`SUBMIT`（全文節）。学習と履歴の停止は`SET_REQUEST`の`Request.is_incognito_mode`。 |
+| 命令列 | `MozcConversionEngine` | 変換ごとに読みの各文字を`KeyEvent.key_string`（`AS_IS`）で送り、`SPACE`で変換して、preeditの文節とfocus中文節の`all_candidate_words`を取り出す。`REVERT`は直前の応答にpreeditが残るときだけ送る。確定後の待機状態で`REVERT`を送ると、Mozcは直前の確定の学習を取り消すためである。各候補は一時的に`SELECT_CANDIDATE`で選び、preeditの先頭文節の読みを、その候補が確定する読みとして記録する。複数の文節をまとめる候補でも、確定範囲をMozcの出力に合わせるためである。確定は`SUBMIT_CANDIDATE`（先頭文節）と`SUBMIT`（全文節）。学習と履歴の停止は`SET_REQUEST`の`Request.is_incognito_mode`。 |
 | 直列worker | `ConversionWorker` | 単一threadのexecutorだけがエンジンを呼ぶ。UI threadは要求を置いて戻り、JNIを待たない。未処理の要求は最新の一件だけを変換する。`sessionEpoch`ごとにMozc sessionを作り、Editor sessionの終了時に`DELETE_SESSION`する。 |
 | 世代の照合 | `EditorSession` | 要求は`sessionEpoch`、`revision`、読み、incognitoを持つ。応答は待機中の要求と完全に一致し、文節の読みの連結が読み全体と一致する場合だけ表示へ反映する。候補のタップも表示元の要求を照合する。 |
 | 機密欄 | `InputFieldPolicy` | password等の候補抑止欄では要求を作らない。`IME_FLAG_NO_PERSONALIZED_LEARNING`では、読みを送る前に必ずincognitoを指定し、指定に失敗したら読みを送らない。学習通知もincognitoの要求では送らない。前後の文脈（`Context`）は送らない。 |
 | fallback | `ConversionWorker`、`MozcConversionEngine` | native libraryが無い、`getDataVersion()`が空または`0.0.0`（minimal engine）、または「かんじ」の候補に「漢字」が無い場合は`Unavailable`とし、変換要求を送らない。応答の失敗・不整合・2秒の時間超過では読みの表示を保ち、かな・カナ候補へ戻す。 |
 
-候補を選ぶと先頭文節を確定し、残りの読みを新しいcompositionとして続けて変換する。変換結果の表示中に次の文字を入力すると表示を確定してから新しい読みを始める。変換表示中の削除とカーソル移動は、従来どおり読みの編集として扱い、表示を読みへ戻す。
+候補を選ぶとその候補が覆う読みを確定し、残りの読みを新しいcompositionとして続けて変換する。変換結果の表示中に次の文字を入力すると表示を確定してから新しい読みを始める。変換表示中の削除とカーソル移動は、従来どおり読みの編集として扱い、表示を読みへ戻す。
 
 ## 生成物の取り込み
 
@@ -37,11 +37,11 @@ JDKはAndroid Studio同梱、Android SDK compile/target 36、Gradle 9.7.1、AGP 
 ./gradlew clean testDebugUnitTest assembleDebug lintDebug
 ```
 
-結果は成功。JVMテストは75件（既存50件、追加25件）で、失敗・error・skipは0件。追加したテストは次を守る。
+結果は成功。JVMテストは77件（既存50件、追加27件）で、失敗・error・skipは0件。追加したテストは次を守る。独立レビューの指摘（確定後の`REVERT`による学習の消去、複数文節をまとめる候補）に対応する2件を含む。
 
 - `ConversionWorkerTest`（9件）：要求の呼び出し時点ではエンジンを呼ばないこと、最新の要求だけを変換すること、incognitoの指定が読みの送信より先であること、incognitoを指定できなければ読みを送らないこと、終了したsessionEpochの要求を送らずsessionを破棄すること、学習通知を現在の非incognitoの要求だけに限ること、minimal engineと読み込み失敗の検出、文節と読みの不整合を失敗として返すこと。
-- `MozcConversionEngineTest`（7件）：native library不在、辞書不在時のminimal engine検出、data version、命令列（`REVERT`、`AS_IS`の文字入力、`SPACE`）と応答の読み取り、Mozcの失敗応答、`SET_REQUEST`によるincognito、`SUBMIT_CANDIDATE`の候補ID。
-- `EditorSessionTest`（追加9件）：一致する応答の反映と確定、読みの変更後に届いた古い応答の破棄、別sessionEpochの応答の破棄、password欄で要求を送らないこととno-learning欄のincognito、時間超過後の応答の破棄とカナへのfallback、失敗・不整合な応答で読みを保つこと、先頭文節の確定と残りの読みの変換、変換表示中の入力による確定、古い候補タップの拒否。
+- `MozcConversionEngineTest`（8件）：native library不在、辞書不在時のminimal engine検出、data version、命令列（`AS_IS`の文字入力、`SPACE`、候補ごとの`SELECT_CANDIDATE`と選択の復元）と応答の読み取り、`REVERT`をpreeditが残るときだけ送り確定後の次の変換では送らないこと、Mozcの失敗応答、`SET_REQUEST`によるincognito、`SUBMIT_CANDIDATE`の候補ID。
+- `EditorSessionTest`（追加10件）：複数文節をまとめる候補を選んでも読みが重複しないこと、一致する応答の反映と確定、読みの変更後に届いた古い応答の破棄、別sessionEpochの応答の破棄、password欄で要求を送らないこととno-learning欄のincognito、時間超過後の応答の破棄とカナへのfallback、失敗・不整合な応答で読みを保つこと、先頭文節の確定と残りの読みの変換、変換表示中の入力による確定、古い候補タップの拒否。
 
 lintはerror 0件。警告4件は、既存のcompile/target 36指定に関する2件と、protobufの新しい版（4.36.2）があるという2件である。後者はMozcのprotobuf 34.1に合わせた意図的な固定。
 
@@ -49,7 +49,7 @@ lintはerror 0件。警告4件は、既存のcompile/target 36指定に関する
 
 ## APK
 
-最終commitから生成物を指定して作ったdebug APKは34,110,290 bytes、SHA-256は`4ab9e588d9c0de5837021d80841c96d8a124fc2da0b420b6a1ece2b85c7ceba5`。内訳は`lib/arm64-v8a/libmozc.so`が16,182,000 bytes（無圧縮）、`assets/mozc/mozc.data`が18,994,682 bytes（APK内の圧縮後13,472,787 bytes）。前回のPixel試験版（2,688,373 bytes）より約31.4 MB増えた。端末では展開した辞書が別に約19 MBを使う。`third_party/mozc/NOTICE.txt`はこのbranchに無いため、このAPKには第三者表示が入っていない。
+レビュー指摘の修正後の作業ツリーから生成物を指定して作ったdebug APKは34,110,290 bytes、SHA-256は`6e7c91d6eb68e0475bfbed59b1427614ead8618473e2d65ac5bcb1d282e0f3f9`（修正前のcommit `82ded63`時点は`4ab9e588d9c0de5837021d80841c96d8a124fc2da0b420b6a1ece2b85c7ceba5`）。内訳は`lib/arm64-v8a/libmozc.so`が16,182,000 bytes（無圧縮）、`assets/mozc/mozc.data`が18,994,682 bytes（APK内の圧縮後13,472,787 bytes）。前回のPixel試験版（2,688,373 bytes）より約31.4 MB増えた。端末では展開した辞書が別に約19 MBを使う。`third_party/mozc/NOTICE.txt`はこのbranchに無いため、このAPKには第三者表示が入っていない。
 
 `apksigner verify`は成功。`aapt dump permissions`はpackage名だけを返し、merged manifestに`uses-permission`と`INTERNET`は無い。
 
@@ -70,8 +70,17 @@ Pixel 10 Pro（Android 17/API 37）。開始時の既定IMEは`com.adamrocker.an
 | 辞書を外したAPK | `-Puzumi.mozcIncludeData=false` | 起動時の表示「辞書なし：かな・カナ候補のみ」、入力中は「辞書なし」とかな・カナ候補、変換キーで「カンジ」。展開済みの古い辞書は削除された。 |
 | 破損した辞書 | 先頭1,000,000 bytesだけの`mozc.data` | 同じく「辞書なし」となり、processは終了しなかった。 |
 | 生成物なしのAPK | `-Puzumi.mozcArtifactsDir=` | 「辞書なし」とかな・カナ候補で動いた。 |
+| 同じ欄での2回の確定と学習 | 学習履歴を消して開始し、「かんじ」→3番目の「幹事」、「てんき」→2番目の「転機」を確定する。ホームへ移ってから戻り、新しいsessionで同じ読みを変換する | 修正前のAPKでは「かんじ」の先頭は「感じ」のままで、「てんき」だけ「転機」が先頭になった（1回目の学習が消えた）。`REVERT`を修正したAPKでは「幹事」「転機」がともに先頭になった。 |
+| 複数文節の読み | 「きょうはいいてんき」→変換、候補行を送って全候補を確認 | 先頭文節の候補31件はすべて「きょうは」の候補で、複数の文節をまとめる候補は出なかった。この場合の確定範囲はJVMテストだけで確認した。 |
 
-試用画面で「漢字今日は良い天気」を確定して約10分操作しなかった後、削除キーを一度tapすると本文全体が消えた。processの再起動、Activityの作り直し、クラッシュの記録は無かった。同じ手順を操作直後に2回、約7分の放置後に1回繰り返すと、いずれも一文字だけ消えたため再現していない。原因は`不明`。削除キーには400 ms後に60 ms間隔で繰り返す長押し処理があり、指を離す入力が遅れて長押しと判定された可能性があるが、推測である。
+試用画面で「漢字今日は良い天気」を確定し、約4.5分（19:34:36〜19:39:08頃）操作しなかった後、削除キーを`adb shell input tap`で一度押すと本文9文字がすべて消えた。当初は約10分と記録したが、dumpファイルの時刻から約4.5分に訂正する。調査の結果は次のとおり。
+
+- 1回の`deleteBackward`で複数文字を消す経路は無い。確定済み文字の削除は直前の1書記素だけを`deleteSurroundingText`で消す。範囲選択を`commitText("")`で消す経路は、Editorから範囲選択が通知された場合だけ通る。削除キーのDOWN処理は変換workerを呼ばないため、worker応答の遅延は関係しない。
+- 削除キーは、DOWNで1文字消した後、400 ms後から60 msごとに消し続ける（`KeyView.kt`の`repeatRunnable`、PR #2から変わっていない）。止める契機はUP、CANCEL、キー外への移動、detachだけで、回数の上限は無い。DOWNとUPを別々に送ると、押下時間に応じて削除が続いた（`input motionevent`の起動時間を含めて、指定0.3秒で2文字、0.7秒で7文字）。9文字が消えるには約0.9秒の押下が必要になる。
+- events logには、当時のフォーカス変更、IMEの再接続、processの再起動、Activityの作り直し、クラッシュは無かった。LINEのheads-up通知は削除の約4秒後だった。当時のmain logは再現試験の前に消去したため、IME内部の証拠は残っていない。
+- 同じ手順を操作直後に2回、約7分と約4.5分の放置後に各1回繰り返したが、いずれも1文字だけ消え、tapにかかった時間は0.14秒だった。再現していない。
+
+原因は確定していない。最も可能性が高いのは、UPの到着が約0.9秒遅れて長押しの連続削除に入ったことである（推測）。`input tap`は押す操作の処理完了を待ってから離す操作を送るため、端末側の一時的な遅れがあると、押下時間が伸びる。修正方針の案は、連続削除の開始にDOWNからの経過をMotionEventの時刻で確かめること、確定済み文字の連続削除に上限や減速を設けること、実機試験の操作を押下時間の固定されたDOWNとUPで送ることである。
 
 試験の途中で、次の二点がIMEの外で起きた。どちらも架空の文だけである。
 
@@ -88,4 +97,6 @@ Pixel 10 Pro（Android 17/API 37）。開始時の既定IMEは`com.adamrocker.an
 - Compose TextField、WebView、回転、プロセス再作成、低メモリ、長文での変換時間とメモリ使用量。
 - 数字・英字・記号を含む読みの変換。Mozcが読みを正規化して文節の読みが元の読みと一致しない場合は、応答を適用せずかな・カナ候補へ戻る。
 - `IME_FLAG_NO_PERSONALIZED_LEARNING`の欄での実機確認（JVMテストだけ）。
+- 候補ごとの`SELECT_CANDIDATE`による変換時間の増加。候補31件の変換は2秒の時間超過に達せず表示されたが、時間は計測していない。
+- 実機で複数の文節をまとめる候補が出る読みと、その確定。
 - 変換表示中に削除すると、変換前の読みではなく読みの末尾を消す。一般的なIMEの「変換を取り消す」動作と異なる。
