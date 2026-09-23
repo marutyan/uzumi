@@ -1,0 +1,52 @@
+package dev.uzumi.ime.evaluation
+
+/**
+ * 編集セッションの変換の進み具合。自動測定の道具が「変換結果が届き終えたか」を確かめるためだけに使う。
+ * revisionと真偽だけを持ち、本文・読み・候補の文字列は持たない。
+ */
+data class ConversionProgress(
+    /** 現在のrevision。ライブ変換ではコアの、明示変換では編集セッションのrevision。 */
+    val revision: Long = -1,
+    /** 明示変換で、応答を待っている変換要求があるか。 */
+    val conversionPending: Boolean = false,
+    /** 最後に送ったライブ変換の要求のrevision。送っていなければ-1。 */
+    val liveRequestedRevision: Long = -1,
+    /** 最後に受けたライブ変換の結果（適用したものと、古いため捨てたものの両方）の要求時のrevision。無ければ-1。 */
+    val liveResultRevision: Long = -1,
+    /**
+     * 候補の取り直しを依頼し、まだ結果を受けていないか。エンジンが結果を返さない依頼（英数字だけの読みなど）では、
+     * 次の依頼か結果まで真のまま残るため、待ち合わせには変換の直列threadの未処理数を使う。
+     */
+    val candidatesOutstanding: Boolean = false,
+)
+
+/**
+ * IMEの状態の要約。debugビルドの受信口が`EVAL_STATUS`で返す。数値と真偽だけを持ち、本文を持たない。
+ * 自動測定の道具は、固定の待ち時間の代わりにこれを短い間隔で読み、処理が終わるまで待つ。
+ */
+data class ImeEvaluationStatus(
+    /** 入力を受け付ける編集セッションがあるか。 */
+    val inputActive: Boolean,
+    /** 入力先の欄を開いたアプリがUzumi自身か。 */
+    val editorInOwnApp: Boolean,
+    /** 入力先の欄のview id（EditorInfo.fieldId）。受信口が試験欄のidと比べる。 */
+    val editorFieldId: Int,
+    /** ライブ変換で動いているか。 */
+    val live: Boolean,
+    /** 未確定の表示（composition）があるか。 */
+    val composing: Boolean,
+    /** 変換の直列threadへ積んだ仕事のうち、まだ終わっていない数。 */
+    val workerTasks: Int,
+    /** 編集セッションの変換の進み具合。セッションが無ければ既定値。 */
+    val progress: ConversionProgress,
+)
+
+/**
+ * IMEの状態を返す関数の置き場。IMEが起動中だけ登録し、debugビルドの受信口が`EVAL_STATUS`で呼ぶ。
+ * 計数器（本文を持たないことをテストで固定している）とは分けて置く。releaseビルドには受信口が無いため呼ばれない。
+ * UIスレッドから読み書きする。
+ */
+object EvaluationStatusSource {
+    /** 登録中のIMEの状態を返す関数。IMEが起動していなければnull。 */
+    var provider: (() -> ImeEvaluationStatus)? = null
+}

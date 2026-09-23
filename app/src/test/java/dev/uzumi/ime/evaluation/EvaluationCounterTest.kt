@@ -81,6 +81,21 @@ class EvaluationCounterTest {
         assertNull(counter.finish())
     }
 
+    /** 受け取った押下の数は、評価モードの間だけキー操作数と終端操作数の和を返し、それ以外は-1を返す。 */
+    @Test
+    fun recordedPressesCountKeysAndTerminatorsWhileRecording() {
+        val counter = EvaluationCounter()
+        assertEquals(-1, counter.recordedPresses)
+        assertTrue(counter.start("N05"))
+        assertEquals(0, counter.recordedPresses)
+        counter.record(OperationKind.INPUT)
+        counter.record(OperationKind.OTHER)
+        counter.record(OperationKind.TERMINATOR)
+        assertEquals(3, counter.recordedPresses)
+        counter.finish()
+        assertEquals(-1, counter.recordedPresses)
+    }
+
     /** 課題IDの欄へ本文を入れられない。文や長い文字列、区切り文字を含むIDでは始めない。 */
     @Test
     fun rejectsTaskIdsThatCouldCarryText() {
@@ -253,6 +268,12 @@ class EvaluationCounterTest {
             ),
             counterFields,
         )
+
+        // 状態の確認口へ返す要約も、数値と真偽だけ（本文・読み・候補の文字列を持たない）
+        val statusFields = fields(ImeEvaluationStatus::class.java).filterNot { it.type == ConversionProgress::class.java } +
+            fields(ConversionProgress::class.java)
+        assertTrue(statusFields.isNotEmpty())
+        assertTrue(statusFields.all { it.type in setOf(Int::class.javaPrimitiveType, Long::class.javaPrimitiveType, Boolean::class.javaPrimitiveType) })
     }
 
     /** 読み範囲[start, end)・表記・状態を指定した試験用の文節。読みの中身は計数に使わない。 */

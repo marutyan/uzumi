@@ -24,7 +24,10 @@ import dev.uzumi.ime.dictionary.UserDictionaries
 import dev.uzumi.ime.editor.AndroidInputConnectionPort
 import dev.uzumi.ime.editor.EditorSession
 import dev.uzumi.ime.editor.InputFieldPolicy
+import dev.uzumi.ime.evaluation.ConversionProgress
 import dev.uzumi.ime.evaluation.EvaluationCounter
+import dev.uzumi.ime.evaluation.EvaluationStatusSource
+import dev.uzumi.ime.evaluation.ImeEvaluationStatus
 import dev.uzumi.ime.evaluation.OperationClassifier
 import dev.uzumi.ime.evaluation.OperationKind
 import dev.uzumi.ime.keyboard.CandidateBarViews
@@ -37,8 +40,11 @@ import dev.uzumi.ime.live.CandidateResult
 import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.LiveConversionCore
+import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Androidの入力接続、編集セッション、キーボード表示を一つの寿命へ結び付ける。
@@ -65,6 +71,11 @@ class UzumiInputMethodService : InputMethodService() {
     private var lastSessionEpoch = 0L
     // Phase 2cの評価用計数。debugビルドの受信口で開始したときだけ数え、既定では何もしない。
     private val evaluation = EvaluationCounter.shared
+    // 変換の直列threadへ積んで、まだ終わっていない仕事の数。評価用の状態の確認口が、処理の終わりを確かめるために読む。
+    private val conversionTasksInFlight = AtomicInteger(0)
+    // 入力先の欄がUzumi自身の画面か、とその欄のview id。評価用の状態の確認口が、試験欄への入力かを確かめるために読む。
+    private var editorInOwnApp = false
+    private var editorFieldId = View.NO_ID
 
     /** 変換エンジンを専用の直列threadで読み込み始める。キー入力はこの完了を待たない。 */
     override fun onCreate() {
@@ -73,13 +84,29 @@ class UzumiInputMethodService : InputMethodService() {
             Thread(runnable, "uzumi-conversion")
         }
         val installer = MozcDataInstaller(this)
+        // 積んだ仕事を数えるだけの包み。仕事の順番と実行threadは元のexecutorのまま変えない。
+        val countingExecutor = Executor { task ->
+            conversionTasksInFlight.incrementAndGet()
+            try {
+                executor.execute {
+                    try {
+                        task.run()
+                    } finally {
+                        conversionTasksInFlight.decrementAndGet()
+                    }
+                }
+            } catch (error: RejectedExecutionException) {
+                conversionTasksInFlight.decrementAndGet()
+                throw error
+            }
+        }
         val worker = ConversionWorker(
             engine = MozcConversionEngine(
                 native = JniMozcNativeBridge(),
                 profileDirectory = installer::profileDirectory,
                 dataFile = installer::install,
             ),
-            executor = executor,
+            executor = countingExecutor,
             onHealthChanged = { health ->
                 mainHandler.post {
                     engineHealth = health
@@ -97,10 +124,12 @@ class UzumiInputMethodService : InputMethodService() {
         // 学習の保存ファイルを別threadで先に読む。変換threadはMozcの読込みで塞がるため、そこへは積まない
         Thread({ LearningStores.get(applicationContext) }, "uzumi-learning-preload").start()
         worker.start()
+        EvaluationStatusSource.provider = ::evaluationStatus
     }
 
     /** 保留中のUI更新を捨て、エンジン側sessionを破棄してからworkerを止める。 */
     override fun onDestroy() {
+        EvaluationStatusSource.provider = null
         closeSession()
         mainHandler.removeCallbacksAndMessages(null)
         conversionExecutor?.shutdown()
@@ -192,6 +221,8 @@ class UzumiInputMethodService : InputMethodService() {
         currentPolicy = null
         refreshCandidates()
         val info = attribute ?: return
+        editorInOwnApp = info.packageName == packageName
+        editorFieldId = info.fieldId
         val connection = currentInputConnection ?: return
         // 設定で学習を止めている場合は、欄の種類によらずMozcの学習も止める（学習の設定はLearningStoreだけが持つ）。
         // 起動直後で学習キャッシュをまだ読み終えていない欄は、UIスレッドで待たずに学習しない側へ倒す
@@ -493,6 +524,20 @@ class UzumiInputMethodService : InputMethodService() {
         live && engineHealth is EngineHealth.Ready -> getString(R.string.candidate_hint_live)
         engineHealth is EngineHealth.Ready -> getString(R.string.candidate_hint_conversion)
         else -> getString(R.string.candidate_hint_default)
+    }
+
+    /** 評価用の状態の確認口へ返す、IMEの状態の要約（数値と真偽だけ）。UIスレッドから呼ばれる。 */
+    private fun evaluationStatus(): ImeEvaluationStatus {
+        val current = session?.takeIf { it.isActive }
+        return ImeEvaluationStatus(
+            inputActive = current != null,
+            editorInOwnApp = current != null && editorInOwnApp,
+            editorFieldId = if (current != null) editorFieldId else View.NO_ID,
+            live = current?.isLiveMode == true,
+            composing = current?.hasComposition == true,
+            workerTasks = conversionTasksInFlight.get(),
+            progress = current?.conversionProgress() ?: ConversionProgress(),
+        )
     }
 
     /** 旧接続への書込みを禁止してセッション参照を破棄する。 */

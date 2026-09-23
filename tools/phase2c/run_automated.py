@@ -6,6 +6,12 @@
 必要な訂正を候補一覧との照合で行い、評価用計数と最終文の正誤を課題IDごとに残す。
 入力するのは`docs/phase2c-tasks.tsv`の架空の課題文だけで、試験画面（Phase2cTaskActivity）以外の
 窓が前面に出たら止める。最終文・候補の文字列はファイルへ書かず、正誤だけを残す。
+開発時の確認と、道具の版を変えたときの同等性の確認では、`--tasks-file`で開発用の課題（`docs/phase3a-dev-tasks.tsv`）も読める。
+
+変換結果を待つときは、固定の待ち時間ではなく、debugビルドの受信口の`EVAL_STATUS`（IMEの状態を数値と真偽だけで返す）を
+短い間隔で読み、送った押下をIMEが処理し終え、変換の仕事が残っていない状態になるまで待つ（道具の版2）。
+上限の時間を超えたら、その課題を中断として記録して止める。画面の読み取り（`uiautomator dump`）は、判断に画面が要る
+手順（課題の準備、候補を探す手順、最終文の照合）でだけ1回ずつ行う。
 
 外部の依存は使わない（macOSの既存のpython3の標準ライブラリだけ）。
 """
@@ -40,6 +46,11 @@ FIELD_BOUNDS = (0, 211, 1080, 387)
 REPO = Path(__file__).resolve().parents[2]
 TASKS_TSV = REPO / "docs" / "phase2c-tasks.tsv"
 
+# 道具の版。待ち方など、結果に影響し得る道具の手順を変えたら上げ、各結果の行に記録する（評価条件の「道具の版」）。
+# 版1：固定の待ち時間（0.8秒）と画面の読み直しで変換結果を待つ（2026-09-24の本測定）。
+# 版2：状態の確認口（EVAL_STATUS）で処理の終わりを待ち、画面の読み取りを判断に要る手順だけにする。
+TOOL_VERSION = 2
+
 # 評価条件で決めた課題の並べ替えseed。
 ORDER_SEED = 20261001
 
@@ -50,8 +61,15 @@ TAP_MS = 60
 # フリックの移動量（px）と時間（ms）。判定の閾値20dp（密度356で約45 px）を十分に超える。
 FLICK_PX = 100
 FLICK_MS = 80
-# 入力の後、ライブ変換の結果が届くまで待つ時間（秒）。
+# 候補一覧をスクロールした後、表示が止まるまで待つ時間（秒）。スクロールはIMEの処理ではなく状態の確認口で待てないため、
+# 版1と同じ固定の待ちと画面の読み直しを残す。
 SETTLE_S = 0.8
+# 状態の確認口を読む間隔（秒）。
+STATUS_POLL_S = 0.05
+# 押下と変換の処理の終わりを待つ上限（秒）。超えたら課題を中断として記録して止める（黙って先へ進まない）。
+SETTLE_TIMEOUT_S = 10.0
+# 課題の準備（欄を空にした後）で待つ上限（秒）。条件の最初の課題では辞書の読込みを待つことがあるため長めにする。
+PREPARE_TIMEOUT_S = 15.0
 # 1課題で行う訂正の手順の上限。これを超えたら訂正を諦めて終端操作へ進む。
 MAX_FIX_STEPS = 30
 
@@ -106,6 +124,10 @@ class FieldNotFocused(Abort):
     """試験画面は前面にあるが、試験欄が入力の対象になっていない状態。計数の前なら欄を押して戻せる。"""
 
 
+class SettleTimeout(Abort):
+    """上限の時間までに、送った押下と変換の処理が終わらなかった状態。課題を中断として記録して止める。"""
+
+
 def adb(*args: str, check: bool = True, timeout: float = 60) -> str:
     """adbを一回呼び、標準出力を返す。"""
     result = subprocess.run([ADB, "-s", SERIAL, *args], capture_output=True, text=True, timeout=timeout)
@@ -131,9 +153,9 @@ class Task:
     accepted: List[str]
 
 
-def load_tasks() -> List[Task]:
-    """課題文のTSVを読む。"""
-    lines = TASKS_TSV.read_text(encoding="utf-8").splitlines()
+def load_tasks(path: Path = TASKS_TSV) -> List[Task]:
+    """課題文のTSV（`phase2c-tasks.tsv`と同じ列）を読む。"""
+    lines = path.read_text(encoding="utf-8").splitlines()
     tasks = []
     for line in lines[1:]:
         cols = line.split("\t")
@@ -429,6 +451,8 @@ class Keyboard:
         # 起動直後の記号面は1ページ目（句読点と括弧）から始まる。
         self.state: State = ("KANA", 0)
         self.sent = 0
+        # 評価用計数を始めてから終えるまでの間か。この間は、送った押下の数とIMEが数えた押下の数が一致するまで待つ。
+        self.recording = False
 
     def command(self, press: Press) -> str:
         """押下1回のinput命令。"""
@@ -553,24 +577,91 @@ class TaskResult:
     # 過去訂正の課題だけ：最初の押下の直前から最後の押下の直後までの端末の時刻の差（ms）。
     # 句点の後に訂正する手順では、評価用計数の完了時間（最後の終端操作まで）が訂正を含まないため、終点を揃えて別に測る。
     aligned_elapsed_ms: int = -1
+    # 結果を作った道具の版（TOOL_VERSION）。版1の結果の行にはこの項目が無い。
+    tool_version: int = TOOL_VERSION
+    # 道具の側で測った、課題の準備から最終文の照合までの実時間（ms）。道具の速さの確認用で、評価の指標ではない。
+    wall_ms: int = -1
 
 
 # 開発時の確認用。設定すると表示と候補を標準エラーへ出す（本番の測定では設定しない）。
 DEBUG = bool(os.environ.get("P2C_DEBUG"))
 
 
-def settle_snapshot(previous: Optional[str] = None) -> Snapshot:
-    """変換結果を待ってから画面を読む。表示が変わり続けていれば、もう一度待つ。"""
+def read_status() -> Dict[str, int]:
+    """状態の確認口（EVAL_STATUS）を1回読み、`名前=値`を数値の辞書にする。値は数値と真偽（1・0）だけ。"""
+    data = broadcast("EVAL_STATUS")
+    status = {}
+    for item in data.strip().split("\t"):
+        name, _, value = item.partition("=")
+        if re.fullmatch(r"-?\d+", value):
+            status[name] = int(value)
+    return status
+
+
+def status_settled(status: Dict[str, int], expected_presses: Optional[int]) -> bool:
+    """処理が終わった状態か。試験欄へ入力していて、送った押下をすべて受け取り、変換の仕事と待ちが残っていないこと。
+
+    ライブ変換では、最後に送った要求への結果（適用したものか、古いため捨てたもの）を受けていることも見る。
+    ユーザーの操作で要求を出さずにrevisionだけが進むこと（保護された文節だけの状態など）があるため、
+    「最後に適用した結果のrevisionが現在のrevisionと一致」ではなく、送った要求と受けた結果のrevisionで比べる。
+    """
+    if status.get("ime") != 1 or status.get("input_active") != 1 or status.get("task_field") != 1:
+        return False
+    if expected_presses is not None and status.get("presses") != expected_presses:
+        return False
+    if status.get("worker_tasks") != 0 or status.get("conversion_pending") != 0:
+        return False
+    if status.get("live") == 1 and status.get("live_result_revision", -1) < status.get("live_requested_revision", -1):
+        return False
+    return True
+
+
+def wait_settled(expected_presses: Optional[int], timeout: float = SETTLE_TIMEOUT_S,
+                 require_empty: bool = False) -> Dict[str, int]:
+    """押下と変換の処理が終わるまで、状態の確認口を短い間隔で読んで待つ。
+
+    変換の結果はIMEのUIスレッドへ後から届けられるため、処理が終わった状態を2回続けて同じ値で読めたときに終わりとする
+    （1回目の読み取りの時点で積まれていた結果は、2回目の読み取りより先にUIスレッドで処理される）。
+    [expected_presses]は計数中に送った押下の数で、IMEが数えた押下（キー操作数と終端操作数の和）と一致するまで待つ。
+    多ければ二重入力の疑いとしてすぐ止める。入力先が試験欄でなければすぐ止める。上限を超えたら[SettleTimeout]。
+    """
+    deadline = time.monotonic() + timeout
+    previous: Optional[Dict[str, int]] = None
+    while True:
+        status = read_status()
+        if status.get("input_active") == 1 and status.get("task_field") != 1:
+            raise Abort("input is not directed to the task field")
+        if expected_presses is not None and status.get("presses", -1) > expected_presses:
+            raise Abort("IME received more presses than sent")
+        settled = status_settled(status, expected_presses) and not (require_empty and status.get("composing") != 0)
+        if settled and status == previous:
+            return status
+        previous = status if settled else None
+        if time.monotonic() > deadline:
+            summary = ",".join(f"{k}={v}" for k, v in sorted(status.items()))
+            raise SettleTimeout(f"not settled within {timeout:.0f}s ({summary})")
+        time.sleep(STATUS_POLL_S)
+
+
+def settle_snapshot(kb: "Keyboard") -> Snapshot:
+    """押下と変換の処理が終わるまで状態の確認口で待ってから、画面を1回読む。"""
+    wait_settled(kb.sent if kb.recording else None)
+    snap = dump()
+    if DEBUG:
+        log(f"display={snap.field_text!r} cands={[c for c, _ in snap.candidates]} grid={[g for g, _ in snap.grid]} chips={snap.chips} buttons={list(snap.buttons)}")
+    return snap
+
+
+def stable_snapshot() -> Snapshot:
+    """候補一覧のスクロールの後に使う。一定時間待って画面を読み、表示が止まるまで読み直す（版1の待ち方）。"""
     time.sleep(SETTLE_S)
     snap = dump()
     for _ in range(3):
         again = dump()
-        if again.field_text == snap.field_text and [c for c, _ in again.candidates] == [c for c, _ in snap.candidates]:
-            break
+        if again.grid == snap.grid and again.field_text == snap.field_text:
+            return again
         snap = again
-    if DEBUG:
-        log(f"display={again.field_text!r} cands={[c for c, _ in again.candidates]} grid={[g for g, _ in again.grid]} chips={again.chips} buttons={list(again.buttons)}")
-    return again
+    return snap
 
 
 def remaining_targets(targets: List[str], committed: str) -> List[str]:
@@ -589,7 +680,7 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all:
     """
     committed = ""
     converted = False
-    snap = settle_snapshot()
+    snap = settle_snapshot(kb)
     for _ in range(MAX_FIX_STEPS):
         display = snap.field_text[len(committed):] if snap.field_text.startswith(committed) else None
         rest = remaining_targets(targets, committed)
@@ -605,7 +696,7 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all:
             kb.send([Press("KANA", "変換")])
             steps.append("convert")
             converted = True
-            snap = settle_snapshot()
+            snap = settle_snapshot(kb)
             continue
         choice = pick_prefix([c for c, _ in snap.candidates], rest)
         source = snap.candidates
@@ -621,7 +712,7 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all:
         kb.tap(source[index][1])
         steps.append(f"pick{index}")
         committed += value
-        snap = settle_snapshot()
+        snap = settle_snapshot(kb)
     steps.append("step-limit")
     return snap
 
@@ -647,7 +738,7 @@ def search_grid(kb: "Keyboard", snap: Snapshot, choose, steps: List[str]):
     """
     kb.tap(snap.buttons[GRID_BUTTON])
     steps.append("open-grid")
-    snap = settle_snapshot()
+    snap = settle_snapshot(kb)
     seen = set()
     for scrolls in range(GRID_MAX_SCROLLS + 1):
         values = [g for g, _ in snap.grid]
@@ -665,10 +756,10 @@ def search_grid(kb: "Keyboard", snap: Snapshot, choose, steps: List[str]):
             break
         shell(f"input swipe 540 {GRID_SCROLL_FROM_Y} 540 {GRID_SCROLL_TO_Y} {GRID_SCROLL_MS}")
         steps.append("scroll")
-        snap = settle_snapshot()
+        snap = stable_snapshot()
     kb.tap(snap.buttons[GRID_BUTTON])
     steps.append("close-grid")
-    return settle_snapshot(), [], None
+    return settle_snapshot(kb), [], None
 
 
 def pick_prefix(values: List[str], rest: List[str]) -> Optional[Tuple[int, str]]:
@@ -688,7 +779,7 @@ def fix_live(kb: Keyboard, targets: List[str], steps: List[str], base: int = 0) 
     選んだ後に表示の右側が変わった場合は「末尾」で入力位置へ戻り、末尾から照合し直す。
     [base]は試験欄のうち確定済みの先頭の文字数で、compositionはその後ろから始まる（過去訂正の打ち直し用）。
     """
-    snap = settle_snapshot()
+    snap = settle_snapshot(kb)
     end = len(snap.field_text)
     for _ in range(MAX_FIX_STEPS):
         display = snap.field_text
@@ -718,7 +809,7 @@ def fix_live(kb: Keyboard, targets: List[str], steps: List[str], base: int = 0) 
             move_left(kb)
             steps.append("left")
             end = start
-            snap = settle_snapshot()
+            snap = settle_snapshot(kb)
             continue
         choice = pick_suffix(values, current, aligned)
         source = snap.candidates
@@ -735,7 +826,7 @@ def fix_live(kb: Keyboard, targets: List[str], steps: List[str], base: int = 0) 
         kb.tap(source[index][1])
         steps.append(f"pick{index}")
         before_suffix = suffix
-        snap = settle_snapshot()
+        snap = settle_snapshot(kb)
         new_display = snap.field_text
         if new_display in targets:
             return snap
@@ -748,12 +839,12 @@ def fix_live(kb: Keyboard, targets: List[str], steps: List[str], base: int = 0) 
             move_left(kb)
             steps.append("left")
             end = start
-            snap = settle_snapshot()
+            snap = settle_snapshot(kb)
             continue
         if "入力位置へ戻る" in snap.buttons:
             kb.tap(snap.buttons["入力位置へ戻る"])
             steps.append("return")
-            snap = settle_snapshot()
+            snap = settle_snapshot(kb)
         end = len(snap.field_text)
     steps.append("step-limit")
     return snap
@@ -779,9 +870,8 @@ def pick_suffix(values: List[str], current: str, aligned: List[str]) -> Optional
 def prepare_task(kb: Keyboard, task_id: str) -> Snapshot:
     """試験欄を空にして課題IDを表示し、かなの面へ戻す（計数の開始前なので数えない）。"""
     shell(f"am start -n {TASK_ACTIVITY} --es task {task_id}")
-    time.sleep(1.0)
     try:
-        snap = dump()
+        snap = prepared_snapshot()
     except FieldNotFocused as error:
         # 試験画面は前面にあるが欄の選択が外れている。計数を始める前なので、試験欄を一度押して選び直す（数えない）。
         log(f"refocus before {task_id}: {error}")
@@ -789,24 +879,40 @@ def prepare_task(kb: Keyboard, task_id: str) -> Snapshot:
         shell(f"input swipe {x} {y} {x} {y} {TAP_MS}")
         time.sleep(1.0)
         shell(f"am start -n {TASK_ACTIVITY} --es task {task_id}")
-        time.sleep(1.0)
-        snap = dump()
+        snap = prepared_snapshot()
     except Abort as error:
         # 計数を始める前で、まだ何も入力していない。画面の切替の途中だった場合に備えて一度だけ待って読み直す。
         log(f"retry before {task_id}: {error}")
         time.sleep(3.0)
-        snap = dump()
-    if snap.field_text != "":
-        raise Abort("field is not empty before the task")
+        snap = prepared_snapshot()
     kb.sync(snap)
     if kb.state[0] != "KANA":
         kb.send(plan_switch(kb.state, "KANA"))
-        time.sleep(0.3)
-        snap = dump()
+        snap = settle_snapshot(kb)
         kb.sync(snap)
     if kb.state[0] != "KANA":
         raise Abort("cannot return to the kana keyboard")
     return snap
+
+
+def prepared_snapshot() -> Snapshot:
+    """課題の準備で、試験欄が空になりIMEの処理が終わるまで待ってから画面を読む（計数の前なので何も数えない）。
+
+    `am start`は画面が欄を空にする前に戻ることがあるため、空でなければ短く待って2回まで読み直してから止める。
+    """
+    for attempt in range(3):
+        try:
+            wait_settled(None, timeout=PREPARE_TIMEOUT_S, require_empty=True)
+        except SettleTimeout:
+            # 試験欄が入力の対象になっていない場合は、画面を読むとFieldNotFocusedになり、呼び出し側が欄を選び直す。
+            dump()
+            raise
+        snap = dump()
+        if snap.field_text == "":
+            return snap
+        log("field is not empty yet; re-read")
+        time.sleep(0.3)
+    raise Abort("field is not empty before the task")
 
 
 def device_ms() -> int:
@@ -875,7 +981,7 @@ def run_past_correction(kb: Keyboard, task: Task, condition: str, steps: List[st
     if condition == "O":
         snap = fix_explicit(kb, task.accepted, steps, commit_all=True)
         return snap, device_ms() - first_ms
-    snap = settle_snapshot()
+    snap = settle_snapshot(kb)
     committed = snap.field_text
     if committed in task.accepted:
         return snap, device_ms() - first_ms
@@ -892,7 +998,7 @@ def run_past_correction(kb: Keyboard, task: Task, condition: str, steps: List[st
     kb.send(plan_switch(kb.state, "KANA"))
     kb.send([Press("KANA", "削除")] * (len(committed) - keep))
     steps.append(f"delete{len(committed) - keep}")
-    snap = settle_snapshot()
+    snap = settle_snapshot(kb)
     if snap.field_text != committed[:keep]:
         steps.append("delete-mismatch")
         return snap, device_ms() - first_ms
@@ -918,6 +1024,7 @@ def run_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
     steps: List[str] = []
     broadcast("EVAL_START", task.task_id)
     kb.sent = 0
+    kb.recording = True
     try:
         kb.send(presses)
         # 終端操作の前の表示と照合する目標。句点で終える課題は、許容表記から末尾の句点を除いたもの。
@@ -931,14 +1038,15 @@ def run_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
             kb.send([Press("KANA", "読点", "L")])
         else:
             kb.send([Press(kb.state[0], "改行")])
-        time.sleep(SETTLE_S)
-        final = dump()
+        final = settle_snapshot(kb)
     except Abort:
+        kb.recording = False
         try:
             broadcast("EVAL_FINISH")
         except Exception:
             pass
         raise
+    kb.recording = False
     row = broadcast("EVAL_FINISH").strip()
     values = row.split("\t")
     counts = {name: int(v) if re.fullmatch(r"-?\d+", v) else v for name, v in zip(COUNT_COLUMNS, values)}
@@ -955,16 +1063,18 @@ def run_past_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
     steps: List[str] = []
     broadcast("EVAL_START", task.task_id)
     kb.sent = 0
+    kb.recording = True
     try:
         _, aligned = run_past_correction(kb, task, condition, steps)
-        time.sleep(SETTLE_S)
-        final = dump()
+        final = settle_snapshot(kb)
     except Abort:
+        kb.recording = False
         try:
             broadcast("EVAL_FINISH")
         except Exception:
             pass
         raise
+    kb.recording = False
     values = broadcast("EVAL_FINISH").strip().split("\t")
     counts = {name: int(v) if re.fullmatch(r"-?\d+", v) else v for name, v in zip(COUNT_COLUMNS, values)}
     correct = matches(final.field_text, task.accepted)
@@ -1054,6 +1164,8 @@ def main() -> int:
     parser.add_argument("command", choices=["probe", "run", "order"])
     parser.add_argument("--condition", choices=["O", "N"])
     parser.add_argument("--tasks", help="課題IDをカンマ区切りで指定（開発の確認用）")
+    parser.add_argument("--tasks-file", default=str(TASKS_TSV),
+                        help="課題文のTSV。既定はphase2c-tasks.tsv。同等性の確認では開発用のphase3a-dev-tasks.tsvを渡す")
     parser.add_argument("--work", required=False, default=str(REPO / ".local-build" / "phase2c" / time.strftime("%Y-%m-%d")))
     parser.add_argument("--out", help="結果を書くjsonlのファイル名（既定はresults-<条件>.jsonl）")
     parser.add_argument("--resume-from", help="中断した条件を、この課題IDから続ける")
@@ -1061,7 +1173,8 @@ def main() -> int:
     args = parser.parse_args()
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
-    tasks = load_tasks()
+    tasks_file = Path(args.tasks_file)
+    tasks = load_tasks(tasks_file)
     if args.command == "order":
         for task in automated_order(tasks):
             print(task.task_id)
@@ -1075,7 +1188,13 @@ def main() -> int:
     layouts = json.loads((work / "layouts.json").read_text(encoding="utf-8"))
     layouts = {k: {d: tuple(b) for d, b in v.items()} for k, v in layouts.items()}
     by_id = {t.task_id: t for t in tasks}
-    selected = [by_id[i] for i in args.tasks.split(",")] if args.tasks else automated_order(tasks)
+    if args.tasks:
+        selected = [by_id[i] for i in args.tasks.split(",")]
+    elif tasks_file.resolve() == TASKS_TSV.resolve():
+        selected = automated_order(tasks)
+    else:
+        # 開発用の課題はリストA・B・Cに分かれていないため、ファイルの順に流す。
+        selected = tasks
     if args.resume_from:
         # 中断した条件を、学習と計数の記録を消さずに、中断した課題から同じ順番で続ける。
         ids = [t.task_id for t in selected]
@@ -1088,18 +1207,20 @@ def main() -> int:
         (work / f"counts-before-{args.condition}.tsv").write_text(previous, encoding="utf-8")
         broadcast("EVAL_CLEAR")
         (work / f"order-{args.condition}.txt").write_text(
-            f"seed={ORDER_SEED}\n" + "\n".join(t.task_id for t in selected) + "\n", encoding="utf-8")
+            f"seed={ORDER_SEED}\ntool_version={TOOL_VERSION}\n" + "\n".join(t.task_id for t in selected) + "\n", encoding="utf-8")
     kb = Keyboard(layouts)
     out_path = work / (args.out or f"results-{args.condition}.jsonl")
     with out_path.open("a", encoding="utf-8") as out:
         for task in selected:
+            begin = time.monotonic()
             try:
                 result = run_task(kb, task, args.condition)
             except Abort as error:
                 log(f"ABORT at {task.task_id}: {error}")
                 out.write(json.dumps({"condition": args.condition, "task_id": task.task_id, "status": "abort",
-                                      "note": str(error)}, ensure_ascii=False) + "\n")
+                                      "note": str(error), "tool_version": TOOL_VERSION}, ensure_ascii=False) + "\n")
                 return 2
+            result.wall_ms = int((time.monotonic() - begin) * 1000)
             out.write(json.dumps(result.__dict__, ensure_ascii=False) + "\n")
             out.flush()
     return 0
