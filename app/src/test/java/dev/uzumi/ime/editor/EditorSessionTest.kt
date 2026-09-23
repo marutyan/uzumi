@@ -865,6 +865,18 @@ class EditorSessionTest {
         assertEquals("明日は駅前\n雨", connection.text)
     }
 
+    /** 空の欄では消す対象が0文字で、左ドラッグで離しても何も起きない（案内も出さない）。 */
+    @Test
+    fun deleteToLineStartInEmptyFieldReportsZeroAndDoesNothing() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy(), initialSelectionStart = 0, initialSelectionEnd = 0)
+        assertEquals(0, session.lineDeleteLength())
+
+        assertFalse(session.deleteToLineStart())
+        assertEquals("", connection.text)
+        assertFalse(session.canUndoLineDelete)
+    }
+
     /** 機密欄では消した文字列を覚えず、元に戻す入口を出さない。 */
     @Test
     fun deleteToLineStartKeepsNothingInSensitiveField() {

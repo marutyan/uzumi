@@ -278,6 +278,8 @@ class KeyboardLayoutDataTest {
         }
         assertEquals("× 行頭まで 12文字", deleteDragHintText(DeleteDragState.ARMED, 12))
         assertEquals("× 行頭まで", deleteDragHintText(DeleteDragState.ARMED, null))
+        // 消す文字が無い（空の欄など）ときは案内を出さない
+        assertEquals("", deleteDragHintText(DeleteDragState.ARMED, 0))
     }
 
     @Test

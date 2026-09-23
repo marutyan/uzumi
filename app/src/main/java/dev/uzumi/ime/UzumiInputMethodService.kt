@@ -141,6 +141,9 @@ class UzumiInputMethodService : InputMethodService() {
         bar.addView(leading, LinearLayout.LayoutParams(wrap, match))
         bar.addView(HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
+            // 右端で切れた候補が固定ボタンの下へ潜って見えないよう、端をぼかして横へ続くことを示す
+            isHorizontalFadingEdgeEnabled = true
+            setFadingEdgeLength((CANDIDATE_FADE_DP * density).toInt())
             addView(candidates, FrameLayout.LayoutParams(wrap, match))
         }, LinearLayout.LayoutParams(0, match, 1f))
         bar.addView(trailing, LinearLayout.LayoutParams(wrap, match))
@@ -365,7 +368,8 @@ class UzumiInputMethodService : InputMethodService() {
         entries.forEachIndexed { index, entry ->
             row.addView(views.item(entry.label, entry.selected) { pickCandidate(current, entry, index) })
         }
-        trailing.addView(views.divider())
+        // 縦線は右端の固定ボタン（末尾・∨）すべての手前に置き、候補の列がそこで終わることを示す
+        trailing.addView(views.divider(), 0)
         trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
             evaluation.record(OperationKind.OTHER)
             if (grid?.isShowing == true) grid.hide() else showCandidateGrid(current, entries)
@@ -482,6 +486,9 @@ class UzumiInputMethodService : InputMethodService() {
     private companion object {
         /** 変換応答を待つ上限。超えたら読みとかな・カナ候補へ戻す。 */
         const val CONVERSION_TIMEOUT_MILLIS = 2_000L
+
+        /** 候補の列の左右の端をぼかす幅（dp）。候補が横へ続くことを示す。 */
+        const val CANDIDATE_FADE_DP = 24f
 
         /** 訂正中のsegmentの背景色（半透明の青）。下線だけのsegmentと区別できる濃さにする。 */
         const val FOCUSED_SEGMENT_COLOR = 0x553F7FFF
