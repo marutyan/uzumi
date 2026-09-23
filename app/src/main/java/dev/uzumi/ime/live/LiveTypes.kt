@@ -39,6 +39,10 @@ data class LiveSegment(
     val observations: Int,
     /** 最後に観測を数えた読みrevision。同じ入力への複数の結果を二重に数えないために持つ。 */
     val lastObservedReadingVersion: Long,
+    /** 候補を、明示変換と同じ方法で変換器から取り直したか。trueなら注目しても候補を求め直さない。 */
+    val candidatesComplete: Boolean = false,
+    /** 区切りをユーザーが伸縮で決めたか。変換器はこの範囲を必ず一segmentとして返し、結果はchosenになる。 */
+    val userBounded: Boolean = false,
 ) {
     /** 未変換の入力中segmentか。新しい読みを隣へ入力したときに結合してよい対象を表す。 */
     val isRaw: Boolean
@@ -70,6 +74,15 @@ data class ProtectedRange(
 )
 
 /**
+ * ユーザーが文節の伸縮で決めた、まだ変換していない一segmentの読み範囲。
+ * 変換器は保護範囲と同じくこの両端で必ず区切り、範囲全体を一つのsegmentとして返す。
+ */
+data class FixedRange(
+    val readingStart: Int,
+    val readingEnd: Int,
+)
+
+/**
  * 変換要求が作られた時点の状態を識別する。
  * 結果を適用する前にすべての項目を現在値と照合し、一つでも違えば捨てる。
  */
@@ -90,6 +103,8 @@ data class RequestIdentity(
     val inputCursor: Int,
     /** 辞書とモデルの世代。辞書更新前の要求を区別する。 */
     val converterGeneration: Long,
+    /** 対象範囲内でユーザーが区切りを決めた範囲。変換器は各範囲を一segmentとして返さなければならない。 */
+    val fixedRanges: List<FixedRange> = emptyList(),
 )
 
 /**
@@ -112,6 +127,8 @@ data class ResultSegment(
     val reading: String,
     val surface: String,
     val candidates: List<String> = listOf(surface),
+    /** 候補を明示変換と同じ方法で取ったか。trueならコアは注目時に候補を求め直さない。 */
+    val candidatesComplete: Boolean = false,
 )
 
 /**
@@ -182,6 +199,9 @@ enum class RejectReason {
 
     /** 対象範囲内の入力カーソル位置をまたいで一つのsegmentにしている。 */
     CROSSES_CURSOR,
+
+    /** ユーザーが伸縮で決めた範囲を、一つのsegmentとして返していない。 */
+    CROSSES_FIXED,
     /** 候補を表示したときとepoch、revision、segment、候補が一致しない。 */
     STALE_CANDIDATE,
 }
@@ -195,6 +215,8 @@ data class LiveUpdate(
     val commands: List<EditorCommand> = emptyList(),
     /** 新しく発行した変換要求。前の要求は結果が届いても捨てられる。 */
     val request: ConversionRequest? = null,
+    /** 注目したsegmentの候補を変換器へ取り直す要求。統合担当は変換要求と同じく別スレッドで処理する。 */
+    val candidateRequest: CandidateRequest? = null,
     /** 結果や候補のタップを捨てた場合の理由。 */
     val rejection: RejectReason? = null,
 ) {
@@ -226,6 +248,34 @@ data class CandidateBar(
 )
 
 /**
+ * 注目した一つのsegmentの候補を、明示変換と同じ方法で変換器へ取り直す要求。
+ * 自動変換は速さのため候補を簡単に集めるだけなので、ユーザーが注目したsegmentだけを遅れて取り直す。
+ * 結果は表示時と同じepoch・revision・segmentに一致する場合だけ適用する。
+ */
+data class CandidateRequest(
+    val sessionEpoch: Long,
+    val revision: Long,
+    val converterGeneration: Long,
+    val segmentId: Long,
+    val readingStart: Int,
+    val readingEnd: Int,
+    /** 対象segmentの読み。 */
+    val reading: String,
+    /** 直前のsegmentの読み。変換器が文脈として一緒に変換する。句読点や先頭では空。 */
+    val preceding: String,
+    /** 直後のsegmentの読み。変換器が文脈として一緒に変換する。句読点や末尾では空。 */
+    val following: String,
+    /** falseなら変換器は学習・履歴を使わない。 */
+    val learningAllowed: Boolean,
+)
+
+/** [CandidateRequest]への結果。candidatesは対象segmentの読みだけを置き換える候補で、先頭ほど優先する。 */
+data class CandidateResult(
+    val request: CandidateRequest,
+    val candidates: List<String>,
+)
+
+/**
  * Undo/Redoの一操作の種類。自動変換はここへ入らず、起点の入力操作にまとめる。
  */
 enum class OperationKind {
@@ -235,4 +285,7 @@ enum class OperationKind {
     BOUNDARY,
     CANDIDATE,
     READING_REVERT,
+
+    /** 文節の区切りの伸縮。 */
+    SEGMENT_RESIZE,
 }

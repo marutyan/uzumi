@@ -36,11 +36,17 @@ sealed interface KeySpec {
         val longPressText: String? = null,
     ) : KeySpec
 
-    /** 各種機能アクションキー */
+    /**
+     * 各種機能アクションキー。
+     *
+     * @property longPressAction 長押しで繰り返し送る別の操作。nullなら従来どおり。指定したキーは、
+     * 押した瞬間ではなく長押しにならずに離したときに[action]を送る（変換中の←→の文節の伸縮）
+     */
     data class Action(
         val action: KeyboardAction,
         val label: String,
         val isAccent: Boolean = false,
+        val longPressAction: KeyboardAction? = null,
     ) : KeySpec
 
     /**
@@ -127,6 +133,20 @@ class KeyView(context: Context) : View(context) {
             haptic(HapticFeedbackConstants.KEYBOARD_TAP)
             repeatCount += 1
             repeatHandler.postDelayed(this, KeyRepeatPolicy.intervalAfter(repeatCount))
+        }
+    }
+
+    // 長押しの別操作（文節の伸縮）を、押し続けている間一定の間隔で繰り返す。回数はrepeatCountで数える。
+    private val longPressActionRunnable = object : Runnable {
+        override fun run() {
+            if (!isAttachedToWindow) return
+            val action = longPressAction() ?: return
+            // 同じ長押しの2回目以降は繰り返しの印を付け、評価用の計数で押下を重ねて数えないようにする。
+            val repeated = (action as? KeyboardAction.ResizeSegment)?.takeIf { repeatCount > 0 }?.copy(continued = true)
+            onAction?.invoke(repeated ?: action)
+            haptic(if (repeatCount == 0) HapticFeedbackConstants.LONG_PRESS else HapticFeedbackConstants.KEYBOARD_TAP)
+            repeatCount += 1
+            repeatHandler.postDelayed(this, KeyRepeatPolicy.LONG_PRESS_ACTION_INTERVAL_MS)
         }
     }
     private val longPressRunnable = Runnable {
@@ -292,11 +312,15 @@ class KeyView(context: Context) : View(context) {
      */
     private fun isDeleteKey(): Boolean = (spec as? KeySpec.Action)?.action == KeyboardAction.Delete
 
-    /** 押下中に連続実行するアクションキーであれば、そのアクションを返す。 */
+    /** 押下中に連続実行するアクションキーであれば、そのアクションを返す。長押しの別操作を持つキーは連続実行しない。 */
     private fun repeatableAction(): KeyboardAction? {
         val currentSpec = spec as? KeySpec.Action ?: return null
+        if (currentSpec.longPressAction != null) return null
         return currentSpec.action.takeIf(KeyRepeatPolicy::isRepeatable)
     }
+
+    /** 長押しで送る別の操作を持つアクションキーであれば、その操作を返す。 */
+    private fun longPressAction(): KeyboardAction? = (spec as? KeySpec.Action)?.longPressAction
 
     /** 長押しで別の入力を持つキーかどうかを返す。かなキーは長押しを持たず、フリックと衝突しない。 */
     private fun hasLongPress(): Boolean = when (val currentSpec = spec) {
@@ -327,7 +351,11 @@ class KeyView(context: Context) : View(context) {
                 updatePreview()
 
                 val repeatAction = repeatableAction()
-                if (isDeleteKey()) {
+                if (longPressAction() != null) {
+                    // 長押しの別操作を持つキーは、長押しになったら別操作を繰り返し、ならずに離したら本来の操作を送る。
+                    repeatCount = 0
+                    repeatHandler.postDelayed(longPressActionRunnable, KeyRepeatPolicy.INITIAL_DELAY_MS)
+                } else if (isDeleteKey()) {
                     // 削除は離したときに1文字消す。押し続けた場合は従来と同じ待ち時間の後に連続削除を始める。
                     deleteDrag.reset()
                     repeatCount = 0
@@ -375,7 +403,7 @@ class KeyView(context: Context) : View(context) {
                     val changed = deleteDrag.move(gesture.startX - curX, gesture.startY - curY)
                     if (deleteDrag.isDragging) repeatHandler.removeCallbacksAndMessages(null)
                     if (changed) onDeleteDrag?.invoke(this, deleteDrag.state)
-                } else if (repeatableAction() != null) {
+                } else if (repeatableAction() != null || longPressAction() != null) {
                     // 指がキー領域から大きく外れた場合はリピート停止
                     if (curX < -thresholdPx || curX > width + thresholdPx ||
                         curY < -thresholdPx || curY > height + thresholdPx
@@ -431,6 +459,8 @@ class KeyView(context: Context) : View(context) {
         val wasLongPressed = gesture.isLongPressActive
         val deleteRelease = deleteDrag.release()
         val deleteRepeated = repeatCount > 0
+        // 長押しの別操作を一度でも送ったか。送った場合は、離したときに本来の操作を送らない。
+        val longPressFired = repeatCount > 0
         if (deleteDrag.state != DeleteDragState.NONE) onDeleteDrag?.invoke(this, DeleteDragState.NONE)
         deleteDrag.reset()
         val startX = gesture.startX
@@ -482,6 +512,11 @@ class KeyView(context: Context) : View(context) {
                 }
                 if (action != null) {
                     onAction?.invoke(action)
+                    sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
+                }
+            } else if (finalSpec.longPressAction != null) {
+                if (isInside && !longPressFired) {
+                    onAction?.invoke(finalSpec.action)
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                 }
             } else {
@@ -593,6 +628,16 @@ class KeyView(context: Context) : View(context) {
 
             is KeySpec.Action -> if (currentSpec.action == KeyboardAction.Delete) {
                 info.addAction(AccessibilityNodeInfo.AccessibilityAction(ACTION_DELETE_TO_LINE_START, "行頭まで削除"))
+            } else {
+                // 長押しの別操作（文節の伸縮）を、TalkBackの操作メニューから一回ずつ行えるようにする
+                currentSpec.longPressAction?.let { alt ->
+                    info.addAction(
+                        AccessibilityNodeInfo.AccessibilityAction(
+                            AccessibilityNodeInfo.ACTION_LONG_CLICK,
+                            KeySpeech.actionDescription(alt),
+                        ),
+                    )
+                }
             }
 
             is KeySpec.ModeSwitch -> currentSpec.longPressTarget?.let { target ->
@@ -637,6 +682,13 @@ class KeyView(context: Context) : View(context) {
                 if (action == ACTION_DELETE_TO_LINE_START && currentSpec.action == KeyboardAction.Delete) {
                     onAction?.invoke(KeyboardAction.DeleteToLineStart)
                     haptic(HapticFeedbackConstants.KEYBOARD_TAP)
+                    sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
+                    return true
+                }
+                val alt = currentSpec.longPressAction
+                if (action == AccessibilityNodeInfo.ACTION_LONG_CLICK && alt != null) {
+                    onAction?.invoke(alt)
+                    haptic(HapticFeedbackConstants.LONG_PRESS)
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                     return true
                 }
@@ -829,6 +881,7 @@ class KeyView(context: Context) : View(context) {
         is KeySpec.Kana -> KeySpeech.kanaHint(currentSpec.type)
         is KeySpec.SimpleText -> currentSpec.longPressText?.let(KeySpeech::longPressHint)
         is KeySpec.ModeSwitch -> currentSpec.longPressTarget?.let { "長押しで" + KeySpeech.modeSwitchDescription(it) }
+        is KeySpec.Action -> currentSpec.longPressAction?.let { "長押しで" + KeySpeech.actionDescription(it) }
         else -> null
     }
 
@@ -844,19 +897,7 @@ class KeyView(context: Context) : View(context) {
 
             is KeySpec.SimpleText -> KeySpeech.spokenText(shiftedText(currentSpec))
 
-            is KeySpec.Action -> {
-                customActionLabel ?: when (currentSpec.action) {
-                    is KeyboardAction.Text -> KeySpeech.spokenText(currentSpec.action.value)
-                    is KeyboardAction.Delete -> "削除"
-                    is KeyboardAction.Enter -> "確定"
-                    is KeyboardAction.Space -> "空白"
-                    is KeyboardAction.Convert -> "変換"
-                    is KeyboardAction.TransformKana -> "濁点、半濁点、小文字"
-                    is KeyboardAction.ToKatakana -> "カタカナにする"
-                    is KeyboardAction.DeleteToLineStart -> "行頭まで削除"
-                    is KeyboardAction.MoveCursor -> if (currentSpec.action.delta < 0) "カーソルを左へ移動" else "カーソルを右へ移動"
-                }
-            }
+            is KeySpec.Action -> customActionLabel ?: KeySpeech.actionDescription(currentSpec.action)
 
             is KeySpec.ModeSwitch -> KeySpeech.modeSwitchDescription(currentSpec.targetMode)
             is KeySpec.Shift -> when {

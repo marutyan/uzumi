@@ -95,6 +95,12 @@ object KeyRepeatPolicy {
     const val ACCELERATION_STEPS = 20
 
     /**
+     * 長押しの別操作（文節の伸縮）を繰り返す間隔（ミリ秒）。一回ごとに変換し直すため、
+     * カーソル移動より遅くして一文字ずつ見て止められるようにする。
+     */
+    const val LONG_PRESS_ACTION_INTERVAL_MS = 300L
+
+    /**
      * 押下中に連続実行するアクションかどうかを返す。
      */
     fun isRepeatable(action: KeyboardAction): Boolean {

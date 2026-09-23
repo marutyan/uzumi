@@ -31,6 +31,16 @@ class EvaluationCounterTest {
         assertEquals(OperationKind.CORRECTION, kind(KeyboardAction.Delete))
         assertEquals(OperationKind.CORRECTION, kind(KeyboardAction.DeleteToLineStart))
         assertEquals(OperationKind.CORRECTION, kind(KeyboardAction.MoveCursor(-1), live = true))
+        assertEquals(OperationKind.CORRECTION, kind(KeyboardAction.ResizeSegment(-1), live = true))
+        assertEquals(OperationKind.CORRECTION, kind(KeyboardAction.ResizeSegment(1)))
+        // 1回の長押しで3書記素伸縮しても、画面に触れたのは1回なので、キー1・訂正1と数える。
+        val longPress = listOf(
+            KeyboardAction.ResizeSegment(1),
+            KeyboardAction.ResizeSegment(1, continued = true),
+            KeyboardAction.ResizeSegment(1, continued = true),
+        )
+        val counts = longPress.mapNotNull { kind(it, live = true) }.fold(OperationCounts()) { total, k -> total + k }
+        assertEquals(OperationCounts(keys = 1, corrections = 1), counts)
         assertEquals(OperationKind.CORRECTION, kind(KeyboardAction.ToKatakana))
         // 第一候補の選択だけが確定操作
         assertEquals(OperationKind.COMMIT, OperationClassifier.candidatePick(0))

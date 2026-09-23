@@ -30,8 +30,18 @@ class FakeLiveConverter(
                 position = protected.readingEnd
                 continue
             }
-            // 保護範囲の先頭と入力カーソルの位置で必ず区切るという変換器の契約を守る。
-            val chunkEnd = (identity.protectedRanges.map { it.readingStart } + identity.inputCursor)
+            // ユーザーが区切りを決めた範囲は、語彙で当てた表記を連結して一segmentにする。
+            val fixed = identity.fixedRanges.firstOrNull { it.readingStart == position }
+            if (fixed != null) {
+                val pieces = segmentGreedy(clusters.subList(fixed.readingStart, fixed.readingEnd))
+                val reading = pieces.joinToString("") { it.reading }
+                val candidates = lexicon[reading] ?: listOf(pieces.joinToString("") { it.surface })
+                result += ResultSegment(reading, candidates.first(), candidates)
+                position = fixed.readingEnd
+                continue
+            }
+            // 保護範囲の先頭、区切りを決めた範囲の先頭、入力カーソルの位置で必ず区切るという変換器の契約を守る。
+            val chunkEnd = (identity.protectedRanges.map { it.readingStart } + identity.fixedRanges.map { it.readingStart } + identity.inputCursor)
                 .filter { it > position && it < identity.targetEnd }
                 .minOrNull() ?: identity.targetEnd
             result += segmentGreedy(clusters.subList(position, chunkEnd))
@@ -163,6 +173,12 @@ class LiveSessionDriver(
         correction()
         val choice = core.candidateBar()!!.choices.first { it.value == value }
         return handle(core.selectCandidate(choice))
+    }
+
+    /** 候補バーの対象segmentの区切りを一書記素伸縮する。伸縮は訂正操作として数える。 */
+    fun resize(delta: Int): LiveUpdate {
+        correction()
+        return handle(core.resizeFocusedSegment(delta))
     }
 
     /** 候補バーの対象を末尾入力位置へ戻す。 */

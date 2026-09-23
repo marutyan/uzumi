@@ -1,8 +1,11 @@
 package dev.uzumi.ime.conversion
 
 import dev.uzumi.ime.learning.LearningStore
+import dev.uzumi.ime.live.CandidateRequest
+import dev.uzumi.ime.live.CandidateResult
 import dev.uzumi.ime.live.ConversionRequest as LiveRequest
 import dev.uzumi.ime.live.ConversionResult as LiveResult
+import dev.uzumi.ime.live.FixedRange
 import dev.uzumi.ime.live.ProtectedRange
 import dev.uzumi.ime.live.RequestIdentity
 import dev.uzumi.ime.live.ResultSegment
@@ -215,6 +218,81 @@ class ConversionWorkerTest {
 
         assertEquals(listOf("convertSegments(1,かう)"), fixture.engine.calls.filter { it.startsWith("convert") })
         assertEquals(listOf("abc", "を", "かう"), fixture.liveResults.single().second.segments.map { it.reading })
+    }
+
+    /**
+     * 候補の取り直しは最新の要求だけを処理し、incognitoを先に指定してから、前後の読みを文脈に一文節として変換する。
+     * 登録語は自動変換と同じく先頭に加え、ASCIIだけの文脈はエンジンへ送らない。
+     */
+    @Test
+    fun segmentCandidatesUseLatestRequestWithContextAndUserDictionary() {
+        val fixture = Fixture(dictionary = FakeLookup("てんき" to "テンキ"))
+        fixture.startReady()
+        fixture.engine.calls.clear()
+        fixture.engine.segmentFor = { _, reading, _ -> EngineSegment(reading, "天気", listOf("天気", "転機", "天機")) }
+
+        fixture.worker.requestSegmentCandidates(7, candidateRequest(reading = "てんい", preceding = "きょうは"))
+        fixture.worker.requestSegmentCandidates(
+            7,
+            candidateRequest(reading = "てんき", preceding = "abc", following = "が", learningAllowed = false),
+        )
+        fixture.executor.runAll()
+
+        assertEquals(listOf("createSession", "setIncognito(true)", "convertSegment(1,|てんき|が)"), fixture.engine.calls)
+        val (epoch, result) = fixture.candidateResults.single()
+        assertEquals(7L, epoch)
+        assertEquals("てんき", result.request.reading)
+        assertEquals(listOf("テンキ", "天気", "転機", "天機", "てんき"), result.candidates)
+    }
+
+    /** 区切りを決めた範囲は、エンジンの一文節の変換（convertSegment）で変換し、候補は取り直し済みとして返す。 */
+    @Test
+    fun liveConversionConvertsFixedRangeAsOneSegment() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.calls.clear()
+        fixture.engine.segmentFor = { _, reading, _ -> EngineSegment(reading, "三時に", listOf("三時に", "3時に")) }
+        val identity = RequestIdentity(1, 2, "さんじにあう", 0, 6, emptyList(), 6, 0, fixedRanges = listOf(FixedRange(0, 4)))
+
+        fixture.worker.requestLiveConversion(7, LiveRequest(identity, "さんじにあう", learningAllowed = true))
+        fixture.executor.runAll()
+
+        assertEquals(
+            listOf("convertSegment(1,|さんじに|)", "convertSegments(1,あう)"),
+            fixture.engine.calls.filter { it.startsWith("convert") },
+        )
+        val fixed = fixture.liveResults.single().second.segments.first()
+        assertEquals(ResultSegment("さんじに", "三時に", listOf("三時に", "3時に"), candidatesComplete = true), fixed)
+    }
+
+    /** 明示変換の文節の伸縮は、先頭文節の書記素数をエンジンへ渡して変換し直す。 */
+    @Test
+    fun explicitConversionPassesHeadLength() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.calls.clear()
+
+        fixture.worker.requestConversion(request(reading = "かんじ").copy(headLength = 2))
+        fixture.executor.runAll()
+
+        assertEquals(listOf("convert(1,かんじ,2)"), fixture.engine.calls.filter { it.startsWith("convert") })
+    }
+
+    /** ASCIIだけの文節と、終了した編集セッションの要求はエンジンへ送らない。 */
+    @Test
+    fun segmentCandidatesSkipAsciiAndEndedSessions() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.calls.clear()
+
+        fixture.worker.requestSegmentCandidates(7, candidateRequest(reading = "abc"))
+        fixture.executor.runAll()
+        fixture.worker.endSession(8)
+        fixture.worker.requestSegmentCandidates(8, candidateRequest(reading = "てんき"))
+        fixture.executor.runAll()
+
+        assertTrue(fixture.engine.calls.none { it.startsWith("convertSegment") })
+        assertTrue(fixture.candidateResults.isEmpty())
     }
 
     /** ライブ変換の結果には、読みが一致するユーザー辞書の登録語を候補の先頭に加える。 */
@@ -587,6 +665,24 @@ class ConversionWorkerTest {
 
     private fun learningStore() = LearningStore(learningFile, clock = { now })
 
+    private fun candidateRequest(
+        reading: String,
+        preceding: String = "",
+        following: String = "",
+        learningAllowed: Boolean = true,
+    ) = CandidateRequest(
+        sessionEpoch = 1,
+        revision = 1,
+        converterGeneration = 0,
+        segmentId = 3,
+        readingStart = 0,
+        readingEnd = reading.length,
+        reading = reading,
+        preceding = preceding,
+        following = following,
+        learningAllowed = learningAllowed,
+    )
+
     private fun liveRequest(revision: Long, reading: String, learningAllowed: Boolean = true): LiveRequest {
         val length = reading.length
         val identity = RequestIdentity(1, revision, reading, 0, length, emptyList(), length, 0)
@@ -607,12 +703,14 @@ class ConversionWorkerTest {
         val outcomes = mutableListOf<ConversionOutcome>()
         val healthChanges = mutableListOf<EngineHealth>()
         val liveResults = mutableListOf<Pair<Long, LiveResult>>()
+        val candidateResults = mutableListOf<Pair<Long, CandidateResult>>()
         val worker = ConversionWorker(
             engine = engine,
             executor = executor,
             onHealthChanged = { healthChanges += it },
             onOutcome = { outcomes += it },
             onLiveResult = { epoch, result -> liveResults += epoch to result },
+            onCandidateResult = { epoch, result -> candidateResults += epoch to result },
             userDictionary = { dictionary },
             learningStore = { learning },
         )
@@ -666,8 +764,8 @@ private class FakeConversionEngine : ConversionEngine {
         return incognitoAccepted
     }
 
-    override fun convert(sessionId: Long, reading: String): EngineConversion {
-        calls += "convert($sessionId,$reading)"
+    override fun convert(sessionId: Long, reading: String, headLength: Int?): EngineConversion {
+        calls += if (headLength == null) "convert($sessionId,$reading)" else "convert($sessionId,$reading,$headLength)"
         val values = if (reading == "かんじ") knownConversionValues else listOf(reading)
         val segmentReading = segmentReadingOverride ?: reading
         return EngineConversion(
@@ -695,6 +793,14 @@ private class FakeConversionEngine : ConversionEngine {
     override fun convertSegments(sessionId: Long, reading: String): List<EngineSegment>? {
         calls += "convertSegments($sessionId,$reading)"
         return segmentsFor(reading)
+    }
+
+    // 一文節として変換したときに返す文節（前の読み、読み、後の読み）。既定では読みをそのまま返す。
+    var segmentFor: (String, String, String) -> EngineSegment? = { _, reading, _ -> EngineSegment(reading, reading, listOf(reading)) }
+
+    override fun convertSegment(sessionId: Long, preceding: String, reading: String, following: String): EngineSegment? {
+        calls += "convertSegment($sessionId,$preceding|$reading|$following)"
+        return segmentFor(preceding, reading, following)
     }
 
     override fun clearLearning(): Boolean {

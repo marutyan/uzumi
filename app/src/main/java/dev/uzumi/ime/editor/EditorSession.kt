@@ -10,6 +10,8 @@ import dev.uzumi.ime.conversion.liveLearningUnits
 import dev.uzumi.ime.evaluation.EvaluationCounter
 import dev.uzumi.ime.evaluation.LiveChangeClassifier
 import dev.uzumi.ime.live.CandidateChoice
+import dev.uzumi.ime.live.CandidateRequest
+import dev.uzumi.ime.live.CandidateResult
 import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.EditorCommand
 import dev.uzumi.ime.live.EnterKind
@@ -652,7 +654,46 @@ class EditorSession(
             direction > 0 -> core.returnToInputPosition()
             else -> return false
         }
-        return update.handled && refreshLiveHighlight()
+        if (!update.handled) return false
+        update.candidateRequest?.let(::dispatchCandidateRequest)
+        return refreshLiveHighlight()
+    }
+
+    /**
+     * 候補バーの対象segmentの候補を、明示変換と同じ方法で取り直すよう依頼する。候補一覧を開いたときに呼ぶ。
+     * 取り直し済み、または依頼先が使えなければ何もしない。結果はapplyLiveCandidatesで後から反映する。
+     */
+    fun requestLiveCandidates(): Boolean {
+        val core = liveCore ?: return false
+        if (!active) return false
+        val update = core.requestFocusedCandidates()
+        update.candidateRequest?.let(::dispatchCandidateRequest)
+        return update.handled
+    }
+
+    /** workerから届いた取り直しの候補を、コアが要求時と同じ状態だと照合できた場合だけ反映する。 */
+    fun applyLiveCandidates(result: CandidateResult): Boolean {
+        val core = liveCore ?: return false
+        if (!active) return false
+        val update = core.onCandidateResult(result)
+        return update.handled && update.rejection == null
+    }
+
+    /**
+     * 文節の区切りを伸縮できる状態か。ライブ変換では入力中、明示変換では変換結果を表示している間。
+     * キーボードは、この間だけ←→の長押しを伸縮に使う。
+     */
+    val canResizeSegment: Boolean
+        get() = active && if (liveCore != null) hasComposition else currentConversion() != null
+
+    /**
+     * 文節の区切りを一書記素縮める（delta<0）か伸ばす（delta>0）。ライブ変換では候補バーの対象の文節、
+     * 明示変換では候補を出している先頭の文節を対象にする。伸縮できなければfalse。
+     */
+    fun resizeSegment(delta: Int): Boolean {
+        if (!active || delta == 0) return false
+        if (liveCore != null) return performLive { it.resizeFocusedSegment(delta) } ?: false
+        return resizeConversionHead(delta)
     }
 
     /** 候補バーの対象を末尾入力位置のsegmentへ戻す。 */
@@ -730,6 +771,7 @@ class EditorSession(
             }
         }
         update.request?.let(::dispatchLiveRequest)
+        update.candidateRequest?.let(::dispatchCandidateRequest)
         return true
     }
 
@@ -764,6 +806,37 @@ class EditorSession(
             return
         }
         kanaFallbackConverter.convert(request)?.let(::applyLiveResult)
+    }
+
+    /** 候補の取り直しを依頼する。エンジンが使えない間は、かな・カナ候補のほかに取り直す候補が無いため送らない。 */
+    private fun dispatchCandidateRequest(request: CandidateRequest) {
+        val client = liveClient ?: return
+        if (client.isAvailable) client.requestSegmentCandidates(sessionEpoch, request)
+    }
+
+    /**
+     * 明示変換の表示中に、先頭文節の区切りを一書記素伸縮した変換をエンジンへ依頼する。
+     * 伸縮を続けて押した場合は、応答を待っている要求の区切りから数える。結果は通常の変換応答として届く。
+     */
+    private fun resizeConversionHead(delta: Int): Boolean {
+        val conversion = currentConversion() ?: return false
+        val client = conversionClient ?: return false
+        if (!client.isAvailable || policy.suppressSuggestions) return false
+        val total = GraphemeClusters.split(buffer.reading).size
+        val current = pendingConversion?.headLength
+            ?: GraphemeClusters.split(conversion.segments.first().reading).size
+        val length = current + if (delta < 0) -1 else 1
+        if (length < 1 || length > total) return false
+        val request = ConversionRequest(
+            sessionEpoch = sessionEpoch,
+            revision = revision,
+            reading = buffer.reading,
+            incognito = policy.suppressLearning,
+            headLength = length,
+        )
+        pendingConversion = request
+        client.requestConversion(request)
+        return true
     }
 
     /** 確定したsegment列をエンジンへ学習させる。学習禁止欄とエンジンが使えない場合は送らない。 */
@@ -806,7 +879,9 @@ class EditorSession(
             return performLive { it.moveCursorTo(index) } ?: false
         }
         val span = core.displaySpans().firstOrNull { offset > it.start && offset < it.end } ?: return false
-        if (!core.focusSegment(span.segmentId).handled) return false
+        val update = core.focusSegment(span.segmentId)
+        if (!update.handled) return false
+        update.candidateRequest?.let(::dispatchCandidateRequest)
         return refreshLiveHighlight()
     }
 

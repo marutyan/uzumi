@@ -18,6 +18,7 @@ import dev.uzumi.ime.live.SegmentState
  * 変換そのものはconvertRangeへ任せ、Mozcでも辞書なしのかな・カナ候補でも同じ分割規則を使う。
  * 部分範囲の先頭からの読みが学習した句に一致する場合は、句の終わりでも区切り、句と残りを別々に変換する。
  * 句は部分範囲の中だけで探すため、保護範囲とカーソルの境界を越える句は使われない。
+ * ユーザーが伸縮で区切りを決めた範囲（fixedRanges）は、それだけを一つの部分範囲として一segmentに変換する。
  */
 class SegmentedLiveConverter(
     // 一つの部分範囲の読みを変換する。読みの連結がその範囲に一致するsegment列を返し、失敗時はnull。
@@ -28,14 +29,11 @@ class SegmentedLiveConverter(
     private val learnedSurfaces: ((String) -> List<String>)? = null,
     // 読みに完全一致する学習した句の表記を、優先する順に返す。nullなら句で区切りを合わせない。
     private val learnedPhrases: ((String) -> List<String>)? = null,
+    // ユーザーが区切りを決めた読みを必ず一segmentとして変換する。nullまたは失敗時はconvertRangeの結果を一segmentにまとめる。
+    private val convertFixed: ((String) -> ResultSegment?)? = null,
 ) : LiveConverter {
     // 読みに完全一致する学習語と句の表記を合わせて引く。どちらも無ければnullで、学習語を合成しない。
-    private val exactSurfaces: ((String) -> List<String>)? =
-        if (learnedSurfaces == null && learnedPhrases == null) {
-            null
-        } else {
-            { reading -> (learnedSurfaces?.invoke(reading).orEmpty() + learnedPhrases?.invoke(reading).orEmpty()).distinct() }
-        }
+    private val exactSurfaces: ((String) -> List<String>)? = combineExactSurfaces(learnedSurfaces, learnedPhrases)
 
     override fun convert(request: LiveRequest): LiveResult? {
         val identity = request.identity
@@ -51,7 +49,18 @@ class SegmentedLiveConverter(
                 position = protected.readingEnd
                 continue
             }
-            val chunkEnd = (identity.protectedRanges.map { it.readingStart } + identity.inputCursor)
+            val fixed = identity.fixedRanges.firstOrNull { it.readingStart == position }
+            if (fixed != null) {
+                val reading = clusters.subList(fixed.readingStart, fixed.readingEnd).joinToString("")
+                segments += convertFixedMerged(reading) ?: return null
+                position = fixed.readingEnd
+                continue
+            }
+            val chunkEnd = (
+                identity.protectedRanges.map { it.readingStart } +
+                    identity.fixedRanges.map { it.readingStart } +
+                    identity.inputCursor
+                )
                 .filter { it > position && it < identity.targetEnd }
                 .minOrNull() ?: identity.targetEnd
             val chunkClusters = clusters.subList(position, chunkEnd)
@@ -74,6 +83,19 @@ class SegmentedLiveConverter(
         val converted = convertRange(reading) ?: return null
         val learned = exactSurfaces?.let { mergeExactSurfaces(reading, converted, it) } ?: converted
         return UserDictionaryCandidates.mergeLive(reading, learned, userDictionary)
+    }
+
+    /**
+     * ユーザーが区切りを決めた読みを一segmentとして変換し、convertMergedと同じ順で登録語と学習語を合成する。
+     * 読み全体が一segmentなので、合成しても一segmentのまま残る。
+     */
+    private fun convertFixedMerged(reading: String): ResultSegment? {
+        val single = convertFixed?.invoke(reading)?.takeIf { it.reading == reading }
+            ?: convertRange(reading)?.let { joinIntoOne(reading, it) }
+            ?: return null
+        val learned = exactSurfaces?.let { mergeExactSurfaces(reading, listOf(single), it) } ?: listOf(single)
+        val merged = UserDictionaryCandidates.mergeLive(reading, learned, userDictionary).single()
+        return merged.copy(candidatesComplete = single.candidatesComplete)
     }
 
     /**
@@ -102,6 +124,45 @@ fun toLiveSegments(chunk: String, segments: List<EngineSegment>): List<ResultSeg
     }
     val joined = segments.joinToString(separator = "") { it.value }
     return listOf(ResultSegment(chunk, joined, listOf(joined, chunk).distinct()))
+}
+
+/**
+ * 一つの読みに対するsegment列を、読み全体の一segmentへまとめる。一segmentならそのまま返し、
+ * 複数なら表記を連結したものを表示と第一候補にし、読みそのものを候補に加える。
+ */
+fun joinIntoOne(reading: String, segments: List<ResultSegment>): ResultSegment? {
+    if (segments.isEmpty() || segments.any { it.surface.isEmpty() }) return null
+    segments.singleOrNull()?.takeIf { it.reading == reading }?.let { return it }
+    val joined = segments.joinToString(separator = "") { it.surface }
+    return ResultSegment(reading, joined, listOf(joined, reading).distinct())
+}
+
+/**
+ * 読みに完全一致する学習語と学習した句の表記を、学習語を先にして合わせて引く関数を作る。
+ * ライブ変換の部分範囲と、注目したsegmentの候補の取り直しで同じ規則を使うために一か所へ置く。どちらも無ければnull。
+ */
+fun combineExactSurfaces(
+    learnedSurfaces: ((String) -> List<String>)?,
+    learnedPhrases: ((String) -> List<String>)?,
+): ((String) -> List<String>)? {
+    if (learnedSurfaces == null && learnedPhrases == null) return null
+    return { reading -> (learnedSurfaces?.invoke(reading).orEmpty() + learnedPhrases?.invoke(reading).orEmpty()).distinct() }
+}
+
+/**
+ * 注目したsegmentに取り直した候補へ、ライブ変換の部分範囲と同じ順（ユーザー辞書 → 学習 → エンジン）で
+ * 登録語と学習語を合成し、候補の表記だけを返す。exactSurfacesは読みに完全一致する学習語と句の表記を返す。
+ */
+fun mergeSegmentCandidates(
+    reading: String,
+    engineCandidates: List<String>,
+    userDictionary: UserDictionaryLookup?,
+    exactSurfaces: ((String) -> List<String>)?,
+): List<String> {
+    if (engineCandidates.isEmpty()) return emptyList()
+    val base = listOf(ResultSegment(reading, engineCandidates.first(), engineCandidates))
+    val learned = exactSurfaces?.let { mergeExactSurfaces(reading, base, it) } ?: base
+    return UserDictionaryCandidates.mergeLive(reading, learned, userDictionary).single().candidates
 }
 
 /**

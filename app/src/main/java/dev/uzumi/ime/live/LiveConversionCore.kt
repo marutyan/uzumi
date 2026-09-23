@@ -223,11 +223,88 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
 
     /**
      * 候補バーの対象を過去segmentへ移す。入力カーソルは動かさないため、訂正後に末尾入力へ戻れる。
+     * そのsegmentの候補をまだ取り直していなければ、候補の要求を添える。
      */
     fun focusSegment(segmentId: Long): LiveUpdate {
         if (!acceptsInput()) return LiveUpdate.NOT_HANDLED
-        if (state.segments.none { it.id == segmentId }) return LiveUpdate.NOT_HANDLED
+        val segment = state.segments.firstOrNull { it.id == segmentId } ?: return LiveUpdate.NOT_HANDLED
         state = state.copy(focusedSegmentId = segmentId)
+        return LiveUpdate(handled = true, candidateRequest = candidateRequestFor(segment))
+    }
+
+    /**
+     * 候補バーの対象segmentの候補を、まだ取り直していなければ取り直す要求を返す。候補一覧を開いたときに使う。
+     */
+    fun requestFocusedCandidates(): LiveUpdate {
+        if (!acceptsInput()) return LiveUpdate.NOT_HANDLED
+        val segment = focusedSegment ?: return LiveUpdate.NOT_HANDLED
+        return LiveUpdate(handled = true, candidateRequest = candidateRequestFor(segment))
+    }
+
+    /**
+     * 候補バーの対象segmentの区切りを、終わりの側で一書記素だけ縮める（delta<0）か伸ばす（delta>0）。
+     * 伸縮したsegmentはユーザーが決めた区切りとして読みへ戻し、変換器へ一segmentとしての変換を求める。
+     * 結果が届くとchosenになり、以後の自動更新から守られる。縮めて外れた書記素は未変換のsegmentになり、
+     * 後ろが自由なsegmentなら次の変換で一緒に変換される。伸ばして一部を取り込んだ後ろのsegmentは、残りを未変換へ戻す。
+     * 入力カーソルを内部に含むことになる伸縮と、読点をまたぐ伸縮はしない。後ろのsegmentがstable・chosen・
+     * Undoで戻した範囲なら伸ばさない。保護を解くのは、ユーザーがそのsegmentの読みを編集した場合だけだからである。
+     * Undo可能な一操作である。
+     */
+    fun resizeFocusedSegment(delta: Int): LiveUpdate {
+        if (!acceptsInput()) return LiveUpdate.NOT_HANDLED
+        val target = focusedSegment ?: return LiveUpdate.NOT_HANDLED
+        if (delta == 0 || target.reading == LiveConversionRules.SOFT_BOUNDARY) return LiveUpdate.NO_CHANGE
+        val newEnd = target.readingEnd + if (delta < 0) -1 else 1
+        if (newEnd <= target.readingStart || newEnd > state.clusters.size) return LiveUpdate.NO_CHANGE
+        // カーソルが伸縮後のsegmentの内部に入ると、表示上のカーソルと読みの位置を対応付けられない。
+        if (state.inputCursor > target.readingStart && state.inputCursor < newEnd) return LiveUpdate.NO_CHANGE
+        val index = state.segments.indexOfFirst { it.id == target.id }
+        val next = state.segments.getOrNull(index + 1)
+        if (delta > 0 && (next == null || next.reading == LiveConversionRules.SOFT_BOUNDARY || isProtected(next))) {
+            return LiveUpdate.NO_CHANGE
+        }
+        val clusters = state.clusters
+        val resized = rawSegment(clusters, target.readingStart, newEnd).copy(userBounded = true)
+        val segments = if (delta < 0) {
+            state.segments.take(index) + resized + rawSegment(clusters, newEnd, target.readingEnd) +
+                state.segments.drop(index + 1)
+        } else {
+            // 伸ばした分を取り込んだ後ろのsegmentの残り。一書記素だけのsegmentなら残りは無い。
+            val rest = next?.takeIf { it.readingEnd > newEnd }?.let { rawSegment(clusters, newEnd, it.readingEnd) }
+            state.segments.take(index) + listOfNotNull(resized, rest) + state.segments.drop(index + 2)
+        }
+        pushUndo(OperationKind.SEGMENT_RESIZE)
+        state = state.copy(segments = segments, focusedSegmentId = resized.id)
+        revision += 1
+        return compositionUpdate(buildRequest())
+    }
+
+    /**
+     * 取り直した候補を、要求時と同じepoch・revision・segmentの場合だけ対象segmentへ入れる。表示は変えない。
+     * 候補は増えるだけなので、表示済みの候補のタップはそのまま受け付けられる。
+     */
+    fun onCandidateResult(result: CandidateResult): LiveUpdate {
+        val request = result.request
+        val reason = when {
+            !isActive -> RejectReason.NOT_ACTIVE
+            !isLiveEnabled -> RejectReason.LIVE_DISABLED
+            !fieldPolicy.conversionAllowed -> RejectReason.CONVERSION_NOT_ALLOWED
+            request.sessionEpoch != sessionEpoch -> RejectReason.EPOCH_MISMATCH
+            request.converterGeneration != converterGeneration -> RejectReason.GENERATION_MISMATCH
+            request.revision != revision -> RejectReason.REVISION_MISMATCH
+            else -> null
+        }
+        if (reason != null) return rejected(reason)
+        val segment = state.segments.firstOrNull { it.id == request.segmentId }
+        if (segment == null || !segment.converted || segment.reading != request.reading ||
+            segment.readingStart != request.readingStart || segment.readingEnd != request.readingEnd
+        ) {
+            return rejected(RejectReason.STALE_CANDIDATE)
+        }
+        val merged = (result.candidates.filter { it.isNotEmpty() } + segment.candidates).distinct()
+        val candidates = if (segment.surface in merged) merged else listOf(segment.surface) + merged
+        val updated = segment.copy(candidates = candidates, candidatesComplete = true)
+        state = state.copy(segments = state.segments.map { if (it.id == segment.id) updated else it })
         return LiveUpdate.NO_CHANGE
     }
 
@@ -363,7 +440,8 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
             identity.targetStart != current.targetStart || identity.targetEnd != current.targetEnd ->
                 return rejected(RejectReason.TARGET_MISMATCH)
 
-            identity.protectedRanges != current.protectedRanges -> return rejected(RejectReason.PROTECTED_MISMATCH)
+            identity.protectedRanges != current.protectedRanges || identity.fixedRanges != current.fixedRanges ->
+                return rejected(RejectReason.PROTECTED_MISMATCH)
         }
 
         val pieces = tileResult(result.segments, current) ?: return rejected(RejectReason.MALFORMED_SEGMENTS)
@@ -381,9 +459,15 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
         ) {
             return rejected(RejectReason.CROSSES_CURSOR)
         }
+        // ユーザーが伸縮で決めた範囲は、ちょうど一つのsegmentとして返っていなければならない。
+        if (current.fixedRanges.any { fixed -> pieces.none { it.start == fixed.readingStart && it.end == fixed.readingEnd } }) {
+            return rejected(RejectReason.CROSSES_FIXED)
+        }
 
         state = state.copy(segments = promoteSegments(mergeResult(pieces, current, protectedInTarget)))
-        return compositionUpdate(request = null)
+        // 明示的に注目しているsegmentが変換し直された場合は、その候補を取り直す。
+        val focused = state.focusedSegmentId?.let { id -> state.segments.firstOrNull { it.id == id } }
+        return compositionUpdate(request = null).copy(candidateRequest = focused?.let(::candidateRequestFor))
     }
 
     /**
@@ -581,6 +665,32 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
             },
             inputCursor = state.inputCursor,
             converterGeneration = converterGeneration,
+            fixedRanges = free.filter { it.userBounded }.map { FixedRange(it.readingStart, it.readingEnd) },
+        )
+    }
+
+    /**
+     * segmentの候補を取り直す要求を作る。変換済みで、まだ取り直しておらず、変換してよい欄の場合だけ返す。
+     * 前後のsegmentの読みを文脈として添える（読点は添えない）。
+     */
+    private fun candidateRequestFor(segment: LiveSegment): CandidateRequest? {
+        if (!fieldPolicy.conversionAllowed || !segment.converted || segment.candidatesComplete) return null
+        if (segment.reading == LiveConversionRules.SOFT_BOUNDARY) return null
+        val index = state.segments.indexOfFirst { it.id == segment.id }
+        // 文脈として添える隣のsegmentの読み。読点は変換の文脈にしない。
+        fun contextOf(neighbor: LiveSegment?): String =
+            neighbor?.reading?.takeUnless { it == LiveConversionRules.SOFT_BOUNDARY }.orEmpty()
+        return CandidateRequest(
+            sessionEpoch = sessionEpoch,
+            revision = revision,
+            converterGeneration = converterGeneration,
+            segmentId = segment.id,
+            readingStart = segment.readingStart,
+            readingEnd = segment.readingEnd,
+            reading = segment.reading,
+            preceding = contextOf(state.segments.getOrNull(index - 1)),
+            following = contextOf(state.segments.getOrNull(index + 1)),
+            learningAllowed = fieldPolicy.learningAllowed,
         )
     }
 
@@ -605,7 +715,13 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
             if (clusters.isEmpty() || position + clusters.size > identity.targetEnd) return null
             if (state.clusters.subList(position, position + clusters.size) != clusters) return null
             val candidates = result.candidates.let { if (result.surface in it) it else listOf(result.surface) + it }
-            pieces += ResultPiece(position, position + clusters.size, result.surface, candidates.distinct())
+            pieces += ResultPiece(
+                position,
+                position + clusters.size,
+                result.surface,
+                candidates.distinct(),
+                result.candidatesComplete,
+            )
             position += clusters.size
         }
         return if (position == identity.targetEnd) pieces else null
@@ -641,17 +757,23 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
                 } else {
                     1
                 }
+                // 同じ読み範囲・表記で候補を取り直し済みなら、その候補を引き継ぐ。
+                val kept = previous?.takeIf { it.candidatesComplete && it.surface == piece.surface }
+                // ユーザーが伸縮で決めた範囲の結果はchosenにして、以後の自動更新から守る。
+                val userBounded = previous?.userBounded == true
                 LiveSegment(
                     id = previous?.id ?: newSegmentId(),
                     readingStart = piece.start,
                     readingEnd = piece.end,
                     reading = state.clusters.subList(piece.start, piece.end).joinToString(separator = ""),
                     surface = piece.surface,
-                    state = SegmentState.PROVISIONAL,
-                    candidates = piece.candidates,
+                    state = if (userBounded) SegmentState.CHOSEN else SegmentState.PROVISIONAL,
+                    candidates = kept?.let { (piece.candidates + it.candidates).distinct() } ?: piece.candidates,
                     converted = true,
                     observations = observations,
                     lastObservedReadingVersion = readingVersion,
+                    candidatesComplete = piece.candidatesComplete || kept != null,
+                    userBounded = userBounded,
                 )
             }
         return before + (converted + protectedInTarget).sortedBy { it.readingStart } + after
@@ -755,5 +877,11 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
     private data class HistoryEntry(val kind: OperationKind, val state: CompositionState)
 
     /** 照合済みの結果segmentを、対象範囲の書記素位置へ置いたもの。 */
-    private data class ResultPiece(val start: Int, val end: Int, val surface: String, val candidates: List<String>)
+    private data class ResultPiece(
+        val start: Int,
+        val end: Int,
+        val surface: String,
+        val candidates: List<String>,
+        val candidatesComplete: Boolean,
+    )
 }
