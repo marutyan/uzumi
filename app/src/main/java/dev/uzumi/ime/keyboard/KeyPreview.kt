@@ -133,7 +133,9 @@ class DeleteDragHint(private val host: View, private val colors: KeyboardColors)
 
     /** 削除キー[key]の左に、状態[state]の案内を出す。[lineLength]は行頭までの文字数（分からなければnull）。 */
     fun show(key: View, state: DeleteDragState, lineLength: Int?) {
-        if (state == DeleteDragState.NONE) {
+        val text = deleteDragHintText(state, lineLength)
+        // 案内が無い状態（ドラッグしていない、または消す文字が無い）では札を出さない
+        if (text.isEmpty()) {
             hide()
             return
         }
@@ -143,7 +145,7 @@ class DeleteDragHint(private val host: View, private val colors: KeyboardColors)
             root.overlay.add(drawable)
             attachedRoot = root
         }
-        drawable.text = deleteDragHintText(state, lineLength)
+        drawable.text = text
         drawable.armed = state == DeleteDragState.ARMED
         key.getLocationInWindow(keyLocation)
         root.getLocationInWindow(rootLocation)
@@ -215,9 +217,14 @@ class DeleteDragHint(private val host: View, private val colors: KeyboardColors)
 
 /**
  * 削除ドラッグの案内の文言を決める。行頭までの文字数が分かる場合は、離す前に消える量を示す。
+ * 消す文字が0文字（空の欄など）なら離しても何も消えないため、空文字を返して案内を出さない。
  */
 fun deleteDragHintText(state: DeleteDragState, lineLength: Int?): String = when (state) {
-    DeleteDragState.ARMED -> if (lineLength != null) "× 行頭まで ${lineLength}文字" else "× 行頭まで"
+    DeleteDragState.ARMED -> when (lineLength) {
+        null -> "× 行頭まで"
+        0 -> ""
+        else -> "× 行頭まで ${lineLength}文字"
+    }
     DeleteDragState.DRAGGING -> "× 1文字"
     DeleteDragState.CANCELED -> "取り消し"
     DeleteDragState.NONE -> ""
