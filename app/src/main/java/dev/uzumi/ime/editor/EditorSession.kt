@@ -8,8 +8,10 @@ import dev.uzumi.ime.conversion.LiveConversionClient
 import dev.uzumi.ime.conversion.SegmentedLiveConverter
 import dev.uzumi.ime.conversion.liveLearningUnits
 import dev.uzumi.ime.evaluation.ConversionProgress
+import dev.uzumi.ime.evaluation.CorrectnessJudge
 import dev.uzumi.ime.evaluation.EvaluationCounter
 import dev.uzumi.ime.evaluation.LiveChangeClassifier
+import dev.uzumi.ime.evaluation.NeuralCounts
 import dev.uzumi.ime.live.CandidateChoice
 import dev.uzumi.ime.live.CandidateRequest
 import dev.uzumi.ime.live.CandidateResult
@@ -48,6 +50,8 @@ class EditorSession(
     private val compositionStyler: (String, DisplaySpan?) -> CharSequence = { text, _ -> text },
     // Phase 2cの評価用計数。ライブ変換の表示と文節状態の変化を、評価モードの間だけ件数として渡す。
     private val evaluation: EvaluationCounter? = null,
+    // Phase 3aの正→誤の遷移の判定。評価モードで課題の許容表記が与えられたときだけ使う。
+    private val correctness: CorrectnessJudge? = null,
 ) {
     private val buffer = CompositionBuffer()
     // compositionの内容が変わるたびに増える番号。変換応答が現在の読みに対するものかを照合する。
@@ -84,7 +88,7 @@ class EditorSession(
 
     // 変換エンジンが使えない間のライブ変換の結果。部分範囲ごとに読みとカタカナを候補にする。
     private val kanaFallbackConverter = SegmentedLiveConverter(
-        convertRange = { chunk ->
+        convertRange = { chunk, _ ->
             listOf(ResultSegment(chunk, chunk, listOf(chunk, BasicCandidateProvider.toKatakana(chunk)).distinct()))
         },
     )
@@ -735,11 +739,26 @@ class EditorSession(
             evaluation?.recordLive(LiveChangeClassifier.STALE_RESULT_DISCARDED)
         }
         if (rejection != null || update.commands.isEmpty()) return false
+        // 正→誤の遷移の判定に使う、compositionより前の欄の文字列。評価モードで許容表記があるときだけ読む。
+        val judge = correctness?.takeIf { it.isActive && evaluation?.isRecording == true }
+        val prefix = if (judge != null) textBeforeLiveComposition() else null
         val applied = applyLiveUpdate(update, core.segments)
         if (applied && evaluation?.isRecording == true) {
             evaluation.recordLive(LiveChangeClassifier.resultApplied(before, core.segments))
+            if (prefix != null && judge?.isCorrectToWrong(prefix, before, core.segments) == true) {
+                evaluation.recordNeural(NeuralCounts(correctToWrong = 1))
+            }
         }
         return applied
+    }
+
+    /**
+     * ライブ変換のcompositionより前にある欄の文字列を返す。カーソルより前の文字列から、composition内のカーソルより
+     * 前の部分を除いて求める。評価用の判定にだけ使い、読めなければ空文字列にする。
+     */
+    private fun textBeforeLiveComposition(): String {
+        val before = connection.textBeforeCursor(EVALUATION_PREFIX_MAX_CHARS)?.toString() ?: return ""
+        return before.dropLast(liveCursorUtf16.coerceAtMost(before.length))
     }
 
     /** ライブ変換の表示（明示変換では読みの表示）。selection通知の照合で使う。 */
@@ -1139,6 +1158,9 @@ class EditorSession(
     private companion object {
         /** 左ドラッグで行頭を探すときに読む、カーソル前の最大文字数。これより長い行はこの長さだけ消す。 */
         const val LINE_DELETE_MAX_CHARS = 1_000
+
+        /** 正→誤の遷移の判定で読む、カーソル前の最大文字数。課題文（長文でも50文字未満）が収まる長さにする。 */
+        const val EVALUATION_PREFIX_MAX_CHARS = 200
 
         /** 「元に戻す」の前に一致を確かめる、カーソルの前後の文字数。 */
         const val LINE_DELETE_CONTEXT_CHARS = 32

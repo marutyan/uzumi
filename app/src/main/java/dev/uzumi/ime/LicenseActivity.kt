@@ -29,17 +29,23 @@ class LicenseActivity : Activity() {
         setContentView(scrollView)
     }
 
-    /** 同梱した表示文書を読む。ビルド時にNOTICEが無かった場合はnullを返す。 */
+    /**
+     * 同梱した表示文書を読む。Mozcの表示に、ニューラル変換の生成物を取り込んだビルドではllama.cppの表示を続ける。
+     * どちらも無かった場合はnullを返す。
+     */
     private fun readNotice(): String? {
-        return try {
-            assets.open(NOTICE_ASSET_PATH).bufferedReader(Charsets.UTF_8).use { it.readText() }
-        } catch (_: FileNotFoundException) {
-            null
+        val notices = NOTICE_ASSET_PATHS.mapNotNull { path ->
+            try {
+                assets.open(path).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            } catch (_: FileNotFoundException) {
+                null
+            }
         }
+        return notices.takeIf { it.isNotEmpty() }?.joinToString(separator = "\n\n")
     }
 
     private companion object {
-        /** Gradleがthird_party/mozc/NOTICE.txtを取り込むassetsの場所。 */
-        const val NOTICE_ASSET_PATH = "licenses/mozc-NOTICE.txt"
+        /** Gradleがthird_party/mozc/NOTICE.txtとthird_party/llama.cpp/NOTICE.txtを取り込むassetsの場所。 */
+        val NOTICE_ASSET_PATHS = listOf("licenses/mozc-NOTICE.txt", "licenses/llama.cpp-NOTICE.txt")
     }
 }

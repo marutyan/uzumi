@@ -6,12 +6,85 @@ import dev.uzumi.ime.live.ResultSegment
 /**
  * ニューラルかな漢字変換モデルへの最小のport。実装（別プロセスで動かすllama.cpp）は、
  * モデルごとのプロンプト形式（読みのカタカナ化、NFKC、区切り記号）を内部で組み立てる。
- * 読みはかなだけを渡す。時間超過・モデル不在・異常終了ではnullを返し、呼び出し側は辞書の結果を使う。
+ * 読みはかなだけを渡す。結果は[NeuralModelOutput]で返し、表示してよいかの検査は呼び出し側（[NeuralRangeConverter]）が行う。
  */
 fun interface NeuralKanaKanjiModel {
-    /** 読みを変換した表記を一つ返す。leftContextは読みの直前に表示されている文字列。失敗時はnull。 */
-    fun convert(reading: String, leftContext: String): String?
+    /** 読みを変換した表記を一つ返す。leftContextは読みの直前に表示されている文字列。 */
+    fun convert(reading: String, leftContext: String): NeuralModelOutput
 }
+
+/** モデルへの一回の要求の結果。検査1・2の材料（出力の文字列と、token上限で打ち切ったか）をそのまま渡す。 */
+sealed interface NeuralModelOutput {
+    /**
+     * モデルが出力を返した。truncatedがtrueなら終端tokenの前に最大出力tokenへ達した（検査2で捨てる）。
+     * 壊れたUTF-8は置換文字（U+FFFD）にして返し、検査1で捨てる。
+     */
+    data class Completed(val text: String, val truncated: Boolean = false) : NeuralModelOutput
+
+    /** モデルが使えない（未準備、別プロセスの終了、時間超過、異常）。呼び出し側は辞書の結果を使う。 */
+    data class Failed(val reason: NeuralFailure) : NeuralModelOutput
+
+    /** 新しい入力で推論を中断した。この要求の結果は古いため、変換要求全体を取り下げる。 */
+    data object Cancelled : NeuralModelOutput
+}
+
+/** モデルが使えなかった理由。評価用計数で時間超過とそれ以外を分けるために使う。 */
+enum class NeuralFailure {
+    /** モデルの読み込み前、読み込みの失敗、別プロセスの未接続・終了。 */
+    UNAVAILABLE,
+
+    /** 時間超過（評価条件の300 ms）。 */
+    TIMEOUT,
+
+    /** 推論の失敗（decodeの失敗、`n_ctx`超過など）。 */
+    ERROR,
+}
+
+/** 新しい入力でモデルの推論を中断したときに投げ、変換要求全体を取り下げる。呼び出し側は結果を返さない。 */
+class NeuralRequestCancelled : RuntimeException("neural request cancelled")
+
+/** モデルの出力を検査した結果。評価用計数で、どの検査で捨てたかを数えるために使う。 */
+enum class NeuralVerdict {
+    ACCEPTED,
+
+    /** 検査1：空、制御文字、置換文字、区切り記号を含む。 */
+    CHECK1_INVALID_TEXT,
+
+    /** 検査2：終端tokenで終わらなかった（最大出力tokenに達した）。 */
+    CHECK2_TRUNCATED,
+
+    /** 検査3：かなの並びが読みと合わない。 */
+    CHECK3_KANA_MISMATCH,
+
+    /** 検査4：かなの読みから生まれた数字・英字が辞書の候補に無い。 */
+    CHECK4_UNBACKED_DIGITS,
+}
+
+/**
+ * [NeuralRangeConverter]の処理の経過を受け取る窓口。評価用計数（件数だけ）を作るために使い、既定では何もしない。
+ * 呼び出しは変換を行うthread（直列worker）からだけ行われる。
+ */
+interface NeuralConversionObserver {
+    /** かなの連なりを一つ変換し始めた。splitは30文字を超えたため区切ったか。 */
+    fun onKanaRun(reading: String, split: Boolean) {}
+
+    /** モデルの出力を検査した。outputは検査前の出力で、失敗・中断では呼ばれない。 */
+    fun onModelOutput(reading: String, output: String, verdict: NeuralVerdict) {}
+
+    /** モデルが使えなかった。 */
+    fun onModelFailed(reason: NeuralFailure) {}
+
+    /** かなの連なりを、モデルを使わず辞書の結果（usedReading=falseのとき）か読みのまま（true）で表示した。 */
+    fun onFallback(usedReading: Boolean) {}
+
+    companion object {
+        /** 何もしない既定の窓口。 */
+        val NONE = object : NeuralConversionObserver {}
+    }
+}
+
+// モデルへ渡すかなの連なりの最大の文字数（評価条件で全モデル共通に固定）。超えたら辞書の文節境界で区切る。
+const val NEURAL_MAX_KANA_CHARS = 30
 
 /**
  * ニューラルで直接変換し、辞書で補う部分範囲の変換器。`SegmentedLiveConverter`の`convertRange`へ差し込んで使い、
@@ -24,14 +97,21 @@ class NeuralRangeConverter(
     private val model: NeuralKanaKanjiModel,
     // 一つのかなの連なりを辞書（Mozc）で変換する。読みの連結が入力と一致するsegment列を返し、使えなければnull。
     private val dictionary: (String) -> List<ResultSegment>?,
+    private val observer: NeuralConversionObserver = NeuralConversionObserver.NONE,
+    // 検査4を行うか。falseは、評価用計数が検査と独立に違反を数えることをJVMテストで確かめるためだけに使う。
+    private val checkDigitsWithDictionary: Boolean = true,
 ) {
-    /** 部分範囲の読みを、読みの連結が部分範囲と一致するsegment列へ変換する。モデルと辞書が使えなくても読みのまま返す。 */
-    fun convert(chunk: String): List<ResultSegment> {
+    /**
+     * 部分範囲の読みを、読みの連結が部分範囲と一致するsegment列へ変換する。モデルと辞書が使えなくても読みのまま返す。
+     * leftContextは部分範囲より前の表示（保護範囲の表記と、同じ要求で先に変換した表記）。
+     * モデルの推論が新しい入力で中断された場合は[NeuralRequestCancelled]を投げる。
+     */
+    fun convert(chunk: String, leftContext: String = ""): List<ResultSegment> {
         val segments = mutableListOf<ResultSegment>()
         for (run in scriptRuns(chunk)) {
             segments += if (run.isKana) {
-                // 同じ部分範囲で先に出した表記（数字などを含む）を左文脈にする。
-                convertKana(run.text, leftContext = segments.joinToString(separator = "") { it.surface })
+                // 部分範囲より前の表示と、同じ部分範囲で先に出した表記（数字などを含む）を左文脈にする。
+                convertKanaRun(run.text, leftContext + segments.joinToString(separator = "") { it.surface })
             } else {
                 listOf(ResultSegment(run.text, run.text))
             }
@@ -39,21 +119,79 @@ class NeuralRangeConverter(
         return segments
     }
 
-    /** かなの連なり一つを、モデルの表記と辞書の文節・候補から変換する。 */
-    private fun convertKana(reading: String, leftContext: String): List<ResultSegment> {
-        val dictionarySegments = runCatching { dictionary(reading) }.getOrNull()?.takeIf { segments ->
+    /**
+     * かなの連なり一つを変換する。30文字を超える場合は、30文字以内で最も後ろにある辞書の文節境界で区切り、
+     * 前の部分を別の連なりとして先に変換して、その表記を後ろの左文脈にする。辞書が使えなければ30文字で区切る。
+     */
+    private fun convertKanaRun(reading: String, leftContext: String): List<ResultSegment> {
+        val clusters = GraphemeClusters.split(reading)
+        if (clusters.size <= NEURAL_MAX_KANA_CHARS) {
+            observer.onKanaRun(reading, split = false)
+            return convertKana(reading, leftContext, lookupDictionary(reading))
+        }
+        val dictionarySegments = lookupDictionary(reading)
+        // 辞書の文節境界（書記素位置）のうち、先頭から30文字以内で最も後ろのもの。無ければ30文字目で区切る。
+        var boundary = 0
+        var cut = 0
+        dictionarySegments?.forEach { segment ->
+            boundary += GraphemeClusters.split(segment.reading).size
+            if (boundary <= NEURAL_MAX_KANA_CHARS) cut = boundary
+        }
+        if (cut == 0) cut = NEURAL_MAX_KANA_CHARS
+        val head = clusters.subList(0, cut).joinToString(separator = "")
+        val tail = clusters.subList(cut, clusters.size).joinToString(separator = "")
+        observer.onKanaRun(head, split = true)
+        val headSegments = convertKana(head, leftContext, lookupDictionary(head))
+        return headSegments + convertKanaRun(tail, leftContext + headSegments.joinToString(separator = "") { it.surface })
+    }
+
+    /** 辞書で変換し、読みの連結が入力と一致する結果だけを返す。 */
+    private fun lookupDictionary(reading: String): List<ResultSegment>? =
+        runCatching { dictionary(reading) }.getOrNull()?.takeIf { segments ->
             segments.isNotEmpty() &&
                 segments.all { it.reading.isNotEmpty() && it.surface.isNotEmpty() } &&
                 segments.joinToString(separator = "") { it.reading } == reading
         }
-        val output = runCatching { model.convert(reading, leftContext) }.getOrNull()
-        val cuts = output?.takeIf(::isAcceptableOutput)
-            ?.let { alignToReading(reading, it) }
-            ?.takeIf { hasDictionaryBackedDigitsAndLetters(output, it, dictionarySegments) }
+
+    /** かなの連なり一つを、モデルの表記と辞書の文節・候補から変換する。 */
+    private fun convertKana(
+        reading: String,
+        leftContext: String,
+        dictionarySegments: List<ResultSegment>?,
+    ): List<ResultSegment> {
+        val output = when (val result = runCatching { model.convert(reading, leftContext) }
+            .getOrElse { NeuralModelOutput.Failed(NeuralFailure.ERROR) }) {
+            NeuralModelOutput.Cancelled -> throw NeuralRequestCancelled()
+            is NeuralModelOutput.Failed -> {
+                observer.onModelFailed(result.reason)
+                null
+            }
+            is NeuralModelOutput.Completed -> result
+        }
+        var cuts: Map<Int, Int>? = null
+        if (output != null) {
+            val verdict = when {
+                !isAcceptableOutput(output.text) -> NeuralVerdict.CHECK1_INVALID_TEXT
+                output.truncated -> NeuralVerdict.CHECK2_TRUNCATED
+                else -> when (val aligned = alignToReading(reading, output.text)) {
+                    null -> NeuralVerdict.CHECK3_KANA_MISMATCH
+                    else -> if (!checkDigitsWithDictionary ||
+                        hasDictionaryBackedDigitsAndLetters(output.text, aligned, dictionarySegments)
+                    ) {
+                        cuts = aligned
+                        NeuralVerdict.ACCEPTED
+                    } else {
+                        NeuralVerdict.CHECK4_UNBACKED_DIGITS
+                    }
+                }
+            }
+            observer.onModelOutput(reading, output.text, verdict)
+        }
+        val accepted = cuts
         return when {
-            output != null && cuts != null -> splitByDictionary(reading, output, cuts, dictionarySegments)
-            dictionarySegments != null -> dictionarySegments
-            else -> listOf(ResultSegment(reading, reading))
+            output != null && accepted != null -> splitByDictionary(reading, output.text, accepted, dictionarySegments)
+            dictionarySegments != null -> dictionarySegments.also { observer.onFallback(usedReading = false) }
+            else -> listOf(ResultSegment(reading, reading)).also { observer.onFallback(usedReading = true) }
         }
     }
 

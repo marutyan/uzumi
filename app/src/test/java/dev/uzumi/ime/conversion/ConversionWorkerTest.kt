@@ -1,5 +1,6 @@
 package dev.uzumi.ime.conversion
 
+import dev.uzumi.ime.evaluation.LiveRequestReport
 import dev.uzumi.ime.learning.LearningStore
 import dev.uzumi.ime.live.CandidateRequest
 import dev.uzumi.ime.live.CandidateResult
@@ -658,6 +659,110 @@ class ConversionWorkerTest {
         assertEquals(listOf("clearLearning"), fixture.engine.calls)
     }
 
+    /** ニューラル変換を選ぶと、ライブ変換のかなの連なりをモデルで変換し、辞書（Mozc）の文節へ切り分ける。 */
+    @Test
+    fun liveConversionUsesNeuralBackendWhenSelected() {
+        val fixture = Fixture()
+        fixture.startReady()
+        val backend = FakeNeuralBackend { reading, _ -> NeuralModelOutput.Completed(if (reading == "かんじ") "漢字" else reading) }
+        fixture.worker.setNeuralBackend(backend)
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "かんじ"))
+        fixture.executor.runAll()
+
+        assertEquals(listOf("漢字"), fixture.liveResults.single().second.segments.map { it.surface })
+        assertEquals(listOf("かんじ" to ""), backend.calls)
+        // 評価モードでなければ報告を作らない
+        assertTrue(fixture.reports.isEmpty())
+    }
+
+    /** 新しいライブ変換の要求は、前の要求の推論を止める（通し番号が増える）。 */
+    @Test
+    fun newLiveRequestCancelsPreviousInference() {
+        val fixture = Fixture()
+        fixture.startReady()
+        val backend = FakeNeuralBackend { reading, _ -> NeuralModelOutput.Completed(reading) }
+        fixture.worker.setNeuralBackend(backend)
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "か"))
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 2, reading = "かん"))
+
+        assertEquals(listOf(1L, 2L), backend.cancelledBefore)
+        fixture.executor.runAll()
+        assertEquals(listOf(2L), fixture.liveResults.map { it.second.identity.revision })
+    }
+
+    /** 推論が中断されたら、その要求の結果は返さない。評価モードでは中断を数えた報告だけを返す。 */
+    @Test
+    fun cancelledInferenceReturnsNoResult() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.evaluating = true
+        fixture.worker.setNeuralBackend(FakeNeuralBackend(cancelled = true) { _, _ -> NeuralModelOutput.Cancelled })
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "かんじ"))
+        fixture.executor.runAll()
+
+        assertTrue(fixture.liveResults.isEmpty())
+        val report = fixture.reports.single().second
+        assertEquals(null, report.identity)
+        assertEquals(1, report.counts.cancelled)
+    }
+
+    /**
+     * 別プロセスの推論serviceが期限（300 ms）までに答えなければ、Mozcの結果を返す。評価モードでは時間超過を数え、
+     * 推論時間を時間超過の値で打ち切って残す。
+     */
+    @Test
+    fun timeoutFallsBackToMozcAndIsCounted() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.evaluating = true
+        fixture.engine.segmentsFor = { reading -> listOf(EngineSegment(reading, "Mozc:$reading", listOf("Mozc:$reading"))) }
+        val silent = object : dev.uzumi.ime.neural.NeuralRuntimePort {
+            val cancels = mutableListOf<Long>()
+            override fun convert(requestId: Long, prompt: ByteArray, parseSpecial: Boolean, maxTokens: Int) = Unit
+            override fun cancel(requestId: Long) {
+                cancels += requestId
+            }
+        }
+        val client = dev.uzumi.ime.neural.NeuralRuntimeClient(NeuralModelSpec.ZENZ_XSMALL).apply {
+            attach(silent)
+            onLoaded(true)
+        }
+        fixture.worker.setNeuralBackend(client)
+
+        val started = System.nanoTime()
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "かんじ"))
+        fixture.executor.runAll()
+        val waitedMillis = (System.nanoTime() - started) / 1_000_000
+
+        assertEquals(listOf("Mozc:かんじ"), fixture.liveResults.single().second.segments.map { it.surface })
+        assertTrue("waited $waitedMillis ms", waitedMillis in 250..1_000)
+        assertEquals(listOf(1L), silent.cancels)
+        val report = fixture.reports.single().second
+        assertEquals(1, report.counts.timeouts)
+        assertEquals(1, report.counts.modelRequests)
+        assertEquals(1, report.counts.mozcFallbacks)
+        assertEquals(listOf(300.0), report.samples.map { it.millis })
+    }
+
+    /** Mozcだけの条件（M）でも評価用の報告を作り、ニューラルの項目は0になる。 */
+    @Test
+    fun mozcOnlyConditionReportsZeroNeuralCounts() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.evaluating = true
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "かんじ"))
+        fixture.executor.runAll()
+
+        val report = fixture.reports.single().second
+        assertEquals(fixture.liveResults.single().second.identity, report.identity)
+        assertEquals(dev.uzumi.ime.evaluation.NeuralCounts(), report.counts)
+        assertTrue(report.samples.isEmpty())
+    }
+
     // 学習キャッシュのテスト用の保存先と時計。
     private val learningDirectory: File = Files.createTempDirectory("worker-learning").toFile().apply { deleteOnExit() }
     private val learningFile = File(learningDirectory, "learning.tsv")
@@ -704,6 +809,8 @@ class ConversionWorkerTest {
         val healthChanges = mutableListOf<EngineHealth>()
         val liveResults = mutableListOf<Pair<Long, LiveResult>>()
         val candidateResults = mutableListOf<Pair<Long, CandidateResult>>()
+        val reports = mutableListOf<Pair<Long, LiveRequestReport>>()
+        var evaluating = false
         val worker = ConversionWorker(
             engine = engine,
             executor = executor,
@@ -713,6 +820,8 @@ class ConversionWorkerTest {
             onCandidateResult = { epoch, result -> candidateResults += epoch to result },
             userDictionary = { dictionary },
             learningStore = { learning },
+            onLiveReport = { epoch, report -> reports += epoch to report },
+            evaluationActive = { evaluating },
         )
 
         /** 初期化と既知変換例の確認を済ませ、以後のエンジンsession番号を1から始める。 */
@@ -722,6 +831,32 @@ class ConversionWorkerTest {
             check(worker.isAvailable)
             engine.nextSessionId = 1
         }
+    }
+}
+
+/** 呼ばれた読みと左文脈、中断の通し番号を記録し、決めた結果を返すfakeのニューラル変換の窓口。 */
+private class FakeNeuralBackend(
+    private val cancelled: Boolean = false,
+    private val output: (String, String) -> NeuralModelOutput,
+) : NeuralBackend {
+    override val spec = NeuralModelSpec.JINEN_XSMALL
+    val calls = mutableListOf<Pair<String, String>>()
+    val cancelledBefore = mutableListOf<Long>()
+
+    override fun modelFor(
+        deadlineNanos: Long,
+        owner: Long,
+        isSuperseded: () -> Boolean,
+        record: (NeuralCallRecord) -> Unit,
+    ) = NeuralKanaKanjiModel { reading, context ->
+        calls += reading to context
+        val outcome = if (cancelled) NeuralCallOutcome.CANCELLED else NeuralCallOutcome.COMPLETED
+        record(NeuralCallRecord(sent = true, cacheHit = false, millis = 5.0, outcome = outcome))
+        output(reading, context)
+    }
+
+    override fun cancelInFlight(newOwner: Long) {
+        cancelledBefore += newOwner
     }
 }
 
