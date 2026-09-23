@@ -131,6 +131,36 @@ Mozcだけの条件（M）でも同じ列を出す。ニューラルの列は0�
   - `ConversionWorkerTest`：ニューラルの経路、新しい要求による中断、中断した要求の取り下げ、実時間での300 msの時間超過からMozcの結果へ戻ること、条件Mの計数が0であること。
   - `LiveEvaluationCollectorTest`、`NeuralAuditTest`、`NeuralPromptFormatTest`、`NeuralRangeConverterTest`の追加分：左文脈、30文字での区切り、検査2、中断。
 
+## 段階2の道具
+
+`tools/phase3a/run_stage2.py`は、Phase 2cの自動測定の道具の版2（状態の確認口で待つ方式）をそのまま呼び、評価条件の段階2の手順を足したものである。端末では、まだ動かしていない。
+
+| 命令 | 内容 |
+| --- | --- |
+| `plan` | 5回×5条件の順番を表示する（端末を使わない）。巡回の5×5のラテン方格の行と記号を、seed `20261015`で並べ替えたもの |
+| `probe` | キーボードの各面の配置を読む（Phase 2cと同じ） |
+| `run` | 指定の回（既定は1〜5）を、方格の順番で流す。各条件の間に5分空け、温度状態がNONEに戻るまで待つ |
+| `coldstart` | モデルごとに10回、アプリを止めてから`:neural`をbindし、最初の推論結果が届くまでの時間を測る |
+| `battery` | 充電を切った状態で課題の再生を10分くり返し、`dumpsys batterystats`の推定消費を読む |
+
+`run`では条件ごとに次を行う。
+
+1. APKのSHA-256を読み、最初の条件と違えば止める。
+2. 学習を消し、ライブ変換をONにして（Phase 2cの条件Nと同じ準備）、`NEURAL_SELECT`でモデルを選び、`neural_ready`を待つ（Mでは`neural_selected=0`を確かめる）。
+3. 端末の状態を記録する（`ro.build.fingerprint`、画面の明るさ、リフレッシュレート、省電力、充電、温度、`am memory-limiter status`）。
+4. 課題ごとに`accepted_b64`と`final_b64`を渡して流す。キーの間隔は150 msで、Phase 2cの道具の値のまま。この間、IMEと`:neural`のPSSを1秒ごとに`dumpsys meminfo`で読む。
+5. 条件の終わりに、計数（`EVAL_DUMP`）、時間の記録（`EVAL_DUMP_TIMINGS`）、`EVAL_MEMORY`、状態の記録を`round<回>-<条件>-*`のファイルへ残す。
+
+課題は既定で開発用の30文だけを読む。試験用の54文は、`--test-set`と最終設定の識別名`--fixed-config`を付けたときだけ読む。同じ識別名・回・条件の記録が`.local-build/phase3a/test-set-ledger/`にあれば止め、同じ集合を二度流さない。不具合を直した後は、新しい識別名で全条件を流し直す。試験用の集合では、休みを省く指定と課題の指定は使えない。
+
+Phase 2cの道具には、課題の開始と終了で受信口へextraを渡す差し込み口（`START_EXTRAS`、`FINISH_EXTRAS`、既定は空）だけを足した。Phase 2cの測定の動作は変わらない。端末を使わない部分（方格、extra、出力の読み取り、試験用の集合の記録）は`tools/phase3a/test_run_stage2.py`で確かめた（12件合格）。
+
+端末で確かめていない点は次のとおりである。
+
+- `dumpsys thermalservice`、`dumpsys meminfo`、`dumpsys batterystats`の出力の形式（読み取りは一般的な形式を想定した）。
+- cold startの値は、準備の確認の間隔（0.5秒）の分だけ長く出得る。
+- 電池の測定は再生のたびに計数の行も増える。
+
 ## 実機で確かめること（未実行）
 
 1. `:neural`で`.so`とモデルが読み込めること（SHA-256の確認の時間を含むcold start）。
@@ -139,7 +169,7 @@ Mozcだけの条件（M）でも同じ列を出す。ニューラルの列は0�
 4. 新しい入力による中断が実際に推論を止めているか（中断までの時間の分布）。
 5. `:neural`を強制終了したとき（`am kill`など）に、IMEがMozcだけで続き、接続し直すこと。
 6. 条件の切り替えと`EVAL_STATUS`の`neural_ready`。
-7. 自動測定の道具（`tools/phase2c/run_automated.py`）を、条件の切り替え、`accepted_b64`・`final_b64`、`EVAL_DUMP_TIMINGS`に合わせること（未着手）。
+7. 段階2の道具（下記）を、開発用の集合で一度通すこと。
 
 ## 未確認事項
 

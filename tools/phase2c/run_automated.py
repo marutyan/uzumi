@@ -28,7 +28,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 # 端末とadbの場所。評価条件の端末（Pixel 10 Pro）に固定する。
 ADB = "/Users/marutyan/Library/Android/sdk/platform-tools/adb"
@@ -539,17 +539,27 @@ COUNT_COLUMNS = [
 ]
 
 
-def broadcast(action: str, task_id: Optional[str] = None) -> str:
-    """評価用計数の受信口へbroadcastを送り、結果のdataを返す。"""
+def broadcast(action: str, task_id: Optional[str] = None, extras: Optional[Dict[str, str]] = None) -> str:
+    """評価用計数の受信口へbroadcastを送り、結果のdataを返す。extrasの値はshellで引用しなくてよい文字（Base64など）に限る。"""
     command = f"am broadcast -n {RECEIVER} -a dev.uzumi.ime.debug.{action}"
     if task_id:
         command += f" --es task {task_id}"
+    for name, value in (extras or {}).items():
+        if not re.fullmatch(r"[A-Za-z0-9_]+", name) or not re.fullmatch(r"[A-Za-z0-9+/=_.-]*", value):
+            raise Abort(f"unsafe broadcast extra {name}")
+        command += f" --es {name} {value}"
     out = shell(command)
     match = re.search(r'data="([^"]*)"', out, re.S)
     code = re.search(r"result=(-?\d+)", out)
     if code is None or code.group(1) != "-1":
         raise Abort(f"broadcast {action} rejected: {match.group(1) if match else out.strip()[:120]}")
     return match.group(1) if match else ""
+
+
+# 課題の計数の開始と終了で受信口へ足すextraを作る関数。Phase 2cでは使わず空のまま。
+# Phase 3aの道具（tools/phase3a/run_stage2.py）が、許容表記と最終文をBase64で渡すために差し替える。
+START_EXTRAS: Callable[["Task"], Dict[str, str]] = lambda task: {}
+FINISH_EXTRAS: Callable[["Snapshot"], Dict[str, str]] = lambda snap: {}
 
 
 # ---- 1課題の実行 ----
@@ -1022,7 +1032,7 @@ def run_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
     body = reading[:-1] if terminator == "。" else reading
     presses, _ = plan_text(body, kb.state)
     steps: List[str] = []
-    broadcast("EVAL_START", task.task_id)
+    broadcast("EVAL_START", task.task_id, START_EXTRAS(task))
     kb.sent = 0
     kb.recording = True
     try:
@@ -1047,7 +1057,7 @@ def run_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
             pass
         raise
     kb.recording = False
-    row = broadcast("EVAL_FINISH").strip()
+    row = broadcast("EVAL_FINISH", extras=FINISH_EXTRAS(final)).strip()
     values = row.split("\t")
     counts = {name: int(v) if re.fullmatch(r"-?\d+", v) else v for name, v in zip(COUNT_COLUMNS, values)}
     correct = matches(final.field_text, task.accepted)
@@ -1061,7 +1071,7 @@ def run_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
 def run_past_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
     """過去訂正の課題1件を、計数の開始→run_past_correction→計数の終了→最終文の照合の順に行う。"""
     steps: List[str] = []
-    broadcast("EVAL_START", task.task_id)
+    broadcast("EVAL_START", task.task_id, START_EXTRAS(task))
     kb.sent = 0
     kb.recording = True
     try:
@@ -1075,7 +1085,7 @@ def run_past_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
             pass
         raise
     kb.recording = False
-    values = broadcast("EVAL_FINISH").strip().split("\t")
+    values = broadcast("EVAL_FINISH", extras=FINISH_EXTRAS(final)).strip().split("\t")
     counts = {name: int(v) if re.fullmatch(r"-?\d+", v) else v for name, v in zip(COUNT_COLUMNS, values)}
     correct = matches(final.field_text, task.accepted)
     result = TaskResult(condition, task.task_id, task.category, correct, counts, steps,
