@@ -45,7 +45,7 @@ class UserDictionaryTsvTest {
         assertEquals(TsvParseResult(entries, emptyList()), UserDictionaryTsv.parse(text))
     }
 
-    /** BOM、CRLF、注釈、空行、分類列の省略を受け付け、不正な行は行番号と理由を返す。 */
+    /** BOM、CRLF、注釈、空行、分類列の省略、Mozcのコメント列を受け付け、不正な行は行番号と理由を返す。 */
     @Test
     fun reportsFailedLinesWithLineNumbers() {
         val text = "\uFEFF# comment\r\n" +
@@ -56,12 +56,14 @@ class UserDictionaryTsvTest {
             "ひとつ\n" +
             "ふめい\t不明\t動詞\n" +
             "から\t\n" +
-            "おおい\ta\tb\tc\n"
+            "おおい\ta\t名詞\tc\td\n" +
+            "もずく\tMozc\t固有名詞\tコメントは無視\n"
         val result = UserDictionaryTsv.parse(text)
         assertEquals(
             listOf(
                 UserDictionaryEntry("とうきょう", "東京", UserDictionaryCategory.PLACE_NAME),
                 UserDictionaryEntry("かいしゃ", "会社", UserDictionaryCategory.NOUN),
+                UserDictionaryEntry("もずく", "Mozc", UserDictionaryCategory.PROPER_NOUN),
             ),
             result.entries,
         )

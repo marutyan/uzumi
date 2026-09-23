@@ -17,6 +17,7 @@ data class TsvParseResult(
 /**
  * 保存ファイルとimport/exportで共通に使うテキスト形式を読み書きする。
  * 形式はUTF-8の「読み<TAB>表記<TAB>分類」で、分類列は省略すると名詞になる。空行と`#`で始まる行は読み飛ばす。
+ * Mozcのユーザー辞書が出力する4列目（コメント）は読込み時だけ受け付けて無視し、書き出しは3列にする。
  */
 object UserDictionaryTsv {
     /** 書き出すファイルの先頭に置く形式名。読込み時は注釈行として無視される。 */
@@ -70,7 +71,7 @@ object UserDictionaryTsv {
     /** 列数と分類名を確認し、項目の規則で検証する。 */
     private fun parseLine(line: String): LineResult {
         val columns = line.split('\t')
-        if (columns.size !in 2..3) return LineResult.Failed(UserDictionaryError.WRONG_COLUMN_COUNT)
+        if (columns.size !in 2..4) return LineResult.Failed(UserDictionaryError.WRONG_COLUMN_COUNT)
         val categoryLabel = columns.getOrNull(2)?.trim().orEmpty()
         val category = if (categoryLabel.isEmpty()) {
             UserDictionaryCategory.NOUN

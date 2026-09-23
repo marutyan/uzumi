@@ -96,7 +96,7 @@ class UserDictionaryActivity : Activity() {
         setContentView(scrollView)
 
         setActionsEnabled(false)
-        runInBackground({ UserDictionaries.get(this) }) { opened ->
+        runInBackground({ UserDictionaries.get(applicationContext) }) { opened ->
             repository = opened
             setActionsEnabled(true)
             refreshList()
@@ -209,7 +209,7 @@ class UserDictionaryActivity : Activity() {
                     category = categories[categorySpinner.selectedItemPosition],
                 )
                 runInBackground({
-                    val dictionary = checkNotNull(repository)
+                    val dictionary = UserDictionaries.get(applicationContext)
                     if (original == null) dictionary.add(entry) else dictionary.update(original, entry)
                 }) { error ->
                     if (error == null) {
@@ -235,7 +235,7 @@ class UserDictionaryActivity : Activity() {
         AlertDialog.Builder(this)
             .setMessage(getString(R.string.dictionary_delete_confirm, entry.surface, entry.reading))
             .setPositiveButton(R.string.dictionary_delete) { _, _ ->
-                runInBackground({ checkNotNull(repository).remove(entry) }) { error ->
+                runInBackground({ UserDictionaries.get(applicationContext).remove(entry) }) { error ->
                     if (error == null) {
                         onDeleted()
                         refreshList()
@@ -272,7 +272,7 @@ class UserDictionaryActivity : Activity() {
         runInBackground<ImportOutcome>({
             val bytes = readLimited(uri) ?: return@runInBackground ImportOutcome.TooLarge
             val text = UserDictionaryTsv.decodeUtf8(bytes) ?: return@runInBackground ImportOutcome.NotUtf8
-            ImportOutcome.Done(checkNotNull(repository).import(UserDictionaryTsv.parse(text)))
+            ImportOutcome.Done(UserDictionaries.get(applicationContext).import(UserDictionaryTsv.parse(text)))
         }, onFailure = { toast(getString(R.string.dictionary_import_read_failed)) }) { outcome ->
             when (outcome) {
                 ImportOutcome.TooLarge ->
@@ -289,7 +289,7 @@ class UserDictionaryActivity : Activity() {
     /** 選ばれたファイルへ現在の全項目を書き出す。 */
     private fun exportTo(uri: Uri) {
         runInBackground({
-            val dictionary = checkNotNull(repository)
+            val dictionary = UserDictionaries.get(applicationContext)
             val output = contentResolver.openOutputStream(uri, "wt") ?: throw IOException("出力先を開けません")
             output.use { it.write(dictionary.exportText().toByteArray(Charsets.UTF_8)) }
             dictionary.allEntries().size
@@ -347,7 +347,8 @@ class UserDictionaryActivity : Activity() {
 
     /**
      * 処理を入出力スレッドで実行し、結果をUIスレッドへ戻す。画面が破棄された後の結果は捨てる。
-     * 読込み・保存の失敗は例外としてonFailureへ渡す。
+     * 読込み・保存・ファイル提供元の失敗は例外としてonFailureへ渡す。辞書は画面の再作成に依存しないよう、
+     * 作業関数の中でUserDictionaries.get(applicationContext)から取得する。
      */
     private fun <T> runInBackground(
         work: () -> T,
@@ -360,7 +361,8 @@ class UserDictionaryActivity : Activity() {
                 Result.success(work())
             } catch (error: IOException) {
                 Result.failure(error)
-            } catch (error: SecurityException) {
+            } catch (error: RuntimeException) {
+                // SAFの提供元は権限不足や未対応の書込みモードなどを実行時例外で返すため、プロセスを落とさず失敗として表示する。
                 Result.failure(error)
             }
             runOnUiThread {
