@@ -15,6 +15,7 @@ Phase 0はPR #1で完了し、2026-09-21のユーザー指示でPhase 1へ着手
 | Phase 1a 入力基盤 | in_progress | 50単体テストとPixel試用欄の基本編集は合格。別アプリ・機密欄・回転等の互換試験は未実施 |
 | Phase 1b キーUI | in_progress | 12-key、英語QWERTY、数字の試用欄入力と最下段操作をPixelで確認。2026-09-23に記号面（3ページ）、QWERTYから数字・記号への直接切替、削除・カーソルの連続実行、QWERTY長押しの数字・記号、触覚、TalkBack用の読み上げ・操作メニューを実装し、63単体テスト・APK・lintは合格（[記録](../docs/phase1-validation.md#キー入力の追加2026-09-23)）。実機での操作・TalkBack・触覚は未確認 |
 | Phase 1c 漢字変換・辞書 | in_progress | [Mozcのnative・辞書・Java liteのローカルビルド](../docs/mozc-build-probe.md)成功。配布資産の監査・NOTICEは未完了。APK組込み・端末変換は未実施。ユーザー辞書は保存・登録・検索・編集・削除・TSV入出力・管理画面・参照APIを実装しJVMテストで確認したが、実機操作とIME候補への接続は未実施 |
+| Phase 2a ライブ状態 | in_progress | Android・Mozcに依存しない状態機械`dev.uzumi.ime.live`を実装し、古い結果の拒否、安定化、chosen保護、境界、ON/OFF、Undo/Redo、書記素境界を試験用変換器の決定的なイベント列28件で確認（2026-09-23）。IMEへの配線、Mozcのsegment変換との接続、実機確認は未実施 |
 | Phase 2以降 | pending | Phase 1の受入条件を満たしてから開始 |
 
 ## 二つの到達点
