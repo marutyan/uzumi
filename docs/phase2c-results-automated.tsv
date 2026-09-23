@@ -1,136 +1,165 @@
-condition	task_id	category	reading_chars	correct	no_intervention	keys	commits	corrections	terminators	display_changes	flicker	stable_overwrites	chosen_overwrites	stale_results_discarded	to_stable	to_chosen	to_provisional	elapsed_ms	sent_presses	input_mismatch	status
-O	D04	数値	13	1	0	19	2	1	1	0	0	0	0	0	0	0	0	30397	20	0	ok
-O	U04	URL	23	1	0	36	4	2	1	0	0	0	0	0	0	0	0	55306	37	0	ok
-O	E01	英語混在	21	1	0	27	1	0	1	0	0	0	0	0	0	0	0	22062	28	0	ok
-O	P01	名前	15	1	0	15	1	0	1	0	0	0	0	0	0	0	0	17801	16	0	ok
-O	C01	過去訂正	14	1	0	19	2	1	1	0	0	0	0	0	0	0	0	31604	20	0	ok
-O	E04	英語混在	21	1	0	30	3	1	1	0	0	0	0	0	0	0	0	40861	31	0	ok
-O	Q01	句点なし	5	1	0	6	1	0	1	0	0	0	0	0	0	0	0	14040	7	0	ok
-O	D01	数値	14	1	0	20	1	0	1	0	0	0	0	0	0	0	0	19336	21	0	ok
-O	C04	過去訂正	12	1	0	16	2	1	1	0	0	0	0	0	0	0	0	30234	17	0	ok
-O	H01	同音異義語	14	1	0	16	1	1	1	0	0	0	0	0	0	0	0	23957	17	0	ok
-O	U01	URL	20	1	1	25	0	0	1	0	0	0	0	0	0	0	0	15101	26	0	ok
-O	Q04	句点なし	9	1	0	11	1	0	1	0	0	0	0	0	0	0	0	16226	12	0	ok
-O	L04	長文	50	1	0	67	10	1	1	0	0	0	0	0	0	0	0	97834	68	0	ok
-O	L01	長文	50	1	0	61	2	2	1	0	0	0	0	0	0	0	0	52313	62	0	ok
-O	P04																				abort
-O	P04																				abort
-O	P04																				abort
-O	N04	通常文	15	1	0	17	1	0	1	0	0	0	0	0	0	0	0	18659	18	0	ok
-O	N01	通常文	14	1	0	17	1	0	1	0	0	0	0	0	0	0	0	18469	18	0	ok
-O	H04	同音異義語	16	1	0	20	1	0	1	0	0	0	0	0	0	0	0	19742	21	0	ok
-O	U02	URL	30	1	0	42	5	1	1	0	0	0	0	0	0	0	0	57865	43	0	ok
-O	L02	長文	48	1	0	53	1	0	1	0	0	0	0	0	0	0	0	32211	54	0	ok
-O	D02	数値	13	1	0	17	1	0	1	0	0	0	0	0	0	0	0	18453	18	0	ok
-O	H05	同音異義語	11	1	0	11	1	0	1	0	0	0	0	0	0	0	0	15590	12	0	ok
-O	N02	通常文	13	1	0	14	1	0	1	0	0	0	0	0	0	0	0	17418	15	0	ok
-O	C05	過去訂正	12	1	0	13	1	1	1	0	0	0	0	0	0	0	0	23426	14	0	ok
-O	C02	過去訂正	13	1	0	17	2	1	1	0	0	0	0	0	0	0	0	30548	18	0	ok
-O	U05	URL	22	0	0	41	4	0	1	0	0	0	0	0	0	0	0	57204	42	0	ok
-O	P05	名前	17	1	0	23	1	0	1	0	0	0	0	0	0	0	0	20895	24	0	ok
-O	Q05	句点なし	9	1	0	12	1	0	1	0	0	0	0	0	0	0	0	16728	13	0	ok
-O	N05	通常文	16	1	0	17	1	0	1	0	0	0	0	0	0	0	0	18468	18	0	ok
-O	E02	英語混在	18	1	1	22	0	0	1	0	0	0	0	0	0	0	0	14374	23	0	ok
-O	L05	長文	45	1	0	59	9	1	1	0	0	0	0	0	0	0	0	87908	60	0	ok
-O	D05	数値	14	1	0	20	1	0	1	0	0	0	0	0	0	0	0	19831	21	0	ok
-O	E05	英語混在	13	1	1	15	0	0	1	0	0	0	0	0	0	0	0	11665	16	0	ok
-O	H02	同音異義語	12	1	0	15	1	0	1	0	0	0	0	0	0	0	0	17659	16	0	ok
-O	P02	名前	17	1	0	19	1	0	1	0	0	0	0	0	0	0	0	19306	20	0	ok
-O	Q02	句点なし	7	1	0	10	1	0	1	0	0	0	0	0	0	0	0	15194	11	0	ok
-O	D03	数値	19	1	0	27	1	0	1	0	0	0	0	0	0	0	0	21454	28	0	ok
-O	C06	過去訂正	11	1	0	12	1	1	1	0	0	0	0	0	0	0	0	22429	13	0	ok
-O	U03	URL	34	0	0	51	1	0	1	0	0	0	0	0	0	0	0	41742	52	0	ok
-O	E03	英語混在	12	1	0	17	1	0	1	0	0	0	0	0	0	0	0	18597	18	0	ok
-O	D06	数値	17	1	0	22	1	0	1	0	0	0	0	0	0	0	0	20497	23	0	ok
-O	P03	名前	15	1	0	20	2	1	1	0	0	0	0	0	0	0	0	31449	21	0	ok
-O	N03	通常文	15	1	0	19	1	0	1	0	0	0	0	0	0	0	0	18959	20	0	ok
-O	L06	長文	48	1	0	63	1	0	1	0	0	0	0	0	0	0	0	36221	64	0	ok
-O	P06	名前	16	1	0	17	1	0	1	0	0	0	0	0	0	0	0	18450	18	0	ok
-O	H06	同音異義語	18	1	0	27	2	2	1	0	0	0	0	0	0	0	0	39946	28	0	ok
-O	C03	過去訂正	12	1	0	15	2	1	1	0	0	0	0	0	0	0	0	29969	16	0	ok
-O	N06	通常文	17	1	0	20	1	0	1	0	0	0	0	0	0	0	0	19824	21	0	ok
-O	L03	長文	49	1	0	59	1	0	1	0	0	0	0	0	0	0	0	34807	60	0	ok
-O	H03	同音異義語	11	1	0	13	1	0	1	0	0	0	0	0	0	0	0	16764	14	0	ok
-O	U06	URL	27	0	0	38	3	0	1	0	0	0	0	0	0	0	0	50246	39	0	ok
-O	E06	英語混在	12	1	0	19	1	0	1	0	0	0	0	0	0	0	0	19119	20	0	ok
-O	Q03	句点なし	8	1	0	12	3	1	1	0	0	0	0	0	0	0	0	34752	13	0	ok
-O	Q06	句点なし	10	1	0	13	1	0	1	0	0	0	0	0	0	0	0	16833	14	0	ok
-N	D04	数値	13	1	0	18	0	2	1	10	5	0	0	0	2	1	0	24196	19	0	ok
-N	U04	URL	23	1	0	35	0	5	1	5	3	0	0	0	5	2	0	48348	36	0	ok
-N	E01	英語混在	21	1	1	26	0	0	1	4	2	0	0	0	2	0	0	15738	27	0	ok
-N	P01	名前	15	1	1	14	0	0	1	11	9	0	0	0	1	0	0	11347	15	0	ok
-N	C01	過去訂正	14	0	0	19	0	1	1	12	9	0	0	0	2	0	0	30970	20	0	ok
-N	E04	英語混在	21	0	0	28	0	0	1	8	6	0	0	0	2	0	0	27748	29	0	ok
-N	Q01	句点なし	5	1	1	5	0	0	1	4	4	0	0	0	0	0	0	7936	6	0	ok
-N	D01	数値	14	0	0	21	0	0	1	11	6	0	0	0	4	0	0	25441	22	0	ok
-N	C04	過去訂正	12	1	0	14	0	1	1	6	4	0	0	0	1	1	0	17152	15	0	ok
-N	H01	同音異義語	14	0	0	17	0	1	1	12	10	0	0	0	2	0	0	30275	18	0	ok
-N	U01	URL	20	1	1	25	0	0	1	0	0	0	0	0	0	0	0	14549	26	0	ok
-N	Q04	句点なし	9	1	1	10	0	0	1	6	5	0	0	0	0	0	0	9689	11	0	ok
-N	L04	長文	50	0	0	59	0	1	1	28	18	0	0	0	9	0	0	45968	60	0	ok
-N	L01	長文	50	0	0	66	0	7	1	35	21	0	0	0	9	0	0	88339	67	0	ok
-N	P04	名前	16	0	0	19	0	1	1	14	10	0	0	0	2	0	0	30501	20	0	ok
-N	N04	通常文	15	1	1	16	0	0	1	7	5	0	0	0	2	0	0	12164	17	0	ok
-N	N01	通常文	14	0	0	18	0	0	1	13	7	0	0	0	2	0	0	24132	19	0	ok
-N	H04	同音異義語	16	1	1	19	0	0	1	13	8	0	0	0	1	0	0	13294	20	0	ok
-N	U02	URL	30	1	0	43	0	7	1	9	6	0	0	0	6	2	0	62552	44	0	ok
-N	L02	長文	48	1	1	52	0	0	1	25	19	0	0	0	8	0	0	25924	53	0	ok
-N	D02	数値	13	1	1	16	0	0	1	8	5	0	0	0	2	0	0	11918	17	0	ok
-N	H05	同音異義語	11	1	1	10	0	0	1	8	5	0	0	0	1	0	0	9757	11	0	ok
-N	N02	通常文	13	1	1	13	0	0	1	4	3	0	0	0	2	0	0	11073	14	0	ok
-N	C05	過去訂正	12	0	0	14	0	1	1	6	5	0	0	0	1	0	0	28603	15	0	ok
-N	C02	過去訂正	13	0	0	16	0	0	1	11	9	0	0	0	1	0	0	23837	17	0	ok
-N	U05	URL	22	1	1	32	0	0	1	0	0	0	0	0	0	0	0	17586	33	0	ok
-N	P05	名前	17	1	1	22	0	0	1	12	8	0	0	0	2	0	0	14390	23	0	ok
-N	Q05	句点なし	9	1	1	11	0	0	1	4	3	0	0	0	1	0	0	10201	12	0	ok
-N	N05	通常文	16	1	1	16	0	0	1	8	6	0	0	0	3	0	0	11867	17	0	ok
-N	E02	英語混在	18	0	0	25	0	1	1	4	3	0	0	0	2	0	0	34438	26	0	ok
-N	L05	長文	45	0	0	52	0	1	1	30	20	0	0	0	8	0	0	43135	53	0	ok
-N	D05	数値	14	0	0	22	0	1	1	14	8	0	0	0	5	0	0	32213	23	0	ok
-N	E05	英語混在	13	1	1	15	0	0	1	3	2	0	0	0	1	0	0	11615	16	0	ok
-N	H02	同音異義語	12	1	1	14	0	0	1	8	5	0	0	0	2	0	0	11217	15	0	ok
-N	P02	名前	17	1	1	18	0	0	1	12	9	0	0	0	2	0	0	12255	19	0	ok
-N	Q02	句点なし	7	1	1	9	0	0	1	8	5	0	0	0	0	0	0	9365	10	0	ok
-N	D03	数値	19	1	1	26	0	0	1	11	6	0	0	0	4	0	0	15845	27	0	ok
-N	C06	過去訂正	11	0	0	13	0	1	1	5	4	0	0	0	1	0	0	28435	14	0	ok
-N	U03	URL	34	1	1	47	0	0	1	0	0	0	0	0	0	0	0	23447	48	0	ok
-N	E03	英語混在	12	1	1	16	0	0	1	7	5	0	0	0	2	0	0	12030	17	0	ok
-N	D06	数値	17	1	0	24	0	3	1	14	7	0	0	0	3	1	0	33047	25	0	ok
-N	P03	名前	15	1	1	17	0	0	1	13	8	0	0	0	2	0	0	12524	18	0	ok
-N	N03	通常文	15	1	1	18	0	0	1	14	8	0	0	0	2	0	0	12631	19	0	ok
-N	L06	長文	48	1	1	62	0	0	1	45	24	0	0	0	8	0	0	29607	63	0	ok
-N	P06	名前	16	1	1	16	0	0	1	11	9	0	0	0	2	0	0	12313	17	0	ok
-N	H06	同音異義語	18	0	0	26	0	1	1	15	6	0	0	0	3	0	0	33684	27	0	ok
-N	C03	過去訂正	12	0	0	15	0	1	1	7	5	0	0	0	2	0	0	29116	16	0	ok
-N	N06	通常文	17	1	1	19	0	0	1	16	11	0	0	0	2	0	0	13089	20	0	ok
-N	L03	長文	49	0	0	61	0	1	1	41	26	0	0	0	9	0	0	46451	62	0	ok
-N	H03	同音異義語	11	1	1	12	0	0	1	7	6	0	0	0	1	0	0	10431	13	0	ok
-N	U06	URL	27	0	0	35	0	0	1	4	3	0	0	0	8	0	0	30083	36	0	ok
-N	E06	英語混在	12	1	1	18	0	0	1	7	4	0	0	0	1	0	0	12782	19	0	ok
-N	Q03	句点なし	8	0	0	10	0	0	1	5	5	0	0	0	1	0	0	21790	11	0	ok
-N	Q06	句点なし	10	1	1	12	0	0	1	7	6	0	0	0	0	0	0	10499	13	0	ok
-N-attempt1	D04	数値	13	1	0	18	0	2	1	10	5	0	0	0	2	1	0	24655	19	0	ok
-N-attempt1	U04	URL	23	1	0	35	0	5	1	5	3	0	0	0	5	2	0	48532	36	0	ok
-N-attempt1	E01	英語混在	21	1	1	26	0	0	1	4	2	0	0	0	2	0	0	15678	27	0	ok
-N-attempt1	P01	名前	15	1	1	14	0	0	1	11	9	0	0	0	1	0	0	11340	15	0	ok
-N-attempt1	C01	過去訂正	14	0	0	19	0	1	1	12	9	0	0	0	2	0	0	30905	20	0	ok
-N-attempt1	E04	英語混在	21	0	0	28	0	0	1	8	6	0	0	0	2	0	0	28487	29	0	ok
-N-attempt1	Q01	句点なし	5	1	1	5	0	0	1	4	4	0	0	0	0	0	0	7738	6	0	ok
-N-attempt1	D01	数値	14	0	0	21	0	0	1	11	6	0	0	0	4	0	0	25758	22	0	ok
-N-attempt1	C04	過去訂正	12	1	0	14	0	1	1	6	4	0	0	0	1	1	0	17368	15	0	ok
-N-attempt1	H01	同音異義語	14	0	0	17	0	1	1	12	10	0	0	0	2	0	0	30555	18	0	ok
-N-attempt1	U01	URL	20	1	1	25	0	0	1	0	0	0	0	0	0	0	0	15225	26	0	ok
-N-attempt1	Q04	句点なし	9	1	1	10	0	0	1	6	5	0	0	0	0	0	0	10141	11	0	ok
-N-attempt1	L04	長文	50	0	0	59	0	1	1	28	18	0	0	0	9	0	0	46868	60	0	ok
-N-attempt1	L01	長文	50	0	0	66	0	7	1	35	21	0	0	0	9	0	0	85322	67	0	ok
-N-attempt1	P04	名前	16	0	0	19	0	1	1	14	10	0	0	0	2	0	0	30746	20	0	ok
-N-attempt1	N04	通常文	15	1	1	16	0	0	1	7	5	0	0	0	2	0	0	12148	17	0	ok
-N-attempt1	N01	通常文	14	0	0	18	0	0	1	13	7	0	0	0	2	0	0	24663	19	0	ok
-N-attempt1	H04	同音異義語	16	1	1	19	0	0	1	13	8	0	0	0	1	0	0	13009	20	0	ok
-N-attempt1	U02	URL	30	1	0	43	0	7	1	9	6	0	0	0	6	2	0	63310	44	0	ok
-N-attempt1	L02	長文	48	1	1	52	0	0	1	25	19	0	0	0	8	0	0	26366	53	0	ok
-N-attempt1	D02	数値	13	1	1	16	0	0	1	8	5	0	0	0	2	0	0	11832	17	0	ok
-N-attempt1	H05	同音異義語	11	1	1	10	0	0	1	8	5	0	0	0	1	0	0	9680	11	0	ok
-N-attempt1	N02	通常文	13	1	1	13	0	0	1	4	3	0	0	0	2	0	0	10965	14	0	ok
-N-attempt1	C05	過去訂正	12	0	0	14	0	1	1	6	5	0	0	0	1	0	0	29221	15	0	ok
-N-attempt1	C02	過去訂正	13	0	0	16	0	0	1	11	9	0	0	0	1	0	0	24026	17	0	ok
+condition	task_id	category	reading_chars	correct	no_intervention	keys	commits	corrections	terminators	display_changes	flicker	stable_overwrites	chosen_overwrites	stale_results_discarded	to_stable	to_chosen	to_provisional	elapsed_ms	sent_presses	input_mismatch	aligned_elapsed_ms	fix_steps	status
+O	D04	数値	13	1	0	19	2	1	1	0	0	0	0	0	0	0	0	30397	20	0	-1	convert,pick0,pick1	ok
+O	U04	URL	23	1	0	36	4	2	1	0	0	0	0	0	0	0	0	55306	37	0	-1	convert,pick0,pick0,pick1,pick0,pick1	ok
+O	E01	英語混在	21	1	0	27	1	0	1	0	0	0	0	0	0	0	0	22062	28	0	-1	convert	ok
+O	P01	名前	15	1	0	15	1	0	1	0	0	0	0	0	0	0	0	17801	16	0	-1	convert	ok
+O	C01	過去訂正	14	1	0	19	2	1	1	0	0	0	0	0	0	0	0	31604	20	0	-1	convert,pick0,pick2	ok
+O	E04	英語混在	21	1	0	30	3	1	1	0	0	0	0	0	0	0	0	40861	31	0	-1	convert,pick0,pick0,pick1	ok
+O	Q01	句点なし	5	1	0	6	1	0	1	0	0	0	0	0	0	0	0	14040	7	0	-1	convert	ok
+O	D01	数値	14	1	0	20	1	0	1	0	0	0	0	0	0	0	0	19336	21	0	-1	convert	ok
+O	C04	過去訂正	12	1	0	16	2	1	1	0	0	0	0	0	0	0	0	30234	17	0	-1	convert,pick0,pick1	ok
+O	H01	同音異義語	14	1	0	16	1	1	1	0	0	0	0	0	0	0	0	23957	17	0	-1	convert,pick1	ok
+O	U01	URL	20	1	1	25	0	0	1	0	0	0	0	0	0	0	0	15101	26	0	-1		ok
+O	Q04	句点なし	9	1	0	11	1	0	1	0	0	0	0	0	0	0	0	16226	12	0	-1	convert	ok
+O	L04	長文	50	1	0	67	10	1	1	0	0	0	0	0	0	0	0	97834	68	0	-1	convert,pick0,pick0,pick0,pick0,pick0,pick0,pick0,pick0,pick0,pick2	ok
+O	L01	長文	50	1	0	61	2	2	1	0	0	0	0	0	0	0	0	52313	62	0	-1	convert,pick1,pick0,pick1	ok
+O	P04																						abort
+O	P04																						abort
+O	P04																						abort
+O	N04	通常文	15	1	0	17	1	0	1	0	0	0	0	0	0	0	0	18659	18	0	-1	convert	ok
+O	N01	通常文	14	1	0	17	1	0	1	0	0	0	0	0	0	0	0	18469	18	0	-1	convert	ok
+O	H04	同音異義語	16	1	0	20	1	0	1	0	0	0	0	0	0	0	0	19742	21	0	-1	convert	ok
+O	U02	URL	30	1	0	42	5	1	1	0	0	0	0	0	0	0	0	57865	43	0	-1	convert,pick0,pick0,pick0,pick0,pick1	ok
+O	L02	長文	48	1	0	53	1	0	1	0	0	0	0	0	0	0	0	32211	54	0	-1	convert	ok
+O	D02	数値	13	1	0	17	1	0	1	0	0	0	0	0	0	0	0	18453	18	0	-1	convert	ok
+O	H05	同音異義語	11	1	0	11	1	0	1	0	0	0	0	0	0	0	0	15590	12	0	-1	convert	ok
+O	N02	通常文	13	1	0	14	1	0	1	0	0	0	0	0	0	0	0	17418	15	0	-1	convert	ok
+O	C05	過去訂正	12	1	0	13	1	1	1	0	0	0	0	0	0	0	0	23426	14	0	-1	convert,pick2	ok
+O	C02	過去訂正	13	1	0	17	2	1	1	0	0	0	0	0	0	0	0	30548	18	0	-1	convert,pick0,pick1	ok
+O	U05	URL	22	0	0	41	4	0	1	0	0	0	0	0	0	0	0	57204	42	0	-1	convert,pick0,pick0,pick0,open-grid,close-grid,no-candidate	ok
+O	P05	名前	17	1	0	23	1	0	1	0	0	0	0	0	0	0	0	20895	24	0	-1	convert	ok
+O	Q05	句点なし	9	1	0	12	1	0	1	0	0	0	0	0	0	0	0	16728	13	0	-1	convert	ok
+O	N05	通常文	16	1	0	17	1	0	1	0	0	0	0	0	0	0	0	18468	18	0	-1	convert	ok
+O	E02	英語混在	18	1	1	22	0	0	1	0	0	0	0	0	0	0	0	14374	23	0	-1		ok
+O	L05	長文	45	1	0	59	9	1	1	0	0	0	0	0	0	0	0	87908	60	0	-1	convert,pick0,pick0,pick0,pick0,pick0,pick0,pick0,pick0,pick2	ok
+O	D05	数値	14	1	0	20	1	0	1	0	0	0	0	0	0	0	0	19831	21	0	-1	convert	ok
+O	E05	英語混在	13	1	1	15	0	0	1	0	0	0	0	0	0	0	0	11665	16	0	-1		ok
+O	H02	同音異義語	12	1	0	15	1	0	1	0	0	0	0	0	0	0	0	17659	16	0	-1	convert	ok
+O	P02	名前	17	1	0	19	1	0	1	0	0	0	0	0	0	0	0	19306	20	0	-1	convert	ok
+O	Q02	句点なし	7	1	0	10	1	0	1	0	0	0	0	0	0	0	0	15194	11	0	-1	convert	ok
+O	D03	数値	19	1	0	27	1	0	1	0	0	0	0	0	0	0	0	21454	28	0	-1	convert	ok
+O	C06	過去訂正	11	1	0	12	1	1	1	0	0	0	0	0	0	0	0	22429	13	0	-1	convert,pick1	ok
+O	U03	URL	34	0	0	51	1	0	1	0	0	0	0	0	0	0	0	41742	52	0	-1	convert,open-grid,close-grid,no-candidate	ok
+O	E03	英語混在	12	1	0	17	1	0	1	0	0	0	0	0	0	0	0	18597	18	0	-1	convert	ok
+O	D06	数値	17	1	0	22	1	0	1	0	0	0	0	0	0	0	0	20497	23	0	-1	convert	ok
+O	P03	名前	15	1	0	20	2	1	1	0	0	0	0	0	0	0	0	31449	21	0	-1	convert,pick0,pick1	ok
+O	N03	通常文	15	1	0	19	1	0	1	0	0	0	0	0	0	0	0	18959	20	0	-1	convert	ok
+O	L06	長文	48	1	0	63	1	0	1	0	0	0	0	0	0	0	0	36221	64	0	-1	convert	ok
+O	P06	名前	16	1	0	17	1	0	1	0	0	0	0	0	0	0	0	18450	18	0	-1	convert	ok
+O	H06	同音異義語	18	1	0	27	2	2	1	0	0	0	0	0	0	0	0	39946	28	0	-1	convert,pick1,pick0,pick2	ok
+O	C03	過去訂正	12	1	0	15	2	1	1	0	0	0	0	0	0	0	0	29969	16	0	-1	convert,pick0,pick1	ok
+O	N06	通常文	17	1	0	20	1	0	1	0	0	0	0	0	0	0	0	19824	21	0	-1	convert	ok
+O	L03	長文	49	1	0	59	1	0	1	0	0	0	0	0	0	0	0	34807	60	0	-1	convert	ok
+O	H03	同音異義語	11	1	0	13	1	0	1	0	0	0	0	0	0	0	0	16764	14	0	-1	convert	ok
+O	U06	URL	27	0	0	38	3	0	1	0	0	0	0	0	0	0	0	50246	39	0	-1	convert,pick0,pick0,open-grid,close-grid,no-candidate	ok
+O	E06	英語混在	12	1	0	19	1	0	1	0	0	0	0	0	0	0	0	19119	20	0	-1	convert	ok
+O	Q03	句点なし	8	1	0	12	3	1	1	0	0	0	0	0	0	0	0	34752	13	0	-1	convert,pick0,pick0,pick2	ok
+O	Q06	句点なし	10	1	0	13	1	0	1	0	0	0	0	0	0	0	0	16833	14	0	-1	convert	ok
+N	D04	数値	13	1	0	18	0	2	1	10	5	0	0	0	2	1	0	24196	19	0	-1	left,pick1	ok
+N	U04	URL	23	1	0	35	0	5	1	5	3	0	0	0	5	2	0	48348	36	0	-1	left,pick1,left,left,pick1	ok
+N	E01	英語混在	21	1	1	26	0	0	1	4	2	0	0	0	2	0	0	15738	27	0	-1		ok
+N	P01	名前	15	1	1	14	0	0	1	11	9	0	0	0	1	0	0	11347	15	0	-1		ok
+N	C01	過去訂正	14	0	0	19	0	1	1	12	9	0	0	0	2	0	0	30970	20	0	-1	left,open-grid,close-grid,no-candidate	ok
+N	E04	英語混在	21	0	0	28	0	0	1	8	6	0	0	0	2	0	0	27748	29	0	-1	open-grid,close-grid,no-candidate	ok
+N	Q01	句点なし	5	1	1	5	0	0	1	4	4	0	0	0	0	0	0	7936	6	0	-1		ok
+N	D01	数値	14	0	0	21	0	0	1	11	6	0	0	0	4	0	0	25441	22	0	-1	open-grid,close-grid,no-candidate	ok
+N	C04	過去訂正	12	1	0	14	0	1	1	6	4	0	0	0	1	1	0	17152	15	0	-1	pick1	ok
+N	H01	同音異義語	14	0	0	17	0	1	1	12	10	0	0	0	2	0	0	30275	18	0	-1	left,open-grid,close-grid,no-candidate	ok
+N	U01	URL	20	1	1	25	0	0	1	0	0	0	0	0	0	0	0	14549	26	0	-1		ok
+N	Q04	句点なし	9	1	1	10	0	0	1	6	5	0	0	0	0	0	0	9689	11	0	-1		ok
+N	L04	長文	50	0	0	59	0	1	1	28	18	0	0	0	9	0	0	45968	60	0	-1	left,open-grid,close-grid,no-candidate	ok
+N	L01	長文	50	0	0	66	0	7	1	35	21	0	0	0	9	0	0	88339	67	0	-1	left,left,left,left,left,left,left,open-grid,close-grid,no-candidate	ok
+N	P04	名前	16	0	0	19	0	1	1	14	10	0	0	0	2	0	0	30501	20	0	-1	left,open-grid,close-grid,no-candidate	ok
+N	N04	通常文	15	1	1	16	0	0	1	7	5	0	0	0	2	0	0	12164	17	0	-1		ok
+N	N01	通常文	14	0	0	18	0	0	1	13	7	0	0	0	2	0	0	24132	19	0	-1	open-grid,close-grid,no-candidate	ok
+N	H04	同音異義語	16	1	1	19	0	0	1	13	8	0	0	0	1	0	0	13294	20	0	-1		ok
+N	U02	URL	30	1	0	43	0	7	1	9	6	0	0	0	6	2	0	62552	44	0	-1	left,left,left,pick1,left,left,pick1	ok
+N	L02	長文	48	1	1	52	0	0	1	25	19	0	0	0	8	0	0	25924	53	0	-1		ok
+N	D02	数値	13	1	1	16	0	0	1	8	5	0	0	0	2	0	0	11918	17	0	-1		ok
+N	H05	同音異義語	11	1	1	10	0	0	1	8	5	0	0	0	1	0	0	9757	11	0	-1		ok
+N	N02	通常文	13	1	1	13	0	0	1	4	3	0	0	0	2	0	0	11073	14	0	-1		ok
+N	C05	過去訂正	12	0	0	14	0	1	1	6	5	0	0	0	1	0	0	28603	15	0	-1	left,open-grid,close-grid,no-candidate	ok
+N	C02	過去訂正	13	0	0	16	0	0	1	11	9	0	0	0	1	0	0	23837	17	0	-1	open-grid,close-grid,no-candidate	ok
+N	U05	URL	22	1	1	32	0	0	1	0	0	0	0	0	0	0	0	17586	33	0	-1		ok
+N	P05	名前	17	1	1	22	0	0	1	12	8	0	0	0	2	0	0	14390	23	0	-1		ok
+N	Q05	句点なし	9	1	1	11	0	0	1	4	3	0	0	0	1	0	0	10201	12	0	-1		ok
+N	N05	通常文	16	1	1	16	0	0	1	8	6	0	0	0	3	0	0	11867	17	0	-1		ok
+N	E02	英語混在	18	0	0	25	0	1	1	4	3	0	0	0	2	0	0	34438	26	0	-1	left,open-grid,close-grid,no-candidate	ok
+N	L05	長文	45	0	0	52	0	1	1	30	20	0	0	0	8	0	0	43135	53	0	-1	left,open-grid,close-grid,no-candidate	ok
+N	D05	数値	14	0	0	22	0	1	1	14	8	0	0	0	5	0	0	32213	23	0	-1	left,open-grid,close-grid,no-candidate	ok
+N	E05	英語混在	13	1	1	15	0	0	1	3	2	0	0	0	1	0	0	11615	16	0	-1		ok
+N	H02	同音異義語	12	1	1	14	0	0	1	8	5	0	0	0	2	0	0	11217	15	0	-1		ok
+N	P02	名前	17	1	1	18	0	0	1	12	9	0	0	0	2	0	0	12255	19	0	-1		ok
+N	Q02	句点なし	7	1	1	9	0	0	1	8	5	0	0	0	0	0	0	9365	10	0	-1		ok
+N	D03	数値	19	1	1	26	0	0	1	11	6	0	0	0	4	0	0	15845	27	0	-1		ok
+N	C06	過去訂正	11	0	0	13	0	1	1	5	4	0	0	0	1	0	0	28435	14	0	-1	left,open-grid,close-grid,no-candidate	ok
+N	U03	URL	34	1	1	47	0	0	1	0	0	0	0	0	0	0	0	23447	48	0	-1		ok
+N	E03	英語混在	12	1	1	16	0	0	1	7	5	0	0	0	2	0	0	12030	17	0	-1		ok
+N	D06	数値	17	1	0	24	0	3	1	14	7	0	0	0	3	1	0	33047	25	0	-1	left,left,pick1	ok
+N	P03	名前	15	1	1	17	0	0	1	13	8	0	0	0	2	0	0	12524	18	0	-1		ok
+N	N03	通常文	15	1	1	18	0	0	1	14	8	0	0	0	2	0	0	12631	19	0	-1		ok
+N	L06	長文	48	1	1	62	0	0	1	45	24	0	0	0	8	0	0	29607	63	0	-1		ok
+N	P06	名前	16	1	1	16	0	0	1	11	9	0	0	0	2	0	0	12313	17	0	-1		ok
+N	H06	同音異義語	18	0	0	26	0	1	1	15	6	0	0	0	3	0	0	33684	27	0	-1	left,open-grid,close-grid,no-candidate	ok
+N	C03	過去訂正	12	0	0	15	0	1	1	7	5	0	0	0	2	0	0	29116	16	0	-1	left,open-grid,close-grid,no-candidate	ok
+N	N06	通常文	17	1	1	19	0	0	1	16	11	0	0	0	2	0	0	13089	20	0	-1		ok
+N	L03	長文	49	0	0	61	0	1	1	41	26	0	0	0	9	0	0	46451	62	0	-1	left,open-grid,close-grid,no-candidate	ok
+N	H03	同音異義語	11	1	1	12	0	0	1	7	6	0	0	0	1	0	0	10431	13	0	-1		ok
+N	U06	URL	27	0	0	35	0	0	1	4	3	0	0	0	8	0	0	30083	36	0	-1	open-grid,close-grid,no-candidate	ok
+N	E06	英語混在	12	1	1	18	0	0	1	7	4	0	0	0	1	0	0	12782	19	0	-1		ok
+N	Q03	句点なし	8	0	0	10	0	0	1	5	5	0	0	0	1	0	0	21790	11	0	-1	open-grid,close-grid,no-candidate	ok
+N	Q06	句点なし	10	1	1	12	0	0	1	7	6	0	0	0	0	0	0	10499	13	0	-1		ok
+N-attempt1	D04	数値	13	1	0	18	0	2	1	10	5	0	0	0	2	1	0	24655	19	0	-1	left,pick1	ok
+N-attempt1	U04	URL	23	1	0	35	0	5	1	5	3	0	0	0	5	2	0	48532	36	0	-1	left,pick1,left,left,pick1	ok
+N-attempt1	E01	英語混在	21	1	1	26	0	0	1	4	2	0	0	0	2	0	0	15678	27	0	-1		ok
+N-attempt1	P01	名前	15	1	1	14	0	0	1	11	9	0	0	0	1	0	0	11340	15	0	-1		ok
+N-attempt1	C01	過去訂正	14	0	0	19	0	1	1	12	9	0	0	0	2	0	0	30905	20	0	-1	left,open-grid,close-grid,no-candidate	ok
+N-attempt1	E04	英語混在	21	0	0	28	0	0	1	8	6	0	0	0	2	0	0	28487	29	0	-1	open-grid,close-grid,no-candidate	ok
+N-attempt1	Q01	句点なし	5	1	1	5	0	0	1	4	4	0	0	0	0	0	0	7738	6	0	-1		ok
+N-attempt1	D01	数値	14	0	0	21	0	0	1	11	6	0	0	0	4	0	0	25758	22	0	-1	open-grid,close-grid,no-candidate	ok
+N-attempt1	C04	過去訂正	12	1	0	14	0	1	1	6	4	0	0	0	1	1	0	17368	15	0	-1	pick1	ok
+N-attempt1	H01	同音異義語	14	0	0	17	0	1	1	12	10	0	0	0	2	0	0	30555	18	0	-1	left,open-grid,close-grid,no-candidate	ok
+N-attempt1	U01	URL	20	1	1	25	0	0	1	0	0	0	0	0	0	0	0	15225	26	0	-1		ok
+N-attempt1	Q04	句点なし	9	1	1	10	0	0	1	6	5	0	0	0	0	0	0	10141	11	0	-1		ok
+N-attempt1	L04	長文	50	0	0	59	0	1	1	28	18	0	0	0	9	0	0	46868	60	0	-1	left,open-grid,close-grid,no-candidate	ok
+N-attempt1	L01	長文	50	0	0	66	0	7	1	35	21	0	0	0	9	0	0	85322	67	0	-1	left,left,left,left,left,left,left,open-grid,close-grid,no-candidate	ok
+N-attempt1	P04	名前	16	0	0	19	0	1	1	14	10	0	0	0	2	0	0	30746	20	0	-1	left,open-grid,close-grid,no-candidate	ok
+N-attempt1	N04	通常文	15	1	1	16	0	0	1	7	5	0	0	0	2	0	0	12148	17	0	-1		ok
+N-attempt1	N01	通常文	14	0	0	18	0	0	1	13	7	0	0	0	2	0	0	24663	19	0	-1	open-grid,close-grid,no-candidate	ok
+N-attempt1	H04	同音異義語	16	1	1	19	0	0	1	13	8	0	0	0	1	0	0	13009	20	0	-1		ok
+N-attempt1	U02	URL	30	1	0	43	0	7	1	9	6	0	0	0	6	2	0	63310	44	0	-1	left,left,left,pick1,left,left,pick1	ok
+N-attempt1	L02	長文	48	1	1	52	0	0	1	25	19	0	0	0	8	0	0	26366	53	0	-1		ok
+N-attempt1	D02	数値	13	1	1	16	0	0	1	8	5	0	0	0	2	0	0	11832	17	0	-1		ok
+N-attempt1	H05	同音異義語	11	1	1	10	0	0	1	8	5	0	0	0	1	0	0	9680	11	0	-1		ok
+N-attempt1	N02	通常文	13	1	1	13	0	0	1	4	3	0	0	0	2	0	0	10965	14	0	-1		ok
+N-attempt1	C05	過去訂正	12	0	0	14	0	1	1	6	5	0	0	0	1	0	0	29221	15	0	-1	left,open-grid,close-grid,no-candidate	ok
+N-attempt1	C02	過去訂正	13	0	0	16	0	0	1	11	9	0	0	0	1	0	0	24026	17	0	-1	open-grid,close-grid,no-candidate	ok
+O-past	C01	過去訂正	14	1	0	21	4	1	1	0	0	0	0	0	0	0	0	6144	22	0	44020	convert,pick0,pick2,pick0,pick0	ok
+O-past	C04	過去訂正	12	1	0	17	3	1	1	0	0	0	0	0	0	0	0	5169	18	0	36650	convert,pick0,pick1,pick0	ok
+O-past	C05	過去訂正	12	1	0	15	3	1	1	0	0	0	0	0	0	0	0	4195	16	0	36084	convert,pick2,pick0,pick0	ok
+O-past	C02	過去訂正	13	1	0	18	3	1	1	0	0	0	0	0	0	0	0	5394	19	0	36824	convert,pick0,pick1,pick0	ok
+O-past	C06	過去訂正	11	1	0	14	3	1	1	0	0	0	0	0	0	0	0	3787	15	0	35559	convert,pick1,pick0,pick0	ok
+O-past	C03	過去訂正	12	1	0	17	4	1	1	0	0	0	0	0	0	0	0	4744	18	0	42706	convert,pick0,pick1,pick0,pick0	ok
+N-past	C01	過去訂正	14	0	0	35	0	8	2	20	15	0	0	0	3	0	0	55862	37	0	56218	delete7,retype8,left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-past	C04	過去訂正	12	1	0	26	0	6	2	10	6	0	0	0	1	1	0	34012	28	0	34329	delete5,retype6,pick1	ok
+N-past	C05	過去訂正	12	0	0	33	0	9	2	12	10	0	0	0	2	0	0	55430	35	0	55803	delete8,retype11,left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-past	C02	過去訂正	13	0	0	29	0	6	2	16	13	0	0	0	1	0	0	48643	31	0	48993	delete6,retype6,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-past	C06	過去訂正	11	0	0	31	0	9	2	10	8	0	0	0	2	0	0	55130	33	0	55481	delete8,retype10,left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-past	C03	過去訂正	12	0	0	31	0	8	2	13	9	0	0	0	3	0	0	55468	33	0	55789	delete7,retype8,left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+O-diag	U05	URL	22	1	1	34	0	0	1	0	0	0	0	0	0	0	0	18620	35	0	-1		ok
+O-diag	U03	URL	34	1	1	47	0	0	1	0	0	0	0	0	0	0	0	23287	48	0	-1		ok
+O-diag	U06	URL	27	1	0	43	5	5	1	0	0	0	0	0	0	0	0	82068	44	0	-1	convert,pick0,pick0,pick1,pick1,pick1,pick0,pick1,pick0,pick1	ok
+N-diag	E04	英語混在	21	0	0	28	0	0	1	8	6	0	0	0	2	0	0	35279	29	0	-1	open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	D01	数値	14	0	0	21	0	0	1	11	6	0	0	0	4	0	0	32187	22	0	-1	open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	H01	同音異義語	14	0	0	17	0	1	1	12	10	0	0	0	2	0	0	37583	18	0	-1	left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	L04	長文	50	0	0	59	0	1	1	28	18	0	0	0	9	0	0	52761	60	0	-1	left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	L01	長文	50	0	0	66	0	7	1	35	21	0	0	0	9	0	0	91144	67	0	-1	left,left,left,left,left,left,left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	P04	名前	16	0	0	19	0	1	1	14	10	0	0	0	2	0	0	39922	20	0	-1	left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	N01	通常文	14	0	0	18	0	0	1	13	7	0	0	0	2	0	0	31671	19	0	-1	open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	E02	英語混在	18	0	0	25	0	1	1	4	3	0	0	0	2	0	0	39101	26	0	-1	left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	L05	長文	45	0	0	52	0	1	1	30	20	0	0	0	8	0	0	50547	53	0	-1	left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	D05	数値	14	0	0	22	0	1	1	14	8	0	0	0	5	0	0	38909	23	0	-1	left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	H06	同音異義語	18	0	0	26	0	1	1	15	6	0	0	0	3	0	0	40702	27	0	-1	left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	L03	長文	49	0	0	61	0	1	1	41	26	0	0	0	9	0	0	54556	62	0	-1	left,open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	U06	URL	27	0	0	37	0	0	1	4	3	0	0	0	8	0	0	38457	38	0	-1	open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok
+N-diag	Q03	句点なし	8	0	0	10	0	0	1	4	4	0	0	0	1	0	0	28496	11	0	-1	open-grid,scroll,grid-absent-full,close-grid,no-candidate	ok

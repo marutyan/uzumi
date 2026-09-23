@@ -550,6 +550,9 @@ class TaskResult:
     note: str = ""
     sent_presses: int = 0
     reading_length: int = 0
+    # 過去訂正の課題だけ：最初の押下の直前から最後の押下の直後までの端末の時刻の差（ms）。
+    # 句点の後に訂正する手順では、評価用計数の完了時間（最後の終端操作まで）が訂正を含まないため、終点を揃えて別に測る。
+    aligned_elapsed_ms: int = -1
 
 
 # 開発時の確認用。設定すると表示と候補を標準エラーへ出す（本番の測定では設定しない）。
@@ -575,12 +578,14 @@ def remaining_targets(targets: List[str], committed: str) -> List[str]:
     return [t[len(committed):] for t in targets if t.startswith(committed)]
 
 
-def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str]) -> Snapshot:
+def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all: bool = False) -> Snapshot:
     """明示変換（条件O）の訂正。変換キーで変換し、先頭文節の候補を目標と照合して選ぶ。
 
     先頭文節の候補のうち目標の残りの接頭辞になる最長の候補を選ぶ（第一候補なら確定操作、他は訂正操作）。
     選ぶと先頭文節が確定し、残りの読みが変換し直される。先頭文節ごとにしか選べないため、
     後ろの文節だけが誤っていても前の文節の第一候補を選んで確定していく。
+    [commit_all]がtrueなら、表示が目標と一致しても未確定の文節が残る間は候補を選んで確定し続ける
+    （句点を読みに含めて入力した過去訂正の課題では、句点の後に確定の操作が要るため）。
     """
     committed = ""
     converted = False
@@ -591,7 +596,9 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str]) -> Snapshot
         if display is None:
             steps.append("lost-prefix")
             return snap
-        if display in rest:
+        if "" in rest and display == "":
+            return snap
+        if display in rest and not commit_all:
             return snap
         if not converted:
             kb.send(plan_switch(kb.state, "KANA"))
@@ -602,17 +609,11 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str]) -> Snapshot
             continue
         choice = pick_prefix([c for c, _ in snap.candidates], rest)
         source = snap.candidates
-        if choice is None and "候補の一覧を開く、または閉じる" in snap.buttons:
-            kb.tap(snap.buttons["候補の一覧を開く、または閉じる"])
-            steps.append("open-grid")
-            snap = settle_snapshot()
-            choice = pick_prefix([c for c, _ in snap.grid], rest)
-            source = snap.grid
+        if choice is None and GRID_BUTTON in snap.buttons:
+            snap, source, choice = search_grid(kb, snap, lambda values: pick_prefix(values, rest), steps)
             if choice is None:
-                kb.tap(snap.buttons["候補の一覧を開く、または閉じる"])
-                steps.append("close-grid")
                 steps.append("no-candidate")
-                return settle_snapshot()
+                return snap
         if choice is None:
             steps.append("no-candidate")
             return snap
@@ -625,6 +626,51 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str]) -> Snapshot
     return snap
 
 
+# 候補一覧（∨）を開閉するボタンの読み上げ名。
+GRID_BUTTON = "候補の一覧を開く、または閉じる"
+# 候補一覧を1回スクロールする指の動き（y座標、px）と時間（ms）。一覧はキーボードの面（y 1711〜2299）を覆う。
+# 慣性で飛ばないよう遅く動かし、1回で一覧の約5行分（1行52dp≒130 px）を上へ送る。
+GRID_SCROLL_FROM_Y = 2250
+GRID_SCROLL_TO_Y = 1800
+GRID_SCROLL_MS = 700
+# スクロールの上限。候補が多くてもこの回数で打ち切る。
+GRID_MAX_SCROLLS = 15
+
+
+def search_grid(kb: "Keyboard", snap: Snapshot, choose, steps: List[str]):
+    """候補一覧を開き、見えている範囲で目標に合う候補を探し、無ければ下へスクロールして全範囲を探す。
+
+    見つかれば一覧を開いたまま（押す候補が見えている画面と、その候補を）返す。最後まで無ければ一覧を閉じて
+    Noneを返す。スクロールはIMEへ操作を送らないため評価用計数には入らず、手順の記録（steps）にだけ残す。
+    候補の文字列は記録せず、見つかったか（`grid-found-s<スクロール回数>`）と、全範囲に無かったか
+    （`grid-absent-full`、打ち切った場合は`grid-absent-limit`）だけを残す。
+    """
+    kb.tap(snap.buttons[GRID_BUTTON])
+    steps.append("open-grid")
+    snap = settle_snapshot()
+    seen = set()
+    for scrolls in range(GRID_MAX_SCROLLS + 1):
+        values = [g for g, _ in snap.grid]
+        choice = choose(values)
+        if choice is not None:
+            steps.append(f"grid-found-s{scrolls}")
+            return snap, snap.grid, choice
+        new = set(values) - seen
+        if scrolls > 0 and not new:
+            steps.append("grid-absent-full")
+            break
+        seen |= set(values)
+        if scrolls == GRID_MAX_SCROLLS:
+            steps.append("grid-absent-limit")
+            break
+        shell(f"input swipe 540 {GRID_SCROLL_FROM_Y} 540 {GRID_SCROLL_TO_Y} {GRID_SCROLL_MS}")
+        steps.append("scroll")
+        snap = settle_snapshot()
+    kb.tap(snap.buttons[GRID_BUTTON])
+    steps.append("close-grid")
+    return settle_snapshot(), [], None
+
+
 def pick_prefix(values: List[str], rest: List[str]) -> Optional[Tuple[int, str]]:
     """目標の残りのどれかの接頭辞になる候補のうち最長のもの（同じ長さなら前の候補）。"""
     best = None
@@ -634,12 +680,13 @@ def pick_prefix(values: List[str], rest: List[str]) -> Optional[Tuple[int, str]]
     return best
 
 
-def fix_live(kb: Keyboard, targets: List[str], steps: List[str]) -> Snapshot:
+def fix_live(kb: Keyboard, targets: List[str], steps: List[str], base: int = 0) -> Snapshot:
     """ライブ変換（条件N）の訂正。末尾の文節から「←」で前の文節へ移り、誤った文節の候補を選ぶ。
 
     右側の文節が目標と一致している前提で、対象の文節の表記を候補一覧から特定し（表示の残りの末尾に
     一致する最長の候補）、目標の対応する位置の末尾に一致しなければ、一致する候補を選ぶ。
     選んだ後に表示の右側が変わった場合は「末尾」で入力位置へ戻り、末尾から照合し直す。
+    [base]は試験欄のうち確定済みの先頭の文字数で、compositionはその後ろから始まる（過去訂正の打ち直し用）。
     """
     snap = settle_snapshot()
     end = len(snap.field_text)
@@ -649,7 +696,7 @@ def fix_live(kb: Keyboard, targets: List[str], steps: List[str]) -> Snapshot:
             return snap
         values = [c for c, _ in snap.candidates]
         # 読点は候補バーの対象にならず、「←」で飛ばされる。
-        while end > 0 and display[end - 1] == "、":
+        while end > base and display[end - 1] == "、":
             end -= 1
         suffix = display[end:]
         aligned = [t[: len(t) - len(suffix)] for t in targets if t.endswith(suffix)]
@@ -665,7 +712,7 @@ def fix_live(kb: Keyboard, targets: List[str], steps: List[str]) -> Snapshot:
             return snap
         start = end - len(current)
         if any(a.endswith(current) for a in aligned):
-            if start == 0:
+            if start <= base:
                 steps.append("no-wrong-segment")
                 return snap
             move_left(kb)
@@ -675,18 +722,12 @@ def fix_live(kb: Keyboard, targets: List[str], steps: List[str]) -> Snapshot:
             continue
         choice = pick_suffix(values, current, aligned)
         source = snap.candidates
-        if choice is None and "候補の一覧を開く、または閉じる" in snap.buttons:
-            # 候補バーに見えない候補は、候補一覧（∨）を開いて探す。
-            kb.tap(snap.buttons["候補の一覧を開く、または閉じる"])
-            steps.append("open-grid")
-            snap = settle_snapshot()
-            choice = pick_suffix([c for c, _ in snap.grid], current, aligned)
-            source = snap.grid
+        if choice is None and GRID_BUTTON in snap.buttons:
+            # 候補バーに見えない候補は、候補一覧（∨）を開き、全範囲をスクロールして探す。
+            snap, source, choice = search_grid(kb, snap, lambda vals: pick_suffix(vals, current, aligned), steps)
             if choice is None:
-                kb.tap(snap.buttons["候補の一覧を開く、または閉じる"])
-                steps.append("close-grid")
                 steps.append("no-candidate")
-                return settle_snapshot()
+                return snap
         if choice is None:
             steps.append("no-candidate")
             return snap
@@ -701,7 +742,7 @@ def fix_live(kb: Keyboard, targets: List[str], steps: List[str]) -> Snapshot:
         if new_display.endswith(before_suffix) and new_display[: len(new_display) - len(before_suffix)].endswith(value):
             new_end = len(new_display) - len(before_suffix)
             start = new_end - len(value)
-            if start == 0:
+            if start <= base:
                 steps.append("no-wrong-segment")
                 return snap
             move_left(kb)
@@ -768,9 +809,108 @@ def prepare_task(kb: Keyboard, task_id: str) -> Snapshot:
     return snap
 
 
+def device_ms() -> int:
+    """端末の時計の現在時刻（epochからのミリ秒）。評価用計数の時刻と同じ時計を使う。"""
+    out = shell("date +%s%N").strip()
+    return int(out) // 1_000_000
+
+
+def to_hiragana(char: str) -> str:
+    """カタカナ一文字をひらがなへ直す。それ以外はそのまま返す。"""
+    code = ord(char)
+    return chr(code - 0x60) if 0x30A1 <= code <= 0x30F6 else char
+
+
+def align_reading(surface: str, reading: str) -> Optional[List[Tuple[int, int, int, int]]]:
+    """表記と読みを対応付ける。かな・記号は読みの同じ一文字に、続いた漢字などは読みの1文字以上に対応させる。
+
+    返り値は（表記の開始、終了、読みの開始、終了）の列。過去訂正の打ち直しで、表記の位置から読みの位置を
+    求めるためだけに使う。対応が複数あり得る場合は、漢字の読みを短い方から試して最初に見つかったものを使う。
+    """
+    groups: List[Tuple[int, int, bool]] = []
+    i = 0
+    while i < len(surface):
+        char = surface[i]
+        if "\u3041" <= to_hiragana(char) <= "\u3096" or not char.isalpha():
+            groups.append((i, i + 1, True))
+            i += 1
+            continue
+        j = i
+        while j < len(surface) and surface[j].isalpha() and not ("\u3041" <= to_hiragana(surface[j]) <= "\u3096"):
+            j += 1
+        groups.append((i, j, False))
+        i = j
+
+    def solve(g: int, r: int) -> Optional[List[Tuple[int, int, int, int]]]:
+        if g == len(groups):
+            return [] if r == len(reading) else None
+        start, end, literal = groups[g]
+        if literal:
+            if r < len(reading) and to_hiragana(surface[start]) == reading[r]:
+                rest = solve(g + 1, r + 1)
+                return None if rest is None else [(start, end, r, r + 1)] + rest
+            return None
+        for length in range(1, len(reading) - r + 1):
+            rest = solve(g + 1, r + length)
+            if rest is not None:
+                return [(start, end, r, r + length)] + rest
+        return None
+
+    return solve(0, 0)
+
+
+def run_past_correction(kb: Keyboard, task: Task, condition: str, steps: List[str]) -> Tuple[Snapshot, int]:
+    """過去訂正の課題を評価条件どおりに行う：句点まで読みを入力してから、前の語を直す。
+
+    条件N：句点で表示が確定するため、目標と最初に食い違う語の先頭まで削除キーで消し、その語から後の読みを
+    打ち直し、ライブ変換の訂正（fix_live）をしてから句点を入れる。確定済みの文字列を候補で直す操作は無いため、
+    削除と打ち直しが候補の選択だけで直す手順の下限になる。
+    条件O：明示変換では句点も読みに入り表示は確定しないため、句点まで入れてから変換し、先頭の文節から
+    候補を選んで最後まで確定する（fix_explicitのcommit_all）。
+    どちらも、最初の押下の直前と最後の押下の直後の端末の時刻を返し、完了時間の終点を揃える。
+    """
+    first_ms = device_ms()
+    presses, _ = plan_text(task.reading, kb.state)
+    kb.send(presses)
+    if condition == "O":
+        snap = fix_explicit(kb, task.accepted, steps, commit_all=True)
+        return snap, device_ms() - first_ms
+    snap = settle_snapshot()
+    committed = snap.field_text
+    if committed in task.accepted:
+        return snap, device_ms() - first_ms
+    target = task.accepted[0]
+    prefix = 0
+    while prefix < min(len(committed), len(target)) and committed[prefix] == target[prefix]:
+        prefix += 1
+    alignment = align_reading(target, task.reading)
+    group = None if alignment is None else next((g for g in alignment if g[0] <= prefix < g[1]), None)
+    if group is None:
+        steps.append("no-alignment")
+        return snap, device_ms() - first_ms
+    keep, reading_start = group[0], group[2]
+    kb.send(plan_switch(kb.state, "KANA"))
+    kb.send([Press("KANA", "削除")] * (len(committed) - keep))
+    steps.append(f"delete{len(committed) - keep}")
+    snap = settle_snapshot()
+    if snap.field_text != committed[:keep]:
+        steps.append("delete-mismatch")
+        return snap, device_ms() - first_ms
+    retype = task.reading[reading_start:-1]
+    presses, _ = plan_text(retype, kb.state)
+    kb.send(presses)
+    steps.append(f"retype{len(retype)}")
+    snap = fix_live(kb, [t[:-1] for t in task.accepted], steps, base=keep)
+    kb.send(plan_switch(kb.state, "KANA"))
+    kb.send([Press("KANA", "読点", "L")])
+    return snap, device_ms() - first_ms
+
+
 def run_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
     """1課題を、計数の開始→読み→訂正→終端操作→計数の終了→最終文の照合の順に行う。"""
     prepare_task(kb, task.task_id)
+    if task.category == "過去訂正":
+        return run_past_task(kb, task, condition)
     reading = task.reading
     terminator = "。" if reading.endswith("。") else "ENTER"
     body = reading[:-1] if terminator == "。" else reading
@@ -807,6 +947,31 @@ def run_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
                         sent_presses=kb.sent, reading_length=len(reading))
     log(f"{condition} {task.task_id} correct={correct} keys={counts.get('keys')} commits={counts.get('commits')} "
         f"corr={counts.get('corrections')} steps={','.join(steps) or '-'} sent={kb.sent}")
+    return result
+
+
+def run_past_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
+    """過去訂正の課題1件を、計数の開始→run_past_correction→計数の終了→最終文の照合の順に行う。"""
+    steps: List[str] = []
+    broadcast("EVAL_START", task.task_id)
+    kb.sent = 0
+    try:
+        _, aligned = run_past_correction(kb, task, condition, steps)
+        time.sleep(SETTLE_S)
+        final = dump()
+    except Abort:
+        try:
+            broadcast("EVAL_FINISH")
+        except Exception:
+            pass
+        raise
+    values = broadcast("EVAL_FINISH").strip().split("\t")
+    counts = {name: int(v) if re.fullmatch(r"-?\d+", v) else v for name, v in zip(COUNT_COLUMNS, values)}
+    correct = matches(final.field_text, task.accepted)
+    result = TaskResult(condition, task.task_id, task.category, correct, counts, steps,
+                        sent_presses=kb.sent, reading_length=len(task.reading), aligned_elapsed_ms=aligned)
+    log(f"{condition} {task.task_id} correct={correct} keys={counts.get('keys')} commits={counts.get('commits')} "
+        f"corr={counts.get('corrections')} aligned_ms={aligned} steps={','.join(steps) or '-'} sent={kb.sent}")
     return result
 
 
@@ -890,6 +1055,7 @@ def main() -> int:
     parser.add_argument("--condition", choices=["O", "N"])
     parser.add_argument("--tasks", help="課題IDをカンマ区切りで指定（開発の確認用）")
     parser.add_argument("--work", required=False, default=str(REPO / ".local-build" / "phase2c" / time.strftime("%Y-%m-%d")))
+    parser.add_argument("--out", help="結果を書くjsonlのファイル名（既定はresults-<条件>.jsonl）")
     parser.add_argument("--resume-from", help="中断した条件を、この課題IDから続ける")
     parser.add_argument("--no-prepare", action="store_true", help="学習の消去と設定の変更を行わない")
     args = parser.parse_args()
@@ -924,7 +1090,7 @@ def main() -> int:
         (work / f"order-{args.condition}.txt").write_text(
             f"seed={ORDER_SEED}\n" + "\n".join(t.task_id for t in selected) + "\n", encoding="utf-8")
     kb = Keyboard(layouts)
-    out_path = work / f"results-{args.condition}.jsonl"
+    out_path = work / (args.out or f"results-{args.condition}.jsonl")
     with out_path.open("a", encoding="utf-8") as out:
         for task in selected:
             try:
