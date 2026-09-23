@@ -129,6 +129,7 @@ class CompositionBuffer {
         if (selectionEnd == 0) return false
         clusters.removeAt(selectionEnd - 1)
         selectionStart = selectionEnd - 1
+        selectionEnd = selectionStart
         displayOverride = null
         return true
     }

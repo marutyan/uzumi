@@ -2,7 +2,7 @@
 
 ## 現在地
 
-Phase 0はPR #1で完了し、2026-09-21のユーザー指示でPhase 1へ着手。現在は`feature/ime-bootstrap`で入力基盤とキーUIを統合し、APK生成・単体テスト49件・lintを確認した段階。2026-09-22の再レビューで再現した空白確定時の遅延通知による文字欠落は修正し、独立レビューでも解消を確認した。入力基盤の初回実装を一つの作業単位として統合する。実機での互換性・性能は未検証であり、漢字変換とユーザー辞書を含むPhase 1全体の完成ではない。
+Phase 0はPR #1で完了し、2026-09-21のユーザー指示でPhase 1へ着手。入力基盤とキーUIはAPK生成・単体テスト49件・lint・独立レビューを経て、2026-09-22に[PR #2](https://github.com/marutyan/uzumi/pull/2)でmainへ統合した（`a4dddf2`）。空白確定時の遅延通知による文字欠落も修正済み。現在は`validation/pixel-input`で、Pixel 10 Proの試用画面で見つかった画面端の重なりとカーソル編集の誤りを修正し、[実機で再確認](../docs/phase1-device-validation.md)した。50件の単体テスト、APK生成、lint、独立レビューは成功。QWERTYと数字を含む基本入力は試用欄で確認したが、別アプリや機密欄との互換性・性能は未検証であり、漢字変換とユーザー辞書を含むPhase 1全体の完成ではない。
 
 | 作業 | 状態 | 成果物・証拠 |
 |---|---|---|
@@ -12,8 +12,8 @@ Phase 0はPR #1で完了し、2026-09-21のユーザー指示でPhase 1へ着手
 | UX・評価調査 | done | docs/research/ux-and-evaluation.md |
 | 状態設計とMVP・段階計画 | done | docs/phase0-proposal.md、docs/live-conversion-design.md、本書 |
 | 独立レビューと文書検証 | done | 2026-09-20、7文書の要求/API保証/license区分/状態/MVP整合を確認し合格。Android 17メモリ制限の指摘を修正して再確認。相対リンク・表列数・fence・git diff --cached --checkも合格 |
-| Phase 1a 入力基盤 | in_progress | 初回実装・49単体テスト・独立レビュー完了。実機互換試験は未実施 |
-| Phase 1b キーUI | in_progress | 12-key flick、英語QWERTY、数字・記号の実装・ローカル検証完了。操作感とTalkBack実機試験は未実施 |
+| Phase 1a 入力基盤 | in_progress | 50単体テストとPixel試用欄の基本編集は合格。別アプリ・機密欄・回転等の互換試験は未実施 |
+| Phase 1b キーUI | in_progress | 12-key、英語QWERTY、数字の試用欄入力と最下段操作をPixelで確認。記号の網羅・長押し・TalkBackは未実施 |
 | Phase 1c 漢字変換・辞書 | in_progress | [JNI・辞書資産・追加導入の確認](../docs/mozc-integration-plan.md)完了。native buildと組込みは未実施 |
 | Phase 2以降 | pending | Phase 1の受入条件を満たしてから開始 |
 

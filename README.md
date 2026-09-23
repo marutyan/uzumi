@@ -4,7 +4,7 @@
 
 Phase 1の入力基盤として、Android IMEサービス、かな・英字・数字キーボード、composition、かな・カナ候補、確定・削除・カーソル・editor actionを実装しています。設定画面からIMEの有効化と切替へ進み、同じ画面のEditTextで入力を試せます。
 
-漢字変換、ニューラル変換、ユーザー辞書はまだ含みません。ローカルのbuild・JVMテスト・lintは通過していますが、実機へインストールした互換性試験は未実施です。確認済みの範囲は[Phase 1検証記録](docs/phase1-validation.md)に記載します。
+漢字変換、ニューラル変換、ユーザー辞書はまだ含みません。ローカルのbuild・JVMテスト・lintは通過し、Pixel 10 Proの試用画面で基本入力を確認しました。別のアプリや機密欄との互換性はまだ未検証です。確認済みの範囲は[Phase 1のローカル検証](docs/phase1-validation.md)と[実機確認](docs/phase1-device-validation.md)に記載します。
 
 - [要求・推奨方針](docs/phase0-proposal.md)
 - [Android公式APIと制約](docs/research/android-platform.md)

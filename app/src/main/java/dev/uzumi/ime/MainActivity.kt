@@ -7,6 +7,8 @@ import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
+import android.view.View
+import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
@@ -67,6 +69,28 @@ class MainActivity : Activity() {
             imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI
         })
 
-        setContentView(ScrollView(this).apply { addView(content) })
+        val scrollView = ScrollView(this).apply {
+            addView(content)
+        }
+        applySystemInsets(scrollView)
+        setContentView(scrollView)
+    }
+
+    /** システムバー、ディスプレイカットアウト、IME領域のInsetsを反映し重なりを防ぐ。 */
+    private fun applySystemInsets(view: View) {
+        view.setOnApplyWindowInsetsListener { targetView, insets ->
+            val systemBars = insets.getInsets(
+                WindowInsets.Type.systemBars() or
+                    WindowInsets.Type.displayCutout() or
+                    WindowInsets.Type.ime()
+            )
+            targetView.setPadding(
+                systemBars.left,
+                systemBars.top,
+                systemBars.right,
+                systemBars.bottom
+            )
+            insets
+        }
     }
 }
