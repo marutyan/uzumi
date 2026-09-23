@@ -20,4 +20,6 @@
     <item name="compat_pin" type="id" />
     <item name="compat_nolearn" type="id" />
     <item name="compat_webview" type="id" />
+    <item name="compat_phone_format" type="id" />
+    <item name="compat_max_length" type="id" />
 </resources>

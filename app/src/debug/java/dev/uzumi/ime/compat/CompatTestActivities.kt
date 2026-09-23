@@ -3,12 +3,15 @@ package dev.uzumi.ime.compat
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.os.Bundle
+import android.telephony.PhoneNumberFormattingTextWatcher
 import android.text.Editable
+import android.text.InputFilter
 import android.text.InputType
 import android.text.TextWatcher
 import android.view.inputmethod.EditorInfo
 import android.webkit.WebView
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -83,6 +86,17 @@ class CompatEditTextActivity : Activity() {
                 imeOptions = imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
             },
         )
+        // 入力のたびに本文を書き換える欄。IMEのcompositionと本文の書換えが重なると重複・欠落が起きやすい。
+        content.addView(
+            field(R.id.compat_phone_format, "phonefmt", InputType.TYPE_CLASS_PHONE, EditorInfo.IME_ACTION_DONE).apply {
+                addTextChangedListener(PhoneNumberFormattingTextWatcher("JP"))
+            },
+        )
+        content.addView(
+            field(R.id.compat_max_length, "max4", text, EditorInfo.IME_ACTION_DONE).apply {
+                filters = arrayOf(InputFilter.LengthFilter(4))
+            },
+        )
         val maskedFields = listOf(R.id.compat_password, R.id.compat_pin).map { content.findViewById<EditText>(it) }
         val echoWatcher = object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -131,8 +145,10 @@ class CompatWebViewActivity : Activity() {
             settings.javaScriptEnabled = true
             loadDataWithBaseURL(null, PAGE, "text/html", "utf-8", null)
         }
-        applySystemInsets(webView)
-        setContentView(webView)
+        // WebViewは自身のpaddingで内容をずらさないため、外側の枠へinsetsを当ててステータスバーとの重なりを防ぐ。
+        val root = FrameLayout(this).apply { addView(webView) }
+        applySystemInsets(root)
+        setContentView(root)
     }
 
     private companion object {
