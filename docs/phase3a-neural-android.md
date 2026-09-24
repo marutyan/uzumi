@@ -7,7 +7,7 @@
 - llama.cpp（azooKey fork `66afb885`）とJNIの橋渡しを、Gradleの外でビルドする（`tools/neural/build_android.sh`）。生成物の場所をGradle property `uzumi.neuralArtifactsDir`で受け取り、jniLibsとして取り込む。指定しなければ、ニューラル変換なしでビルドとJVMテストが通り、IMEはMozcだけで動く。
 - 推論は別プロセス`:neural`のbound service（`NeuralRuntimeService`、exportしない）で行う。IMEとの受け渡しはoneway AIDLで、要求番号を付けて送る。新しい入力が来たら、古い要求の推論をllama.cppの中断callbackで止める。入力の受理から300 msを超えたら、モデルを待たずにMozcの結果を使う。
 - `NeuralRangeConverter`を`SegmentedLiveConverter`の部分範囲の変換へつないだ。保護範囲の表記と前の部分範囲の表記は、左文脈としてモデルへ渡る。学習禁止欄と機密欄では、左文脈を渡さない。30文字を超えるかなの連なりは、30文字以内で最も後ろにあるMozcの文節境界で区切る。
-- 評価の条件の切り替え（Mozcだけ／ZS／ZX／JS／JX）は、debugビルドだけで有効な選択としてadbから行う。製品の設定画面には出さない。INTERNET権限は足していない。
+- 評価の条件の切り替え（Mozcだけ／ZS／ZX／JS／JX）は、debugビルドだけで有効な選択としてadbから行う。debugビルドでは、ユーザーが試すために設定画面の「開発用」に「変換エンジン（開発用）」も出す（中身は`NEURAL_SELECT`と同じ`NeuralSelection.select`で、端末にモデルが無い項目は選べない）。releaseビルドの設定画面には出さない。INTERNET権限は足していない。
 - 評価条件が求める計数（H3の3つの件数と最終文の数字の並び、正→誤の遷移、分割とfallbackの回数、推論時間、適用までの時間、PSS）を足した。本文は記録しない。
 
 ## 構成
