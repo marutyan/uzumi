@@ -6,7 +6,7 @@ import dev.uzumi.ime.conversion.NeuralModelSpec
 
 /**
  * 評価の条件を切り替える「変換エンジン：Mozc／モデル名」の選択。debugビルドだけで有効で（`R.bool.neural_selection_enabled`）、
- * releaseビルドでは常にMozcだけになる。製品の設定画面には出さず、debugの受信口（adb）から書く。
+ * releaseビルドでは常にMozcだけになる。debugの受信口（adb）と、debugビルドの設定画面の「変換エンジン（開発用）」から書く。
  * IMEは入力欄の開始ごとに読み、次の入力欄から反映する。
  */
 object NeuralSelection {

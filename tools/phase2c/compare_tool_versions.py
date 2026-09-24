@@ -14,6 +14,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import shutil
 import statistics
@@ -26,8 +27,10 @@ REPO = Path(__file__).resolve().parents[2]
 NEW_TOOL = REPO / "tools" / "phase2c" / "run_automated.py"
 DEV_TASKS = REPO / "docs" / "phase3a-dev-tasks.tsv"
 PHASE2C_TASKS = REPO / "docs" / "phase2c-tasks.tsv"
-# 旧い版（版1）の道具が入ったcommit。2026-09-24の本測定に使った版。
-OLD_TOOL_COMMIT = "758a131"
+# 旧い版の道具が入ったcommit。版1の待ち方に伸縮の手順を加えた版で、Phase 2cの版2の結果（2026-09-24）を作った。
+OLD_TOOL_COMMIT = "2f27b80"
+# 旧い版の`run_automated.py`のSHA-256。取り出した道具が結果を作った道具と同じことを確かめるために使う。
+OLD_TOOL_SHA256 = "13c903f19cfd15796a887cd5ef7c6b873d8942d9923282958979740816daceb6"
 # 練習の課題ID。Phase 2cの課題文のうち、同等性の確認に使ってよいのはこれだけ。
 PRACTICE_IDS = ["R01", "R02", "R03", "R04", "R05", "R06"]
 
@@ -108,6 +111,8 @@ def extract_old_tool(work: Path, tasks_file: Path) -> Path:
     (root / "docs").mkdir(parents=True, exist_ok=True)
     source = subprocess.run(["git", "-C", str(REPO), "show", f"{OLD_TOOL_COMMIT}:tools/phase2c/run_automated.py"],
                             capture_output=True, text=True, check=True).stdout
+    if hashlib.sha256(source.encode("utf-8")).hexdigest() != OLD_TOOL_SHA256:
+        raise SystemExit(f"old tool at {OLD_TOOL_COMMIT} does not match the expected SHA-256")
     script = root / "tools" / "phase2c" / "run_automated.py"
     script.write_text(source, encoding="utf-8")
     shutil.copyfile(tasks_file, root / "docs" / "phase2c-tasks.tsv")

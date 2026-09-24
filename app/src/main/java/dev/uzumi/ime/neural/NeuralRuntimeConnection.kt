@@ -28,7 +28,7 @@ class NeuralRuntimeConnection(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var bound = false
     private var closed = false
-    private var restarts = 0
+    private val restarts = NeuralRestartPolicy(MAX_RESTARTS, RESTART_DELAY_MILLIS)
     private var runtime: INeuralRuntime? = null
 
     // bindを始めた時刻と、最初の推論結果が届くまでの時間（cold start、ミリ秒）。評価用で、未計測なら-1。
@@ -93,6 +93,13 @@ class NeuralRuntimeConnection(
         }
     }
 
+    /**
+     * 上限の回数まで接続し直し、その最後の接続も終了したため、接続し直すのをやめたか。予約中の再接続がある間は偽。
+     * IMEは新しい入力欄の開始でこの接続を作り直す（Mozcだけで続けるのは、その入力欄の間だけにする）。UIスレッドから読む。
+     */
+    val gaveUp: Boolean
+        get() = !closed && restarts.gaveUp
+
     /** serviceへbindしてモデルの準備を始める。 */
     fun open() {
         if (closed || bound) return
@@ -122,16 +129,16 @@ class NeuralRuntimeConnection(
         runtime = null
         if (bound) runCatching { context.unbindService(connection) }
         bound = false
-        if (closed || restarts >= MAX_RESTARTS) return
-        restarts += 1
-        mainHandler.postDelayed(::open, RESTART_DELAY_MILLIS * restarts)
+        if (closed) return
+        val delay = restarts.nextDelayMillis() ?: return
+        mainHandler.postDelayed(::open, delay)
     }
 
     /** モデルを置く場所。debugではadbでこの場所へ置く（`docs/phase3a-neural-android.md`）。 */
     private fun modelFile(): File = modelDirectory(context).resolve(spec.fileName)
 
     companion object {
-        /** 別プロセスの終了後に接続し直す回数の上限。超えたらこの入力の間はMozcだけで続ける。 */
+        /** 別プロセスの終了後に接続し直す回数の上限。超えたらこの入力欄の間はMozcだけで続け、新しい入力欄で作り直す。 */
         const val MAX_RESTARTS = 3
 
         /** 接続し直すまでの間隔（ミリ秒）。回数に比例して延ばす。 */
@@ -141,3 +148,41 @@ class NeuralRuntimeConnection(
         fun modelDirectory(context: Context): File = File(context.filesDir, "neural")
     }
 }
+
+/**
+ * `:neural`の終了後に接続し直す回数と間隔の規則。一つの接続（入力欄の間）で[maxRestarts]回までとし、
+ * 間隔は回数に比例して延ばす。異常終了を繰り返すモデルで接続を無限に作り直さないためにある。
+ */
+class NeuralRestartPolicy(private val maxRestarts: Int, private val baseDelayMillis: Long) {
+    private var restarts = 0
+
+    /** 上限の回数まで再接続を予約したか（最後の再接続を試している途中も含む）。 */
+    val exhausted: Boolean
+        get() = restarts >= maxRestarts
+
+    /** 上限の回数の再接続を試し終え、その後の終了でも接続し直さないと決めたか。 */
+    var gaveUp: Boolean = false
+        private set
+
+    /** 終了を受けて、次に接続し直すまでの間隔（ミリ秒）を返し、回数を数える。上限を超えた終了ならnullを返し、やめたと記録する。 */
+    fun nextDelayMillis(): Long? {
+        if (exhausted) {
+            gaveUp = true
+            return null
+        }
+        restarts += 1
+        return baseDelayMillis * restarts
+    }
+}
+
+/**
+ * 入力欄の開始で、`:neural`への接続を作り直すかを決める。選択が変わったら作り直す。同じモデルでは、接続し直すのをやめた
+ * 接続を新しい入力欄の開始（[restarting]が偽）でだけ作り直す。同じ欄の再開始では、予約中の再接続も回数も変えない
+ * （終了と再開始を繰り返す欄で、上限を越えて接続し直し続けないため）。
+ */
+fun shouldRecreateNeuralConnection(
+    currentSpec: NeuralModelSpec?,
+    currentGaveUp: Boolean,
+    selected: NeuralModelSpec?,
+    restarting: Boolean,
+): Boolean = currentSpec != selected || (currentGaveUp && !restarting)

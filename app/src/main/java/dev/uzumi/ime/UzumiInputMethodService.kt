@@ -49,6 +49,7 @@ import dev.uzumi.ime.live.LiveConversionCore
 import dev.uzumi.ime.live.RequestIdentity
 import dev.uzumi.ime.neural.NeuralRuntimeConnection
 import dev.uzumi.ime.neural.NeuralSelection
+import dev.uzumi.ime.neural.shouldRecreateNeuralConnection
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -149,7 +150,7 @@ class UzumiInputMethodService : InputMethodService() {
         EvaluationStatusSource.provider = null
         EvaluationStatusSource.neuralMemoryRequester = null
         closeSession()
-        applyNeuralSelection(null)
+        applyNeuralSelection(null, restarting = false)
         mainHandler.removeCallbacksAndMessages(null)
         conversionExecutor?.shutdown()
         conversionExecutor = null
@@ -253,7 +254,7 @@ class UzumiInputMethodService : InputMethodService() {
         // debugビルドで選んだモデル。ニューラル変換はライブ変換の要求だけに使う。releaseビルドでは常にMozcだけ。
         // 明示変換の欄へ移っても接続は切らず、欄を行き来するたびにモデルを読み直さない。
         val neuralSpec = NeuralSelection.current(this)
-        applyNeuralSelection(neuralSpec)
+        applyNeuralSelection(neuralSpec, restarting)
         session = EditorSession(
             connection = AndroidInputConnectionPort(connection),
             policy = policy,
@@ -389,9 +390,12 @@ class UzumiInputMethodService : InputMethodService() {
     /**
      * 使うモデルを切り替える。前と同じなら何もしない。nullならMozcだけに戻し、推論serviceとの接続を切る。
      * 新しいモデルは`:neural`へbindして読み込ませ、準備ができるまではMozcの結果で入力を続ける。
+     * 同じモデルでも、`:neural`の終了が上限を超えて接続し直すのをやめた接続は、新しい入力欄の開始でだけ作り直す
+     * （[restarting]が真の同じ欄の再開始では作り直さない）。
      */
-    private fun applyNeuralSelection(spec: NeuralModelSpec?) {
-        if (neuralConnection?.spec == spec) return
+    private fun applyNeuralSelection(spec: NeuralModelSpec?, restarting: Boolean) {
+        val current = neuralConnection
+        if (!shouldRecreateNeuralConnection(current?.spec, current?.gaveUp == true, spec, restarting)) return
         conversionWorker?.setNeuralBackend(null)
         neuralConnection?.close()
         neuralConnection = spec?.let { NeuralRuntimeConnection(this, it).apply { open() } }

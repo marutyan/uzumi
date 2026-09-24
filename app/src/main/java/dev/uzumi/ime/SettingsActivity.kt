@@ -13,8 +13,11 @@ import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import dev.uzumi.ime.conversion.NeuralModelSpec
 import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.learning.LearningStores
+import dev.uzumi.ime.neural.NeuralRuntimeConnection
+import dev.uzumi.ime.neural.NeuralSelection
 
 /**
  * Uzumiの設定画面。入力・表示・操作の反応・学習と辞書に分けて並べ、値はUzumiSettingsだけに保存する。
@@ -60,6 +63,13 @@ class SettingsActivity : Activity() {
         content.addView(linkRow(R.string.open_licenses) {
             startActivity(Intent(this, LicenseActivity::class.java))
         })
+
+        // 変換エンジンの選択は、選択を使えるビルド（debug）だけに出す。releaseでは常にMozcだけで、項目も出さない。
+        if (NeuralSelection.isEnabled(this)) {
+            content.addView(section(R.string.settings_section_developer))
+            content.addView(label(R.string.settings_neural_engine, R.string.settings_neural_engine_description))
+            content.addView(engineChoices())
+        }
 
         val scrollView = ScrollView(this).apply { addView(content) }
         applySystemInsets(scrollView)
@@ -174,6 +184,32 @@ class SettingsActivity : Activity() {
                     minimumHeight = px(48)
                     isChecked = height == current
                     setOnCheckedChangeListener { _, checked -> if (checked) UzumiSettings.setKeyboardHeight(this@SettingsActivity, height) }
+                })
+            }
+        }
+    }
+
+    /**
+     * 変換エンジン（開発用）の「Mozc／ZS／ZX／JS／JX」。ユーザーが実機でモデルを試すための項目で、選ぶとadbの
+     * `NEURAL_SELECT`と同じ[NeuralSelection.select]で保存する。モデルのファイルが端末に無い項目は選べなくする。
+     */
+    private fun engineChoices(): RadioGroup {
+        val current = NeuralSelection.current(this)
+        val modelDirectory = NeuralRuntimeConnection.modelDirectory(this)
+        return RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+            (listOf<NeuralModelSpec?>(null) + NeuralModelSpec.entries).forEach { spec ->
+                // モデルを置いたか。ファイルの中身（SHA-256）は読み込み時に`:neural`が確かめるため、ここでは有無だけを見る。
+                val available = spec == null || modelDirectory.resolve(spec.fileName).isFile
+                val name = spec?.let { "${it.key}（${it.fileName.removeSuffix(".gguf")}）" }
+                    ?: getString(R.string.settings_neural_engine_mozc)
+                addView(RadioButton(this@SettingsActivity).apply {
+                    id = View.generateViewId()
+                    text = if (available) name else getString(R.string.settings_neural_engine_missing, name)
+                    minimumHeight = px(48)
+                    isEnabled = available
+                    isChecked = spec == current
+                    setOnCheckedChangeListener { _, checked -> if (checked) NeuralSelection.select(this@SettingsActivity, spec) }
                 })
             }
         }
