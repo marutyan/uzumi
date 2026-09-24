@@ -10,6 +10,7 @@
 
 変換結果を待つときは、固定の待ち時間ではなく、debugビルドの受信口の`EVAL_STATUS`（IMEの状態を数値と真偽だけで返す）を
 短い間隔で読み、送った押下をIMEが処理し終え、変換の仕事が残っていない状態になるまで待つ（道具の版2）。
+←で文節へ移った後、伸縮の後、候補一覧（∨）を開いた後は、候補の取り直しの結果が届くまでも待つ（道具の版3）。
 上限の時間を超えたら、その課題を中断として記録して止める。画面の読み取り（`uiautomator dump`）は、判断に画面が要る
 手順（課題の準備、候補を探す手順、最終文の照合）でだけ1回ずつ行う。
 
@@ -49,7 +50,8 @@ TASKS_TSV = REPO / "docs" / "phase2c-tasks.tsv"
 # 道具の版。待ち方など、結果に影響し得る道具の手順を変えたら上げ、各結果の行に記録する（評価条件の「道具の版」）。
 # 版1：固定の待ち時間（0.8秒）と画面の読み直しで変換結果を待つ（2026-09-24の本測定）。
 # 版2：状態の確認口（EVAL_STATUS）で処理の終わりを待ち、画面の読み取りを判断に要る手順だけにする。
-TOOL_VERSION = 2
+# 版3：版2の待ち方に伸縮の手順を合わせ、←・伸縮・∨の後は候補の取り直しの結果（candidates_outstanding）も待つ。
+TOOL_VERSION = 3
 
 # 評価条件で決めた課題の並べ替えseed。
 ORDER_SEED = 20261001
@@ -70,6 +72,10 @@ STATUS_POLL_S = 0.05
 SETTLE_TIMEOUT_S = 10.0
 # 課題の準備（欄を空にした後）で待つ上限（秒）。条件の最初の課題では辞書の読込みを待つことがあるため長めにする。
 PREPARE_TIMEOUT_S = 15.0
+# 候補の取り直しの結果を待つとき、変換の仕事が無いのに結果待ちが続いた読み取りの回数がこれに達したら、結果は来ないとみなす。
+# エンジンは英数字だけの読みなどでは取り直しの結果を返さず、IMEの結果待ちは次の依頼まで真のまま残るためである。
+# 結果はworkerの仕事が終わる前にUIスレッドへ積まれるため、仕事が0になった後の読み取りで結果待ちが残れば結果は来ない。
+CANDIDATES_UNANSWERED_READS = 3
 # 1課題で行う訂正の手順の上限。これを超えたら訂正を諦めて終端操作へ進む。
 MAX_FIX_STEPS = 30
 
@@ -457,6 +463,8 @@ class Keyboard:
         self.sent = 0
         # 評価用計数を始めてから終えるまでの間か。この間は、送った押下の数とIMEが数えた押下の数が一致するまで待つ。
         self.recording = False
+        # 候補の取り直しを起こす操作（←、伸縮の長押し、候補一覧を開く）を送ったか。次の待ちで取り直しの結果も待つ。
+        self.candidates_requested = False
 
     def command(self, press: Press) -> str:
         """押下1回のinput命令。"""
@@ -631,16 +639,19 @@ def status_settled(status: Dict[str, int], expected_presses: Optional[int]) -> b
 
 
 def wait_settled(expected_presses: Optional[int], timeout: float = SETTLE_TIMEOUT_S,
-                 require_empty: bool = False) -> Dict[str, int]:
+                 require_empty: bool = False, candidates: bool = False) -> Dict[str, int]:
     """押下と変換の処理が終わるまで、状態の確認口を短い間隔で読んで待つ。
 
     変換の結果はIMEのUIスレッドへ後から届けられるため、処理が終わった状態を2回続けて同じ値で読めたときに終わりとする
     （1回目の読み取りの時点で積まれていた結果は、2回目の読み取りより先にUIスレッドで処理される）。
     [expected_presses]は計数中に送った押下の数で、IMEが数えた押下（キー操作数と終端操作数の和）と一致するまで待つ。
     多ければ二重入力の疑いとしてすぐ止める。入力先が試験欄でなければすぐ止める。上限を超えたら[SettleTimeout]。
+    [candidates]が真なら、候補の取り直しの結果（`candidates_outstanding`が0）も待つ（版3）。変換の仕事が無いまま
+    結果待ちが[CANDIDATES_UNANSWERED_READS]回続いたら、エンジンが結果を返さない依頼とみなして待ち終える。
     """
     deadline = time.monotonic() + timeout
     previous: Optional[Dict[str, int]] = None
+    unanswered = 0
     while True:
         status = read_status()
         if status.get("input_active") == 1 and status.get("task_field") != 1:
@@ -648,6 +659,14 @@ def wait_settled(expected_presses: Optional[int], timeout: float = SETTLE_TIMEOU
         if expected_presses is not None and status.get("presses", -1) > expected_presses:
             raise Abort("IME received more presses than sent")
         settled = status_settled(status, expected_presses) and not (require_empty and status.get("composing") != 0)
+        if settled and candidates and status.get("candidates_outstanding") != 0:
+            unanswered += 1
+            if unanswered < CANDIDATES_UNANSWERED_READS:
+                settled = False
+            elif DEBUG:
+                log("candidate refresh was not answered; treat as no result")
+        else:
+            unanswered = 0
         if settled and status == previous:
             return status
         previous = status if settled else None
@@ -658,8 +677,10 @@ def wait_settled(expected_presses: Optional[int], timeout: float = SETTLE_TIMEOU
 
 
 def settle_snapshot(kb: "Keyboard") -> Snapshot:
-    """押下と変換の処理が終わるまで状態の確認口で待ってから、画面を1回読む。"""
-    wait_settled(kb.sent if kb.recording else None)
+    """押下と変換の処理が終わるまで状態の確認口で待ってから、画面を1回読む。
+    直前に候補の取り直しを起こす操作を送っていれば、取り直しの結果も待つ（版3）。"""
+    wait_settled(kb.sent if kb.recording else None, candidates=kb.candidates_requested)
+    kb.candidates_requested = False
     snap = dump()
     if DEBUG:
         log(f"display={snap.field_text!r} cands={[c for c, _ in snap.candidates]} grid={[g for g, _ in snap.grid]} chips={snap.chips} buttons={list(snap.buttons)}")
@@ -762,6 +783,7 @@ def search_grid(kb: "Keyboard", snap: Snapshot, choose, steps: List[str], seen_o
     （`grid-absent-full`、打ち切った場合は`grid-absent-limit`）だけを残す。
     """
     kb.tap(snap.buttons[GRID_BUTTON])
+    kb.candidates_requested = True
     steps.append("open-grid")
     snap = settle_snapshot(kb)
     seen = set()
@@ -913,6 +935,7 @@ def long_press_arrow(kb: Keyboard, direction: int, count: int) -> None:
     hold = RESIZE_FIRST_MS + RESIZE_INTERVAL_MS * (count - 1) + RESIZE_MARGIN_MS
     shell(f"input swipe {x} {y} {x} {y} {hold}", timeout=60)
     kb.sent += 1
+    kb.candidates_requested = True
 
 
 def char_kind(char: str) -> str:
@@ -1101,6 +1124,7 @@ def move_left(kb: Keyboard) -> None:
     if kb.state[0] not in ("KANA", "QWERTY"):
         kb.send(plan_switch(kb.state, "KANA"))
     kb.send([Press(kb.state[0], "カーソルを左へ移動")])
+    kb.candidates_requested = True
 
 
 def pick_suffix(values: List[str], current: str, aligned: List[str]) -> Optional[Tuple[int, str]]:
