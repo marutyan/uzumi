@@ -183,7 +183,7 @@ Phase 2cの道具には、課題の開始と終了で受信口へextraを渡す�
 | 項目 | 値 |
 | --- | --- |
 | 端末 | Pixel 10 Pro（`google/blazer_beta/blazer:17/CP41.260828.004.A8/16319058:user/release-keys`）、AC給電、電池100%、省電力OFF、温度状態0、明るさ34 |
-| APK | debug（生成物あり）。確認の途中で下の不具合を直して入れ替えた。直す前 SHA-256 `193b5ca7…ca0c`、直した後 `360ea2f8…f50c`（どちらも40,160,555 bytes）。1〜4と6は直す前、5は両方で確かめた |
+| APK | debug（生成物あり）。確認の途中で下の不具合を直して入れ替えた。直す前 SHA-256 `193b5ca7…ca0c`、直した後 `360ea2f8…f50c`（どちらも40,160,555 bytes）。下の1〜5と7は直す前、6（強制終了）は両方で確かめた |
 | `.so` | `tools/neural/build_android.sh`で作り直した（ビルドの作業場所に別のworktreeのcmakeの記録が残っていたため消してから作った）。`libuzumi_neural.so` `5337cd04…9a13`、`libggml-base.so` `26931d84…66fe`（前回の表と違う2本。前者は`05a9b56`の橋渡しの修正を含む。後者は大きさが同じで、違いの原因は未確認）、ほかの3本は前回の表と同じ |
 | モデル | `.local-build/neural-probe/models/`の4本を`files/neural/`へ置いた。端末上のSHA-256は`NeuralModelSpec`の値と4本とも一致 |
 | 道具 | `run_stage2.py run --rounds 1 --tasks VN01,VN02,VN03 --no-rest`（Phase 2cの道具は版3）。強制終了と準備の時間は、今回だけの補助の手順で測った |
