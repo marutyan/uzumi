@@ -322,6 +322,8 @@ def main() -> int:
                         help="集計には入れず、課題IDごとのTSVにだけ加える結果（ラベル=jsonlの場所）。途中で止めた回の記録に使う")
     parser.add_argument("--v2", action="store_true", help="版2の要約（過去訂正を本測定に含む）を出す")
     parser.add_argument("--v1-rows", help="版1の課題IDごとのTSV（版1との比較に使う）")
+    parser.add_argument("--extra-n", help="条件Nの残りの課題を別に流した結果。条件Nの集計に加える（版2の残り9課題）")
+    parser.add_argument("--exclude", default="", help="集計から外す課題ID（カンマ区切り）。感度分析に使う")
     args = parser.parse_args()
     work = Path(args.work)
     readings = load_readings()
@@ -344,6 +346,14 @@ def main() -> int:
         for row in rows:
             row["row_label"] = label
     if args.v2:
+        if args.extra_n:
+            # 残りの課題の結果を条件Nへ加える。本測定で中断した課題は、完了した行だけを残す。
+            extra = load_results(Path(args.extra_n), readings)
+            done = {r["task_id"] for r in extra if r["status"] == "ok"}
+            n_rows = [r for r in n_rows if r["task_id"] not in done] + extra
+        excluded = set(filter(None, args.exclude.split(",")))
+        o_rows = [r for r in o_rows if r["task_id"] not in excluded]
+        n_rows = [r for r in n_rows if r["task_id"] not in excluded]
         ok_o = {r["task_id"]: r for r in o_rows if r["status"] == "ok"}
         ok_n = {r["task_id"]: r for r in n_rows if r["status"] == "ok"}
         v1 = load_v1(Path(args.v1_rows)) if args.v1_rows else None
