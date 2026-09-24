@@ -28,7 +28,7 @@ class NeuralRuntimeConnection(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var bound = false
     private var closed = false
-    private var restarts = 0
+    private val restarts = NeuralRestartPolicy(MAX_RESTARTS, RESTART_DELAY_MILLIS)
     private var runtime: INeuralRuntime? = null
 
     // bindを始めた時刻と、最初の推論結果が届くまでの時間（cold start、ミリ秒）。評価用で、未計測なら-1。
@@ -93,6 +93,13 @@ class NeuralRuntimeConnection(
         }
     }
 
+    /**
+     * 別プロセスの終了が上限を超え、接続し直すのをやめたか。IMEは次の入力欄の開始でこの接続を作り直す
+     * （上限を超えた後もMozcだけで続けるのは、その入力欄の間だけにする）。UIスレッドから読む。
+     */
+    val gaveUp: Boolean
+        get() = !closed && runtime == null && restarts.exhausted
+
     /** serviceへbindしてモデルの準備を始める。 */
     fun open() {
         if (closed || bound) return
@@ -122,16 +129,16 @@ class NeuralRuntimeConnection(
         runtime = null
         if (bound) runCatching { context.unbindService(connection) }
         bound = false
-        if (closed || restarts >= MAX_RESTARTS) return
-        restarts += 1
-        mainHandler.postDelayed(::open, RESTART_DELAY_MILLIS * restarts)
+        if (closed) return
+        val delay = restarts.nextDelayMillis() ?: return
+        mainHandler.postDelayed(::open, delay)
     }
 
     /** モデルを置く場所。debugではadbでこの場所へ置く（`docs/phase3a-neural-android.md`）。 */
     private fun modelFile(): File = modelDirectory(context).resolve(spec.fileName)
 
     companion object {
-        /** 別プロセスの終了後に接続し直す回数の上限。超えたらこの入力の間はMozcだけで続ける。 */
+        /** 別プロセスの終了後に接続し直す回数の上限。超えたらこの入力欄の間はMozcだけで続け、次の入力欄で作り直す。 */
         const val MAX_RESTARTS = 3
 
         /** 接続し直すまでの間隔（ミリ秒）。回数に比例して延ばす。 */
@@ -139,5 +146,24 @@ class NeuralRuntimeConnection(
 
         /** モデルを置くディレクトリ（アプリのfilesの下）。 */
         fun modelDirectory(context: Context): File = File(context.filesDir, "neural")
+    }
+}
+
+/**
+ * `:neural`の終了後に接続し直す回数と間隔の規則。一つの接続（入力欄の間）で[maxRestarts]回までとし、
+ * 間隔は回数に比例して延ばす。異常終了を繰り返すモデルで接続を無限に作り直さないためにある。
+ */
+class NeuralRestartPolicy(private val maxRestarts: Int, private val baseDelayMillis: Long) {
+    private var restarts = 0
+
+    /** 上限まで接続し直したか。 */
+    val exhausted: Boolean
+        get() = restarts >= maxRestarts
+
+    /** 次に接続し直すまでの間隔（ミリ秒）を返し、回数を数える。上限を超えたらnull。 */
+    fun nextDelayMillis(): Long? {
+        if (exhausted) return null
+        restarts += 1
+        return baseDelayMillis * restarts
     }
 }

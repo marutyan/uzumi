@@ -389,9 +389,10 @@ class UzumiInputMethodService : InputMethodService() {
     /**
      * 使うモデルを切り替える。前と同じなら何もしない。nullならMozcだけに戻し、推論serviceとの接続を切る。
      * 新しいモデルは`:neural`へbindして読み込ませ、準備ができるまではMozcの結果で入力を続ける。
+     * 同じモデルでも、`:neural`の終了が上限を超えて接続し直すのをやめた接続は作り直す（次の入力欄から戻す）。
      */
     private fun applyNeuralSelection(spec: NeuralModelSpec?) {
-        if (neuralConnection?.spec == spec) return
+        if (neuralConnection?.spec == spec && neuralConnection?.gaveUp != true) return
         conversionWorker?.setNeuralBackend(null)
         neuralConnection?.close()
         neuralConnection = spec?.let { NeuralRuntimeConnection(this, it).apply { open() } }
