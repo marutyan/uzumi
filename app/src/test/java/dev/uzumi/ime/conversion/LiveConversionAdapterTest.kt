@@ -26,7 +26,7 @@ class LiveConversionAdapterTest {
     @Test
     fun splitsTargetAtProtectedRangesAndInputCursor() {
         val chunks = mutableListOf<String>()
-        val converter = SegmentedLiveConverter(convertRange = { chunk ->
+        val converter = SegmentedLiveConverter(convertRange = { chunk, _ ->
             chunks += chunk
             listOf(ResultSegment(chunk, "[$chunk]"))
         })
@@ -51,7 +51,7 @@ class LiveConversionAdapterTest {
     /** 部分範囲の変換に失敗したら、要求全体の結果を返さない（コアは現在の表示を保つ）。 */
     @Test
     fun failedRangeFailsWholeRequest() {
-        val converter = SegmentedLiveConverter(convertRange = { null })
+        val converter = SegmentedLiveConverter(convertRange = { _, _ -> null })
         val identity = RequestIdentity(1, 1, "かな", 0, 2, emptyList(), 2, 0)
 
         assertNull(converter.convert(LiveRequest(identity, "かな", learningAllowed = true)))
@@ -64,7 +64,7 @@ class LiveConversionAdapterTest {
     @Test
     fun coreAcceptsAdapterResultsAfterChoiceAndCursorMove() {
         val core = LiveConversionCore().apply { startField(LiveFieldPolicy.NORMAL) }
-        val converter = SegmentedLiveConverter(convertRange = ::lexiconSegments)
+        val converter = SegmentedLiveConverter(convertRange = { chunk, _ -> lexiconSegments(chunk) })
         // コアの操作を行い、要求があれば変換して結果を返す。結果が拒否されないことを確かめる。
         fun run(update: LiveUpdate) {
             val request = update.request ?: return
@@ -181,7 +181,7 @@ class LiveConversionAdapterTest {
         val phrases = mapOf("こうえんにいく" to listOf("校園に行く"), "こうえんに" to listOf("校園に"))
         val chunks = mutableListOf<String>()
         val converter = SegmentedLiveConverter(
-            convertRange = { chunk -> chunks += chunk; lexiconSegments(chunk) },
+            convertRange = { chunk, _ -> chunks += chunk; lexiconSegments(chunk) },
             learnedPhrases = { phrases[it].orEmpty() },
         )
 
@@ -204,7 +204,7 @@ class LiveConversionAdapterTest {
     @Test
     fun headPhraseNeverCrossesProtectedRangeOrCursor() {
         val converter = SegmentedLiveConverter(
-            convertRange = ::lexiconSegments,
+            convertRange = { chunk, _ -> lexiconSegments(chunk) },
             learnedPhrases = { reading -> listOf("校園に行く").takeIf { reading == "こうえんにいく" }.orEmpty() },
         )
 
@@ -222,7 +222,7 @@ class LiveConversionAdapterTest {
     fun coreAcceptsPhraseAlignedResults() {
         val core = LiveConversionCore().apply { startField(LiveFieldPolicy.NORMAL) }
         val converter = SegmentedLiveConverter(
-            convertRange = ::lexiconSegments,
+            convertRange = { chunk, _ -> lexiconSegments(chunk) },
             learnedPhrases = { reading -> listOf("校園に行く").takeIf { reading == "こうえんにいく" }.orEmpty() },
         )
         // コアの操作を行い、要求があれば変換して結果を返す。結果が拒否されないことを確かめる。
@@ -292,7 +292,7 @@ class LiveConversionAdapterTest {
     fun fixedRangeIsConvertedAsOneSegment() {
         val converted = mutableListOf<String>()
         val converter = SegmentedLiveConverter(
-            convertRange = { chunk -> converted += chunk; chunk.map { ResultSegment(it.toString(), it.uppercase()) } },
+            convertRange = { chunk, _ -> converted += chunk; chunk.map { ResultSegment(it.toString(), it.uppercase()) } },
             convertFixed = { reading -> ResultSegment(reading, "[$reading]", listOf("[$reading]"), candidatesComplete = true) },
         )
         val identity = RequestIdentity(1, 1, "abcde", 0, 5, emptyList(), 5, 0, fixedRanges = listOf(FixedRange(1, 3)))
@@ -304,7 +304,7 @@ class LiveConversionAdapterTest {
         assertTrue(result.segments[1].candidatesComplete)
         assertEquals(listOf("a", "de"), converted)
 
-        val fallback = SegmentedLiveConverter(convertRange = { chunk -> chunk.map { ResultSegment(it.toString(), it.uppercase()) } })
+        val fallback = SegmentedLiveConverter(convertRange = { chunk, _ -> chunk.map { ResultSegment(it.toString(), it.uppercase()) } })
         val joined = fallback.convert(LiveRequest(identity, "abcde", learningAllowed = true))!!.segments[1]
         assertEquals(ResultSegment("bc", "BC", listOf("BC", "bc")), joined)
     }

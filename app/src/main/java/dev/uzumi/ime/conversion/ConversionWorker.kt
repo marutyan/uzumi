@@ -1,6 +1,7 @@
 package dev.uzumi.ime.conversion
 
 import dev.uzumi.ime.dictionary.UserDictionaryLookup
+import dev.uzumi.ime.evaluation.LiveRequestReport
 import dev.uzumi.ime.learning.LearningStore
 import dev.uzumi.ime.live.CandidateRequest
 import dev.uzumi.ime.live.CandidateResult
@@ -68,6 +69,12 @@ class ConversionWorker(
     private val userDictionary: () -> UserDictionaryLookup? = { null },
     // IME側の学習キャッシュを返す。初回はファイルを読むため、worker threadからだけ呼ぶ。nullなら学習を使わない。
     private val learningStore: () -> LearningStore? = { null },
+    // 評価モードで、ライブ変換の要求ごとの評価用の報告を受け取る（編集セッションの世代、報告）。worker threadから呼ばれる。
+    private val onLiveReport: (Long, LiveRequestReport) -> Unit = { _, _ -> },
+    // 評価モードか。trueの間だけ、評価用の報告を作る（Mozcを直接呼ぶ照合が増えるため）。
+    private val evaluationActive: () -> Boolean = { false },
+    // 単調な時計（ナノ秒）。時間超過の期限と、適用までの時間の起点に使う。JVMテストで差し替える。
+    private val nanoTime: () -> Long = System::nanoTime,
 ) : ConversionClient, LiveConversionClient {
     @Volatile
     private var currentHealth: EngineHealth = EngineHealth.Loading
@@ -75,8 +82,15 @@ class ConversionWorker(
     // 未処理の変換要求のうち最新の一件。古い要求は処理前に上書きされて捨てられる。
     private val latestRequest = AtomicReference<ConversionRequest?>(null)
 
-    // 未処理のライブ変換要求のうち最新の一件と、その編集セッションの世代。
-    private val latestLiveRequest = AtomicReference<Pair<Long, LiveRequest>?>(null)
+    // 未処理のライブ変換要求のうち最新の一件と、その編集セッションの世代・受理時刻・通し番号。
+    private val latestLiveRequest = AtomicReference<PendingLive?>(null)
+
+    // ライブ変換要求の通し番号。ニューラル変換の中断で、どの要求の推論を止めるかの照合に使う。
+    private val liveSequence = AtomicLong(0)
+
+    // ニューラル変換の窓口。nullならMozcだけでライブ変換する（製品の既定と評価条件M）。UIスレッドから切り替える。
+    @Volatile
+    private var neuralBackend: NeuralBackend? = null
 
     // 未処理の候補の取り直し要求のうち最新の一件と、その編集セッションの世代。
     private val latestCandidateRequest = AtomicReference<Pair<Long, CandidateRequest>?>(null)
@@ -132,8 +146,19 @@ class ConversionWorker(
     }
 
     override fun requestLiveConversion(sessionEpoch: Long, request: LiveRequest) {
-        latestLiveRequest.set(sessionEpoch to request)
+        val sequence = liveSequence.incrementAndGet()
+        latestLiveRequest.set(PendingLive(sessionEpoch, request, nanoTime(), sequence))
+        // 前の要求の推論が続いていれば止める。その結果は古く、コアが捨てるためである。
+        neuralBackend?.cancelInFlight(sequence)
         executor.execute(::drainLatestLiveRequest)
+    }
+
+    /**
+     * ライブ変換に使うニューラル変換の窓口を切り替える。nullならMozcだけに戻す。UIスレッドから、入力欄の開始時に呼ぶ。
+     * 切り替えの前後の結果は、コアの`converterGeneration`（モデルごとに異なる）で区別する。
+     */
+    fun setNeuralBackend(backend: NeuralBackend?) {
+        neuralBackend = backend
     }
 
     override fun requestSegmentCandidates(sessionEpoch: Long, request: CandidateRequest) {
@@ -276,17 +301,49 @@ class ConversionWorker(
      * 学習を止める欄では読みを送る前にincognitoを指定する。自動変換は確定しないため学習されない。
      */
     private fun drainLatestLiveRequest() {
-        val (sessionEpoch, request) = latestLiveRequest.getAndSet(null) ?: return
+        val pending = latestLiveRequest.getAndSet(null) ?: return
+        val sessionEpoch = pending.sessionEpoch
+        val request = pending.request
         if (isEnded(sessionEpoch) || currentHealth !is EngineHealth.Ready) return
         val sessionId = sessionFor(sessionEpoch) ?: return
         if (!runCatching { engine.setIncognito(!request.learningAllowed) }.getOrDefault(false)) return
         lastConverted.remove(sessionEpoch)
+        // 一つの部分範囲をMozcで変換する。ニューラル変換の辞書としても使う。
+        val mozcRange: (String) -> List<ResultSegment>? = { chunk ->
+            engine.convertSegments(sessionId, chunk)?.let { toLiveSegments(chunk, it) }
+        }
+        // 評価モードの間だけ件数を集める。H3の照合に使うMozcの文節は、変換器を通さずエンジンから直接取り出す。
+        val collector = if (evaluationActive()) {
+            LiveEvaluationCollector(mozcDirect = { reading ->
+                runCatching { engine.convertSegments(sessionId, reading) }.getOrNull()?.let { toLiveSegments(reading, it) }
+            })
+        } else {
+            null
+        }
+        val neural = neuralBackend?.let { backend ->
+            val model = backend.modelFor(
+                deadlineNanos = pending.requestedAtNanos + NeuralInferenceSettings.TIMEOUT_MILLIS * 1_000_000,
+                owner = pending.sequence,
+                isSuperseded = { latestLiveRequest.get() != null },
+                record = { collector?.onCall(it) },
+            )
+            // 学習禁止欄と機密欄では、保護範囲や先に変換した表記を左文脈としてモデルへ渡さない。
+            NeuralRangeConverter(
+                model,
+                mozcRange,
+                collector ?: NeuralConversionObserver.NONE,
+                useLeftContext = request.learningAllowed,
+            )
+        }
         val converter = SegmentedLiveConverter(
-            convertRange = { chunk ->
-                if (isAsciiOnly(chunk)) {
-                    listOf(ResultSegment(chunk, chunk))
-                } else {
-                    engine.convertSegments(sessionId, chunk)?.let { toLiveSegments(chunk, it) }
+            convertRange = { chunk, leftContext ->
+                when {
+                    isAsciiOnly(chunk) -> listOf(ResultSegment(chunk, chunk))
+                    neural != null -> {
+                        collector?.onRange()
+                        neural.convert(chunk, leftContext)
+                    }
+                    else -> mozcRange(chunk)
                 }
             },
             userDictionary = lookupUserDictionary(),
@@ -305,8 +362,10 @@ class ConversionWorker(
                 }
             },
         )
-        val result = runCatching { converter.convert(request) }.getOrNull() ?: return
-        onLiveResult(sessionEpoch, result)
+        // 新しい入力でニューラルの推論を中断した場合（NeuralRequestCancelled）も、結果を返さない。
+        val result = runCatching { converter.convert(request) }.getOrNull()
+        if (result != null) onLiveResult(sessionEpoch, result)
+        collector?.let { onLiveReport(sessionEpoch, it.report(result, pending.requestedAtNanos)) }
     }
 
     /**
@@ -384,6 +443,14 @@ class ConversionWorker(
             }
         }.getOrDefault(false)
     }
+
+    /** 未処理のライブ変換要求。requestedAtNanosは受理した時刻で、時間超過の期限と適用までの時間の起点にする。 */
+    private data class PendingLive(
+        val sessionEpoch: Long,
+        val request: LiveRequest,
+        val requestedAtNanos: Long,
+        val sequence: Long,
+    )
 
     private companion object {
         /** 辞書の有無を判定する既知の読み。 */

@@ -42,5 +42,11 @@
                 android:name="android.view.im"
                 android:resource="@xml/input_method" />
         </service>
+
+        <!-- ニューラル変換の推論を行う別プロセスのservice。IMEだけがbindする。モデルを選ばない限り起動しない。 -->
+        <service
+            android:name=".neural.NeuralRuntimeService"
+            android:exported="false"
+            android:process=":neural" />
     </application>
 </manifest>

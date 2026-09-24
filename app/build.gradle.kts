@@ -32,6 +32,12 @@ val mozcAbis: List<String> = (uzumiProperty("uzumi.mozcAbis") ?: "arm64-v8a")
 // falseにすると辞書を外したAPKを作り、minimal engineへのfallback検出を実機で確かめられる。
 val mozcIncludeData: Boolean = uzumiProperty("uzumi.mozcIncludeData")?.toBoolean() ?: true
 
+// ニューラル変換のnative生成物（`<abi>/lib*.so`）を置いたディレクトリ。`tools/neural/build_android.sh`がGradleの外で作る。
+// 未指定ならニューラル変換なしでビルドし、JVMテストも通る（IMEはMozcだけで動く）。
+val neuralArtifactsDir: File? = uzumiProperty("uzumi.neuralArtifactsDir")
+    ?.takeIf(String::isNotBlank)
+    ?.let(::File)
+
 android {
     namespace = "dev.uzumi.ime"
     compileSdk = 36
@@ -57,6 +63,11 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = false
+    }
+
+    // 別プロセスの推論service（`:neural`）との受け渡しにAIDLを使う。
+    buildFeatures {
+        aidl = true
     }
 }
 
@@ -215,6 +226,73 @@ abstract class PrepareMozcAssets : DefaultTask() {
     }
 }
 
+/**
+ * Git追跡外のニューラル変換の生成物から、指定ABIの共有ライブラリ（`<abi>/lib*.so`）をjniLibsの形へ集め、
+ * 生成物があればllama.cppの著作権表示をassetsへ置く。生成物が無ければ空のディレクトリを出力し、
+ * ニューラル変換なしのビルドを成立させる。
+ */
+abstract class PrepareNeuralNative : DefaultTask() {
+    @get:Optional
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val artifactsDirectory: DirectoryProperty
+
+    @get:Optional
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val noticeFile: RegularFileProperty
+
+    @get:Input
+    abstract val abis: ListProperty<String>
+
+    @get:OutputDirectory
+    abstract val jniLibsDirectory: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val assetsDirectory: DirectoryProperty
+
+    @get:Inject
+    abstract val fileSystem: FileSystemOperations
+
+    /** 出力先を作り直し、各ABIの共有ライブラリと表示を複製する。 */
+    @TaskAction
+    fun prepare() {
+        val libs = jniLibsDirectory.get().asFile
+        val assets = assetsDirectory.get().asFile
+        fileSystem.delete { delete(libs, assets) }
+        libs.mkdirs()
+        assets.mkdirs()
+        val artifacts = artifactsDirectory.orNull?.asFile ?: return
+        var copied = false
+        for (abi in abis.get()) {
+            val source = artifacts.resolve(abi)
+            if (!source.isDirectory) continue
+            fileSystem.copy {
+                from(source)
+                include("*.so")
+                into(libs.resolve(abi))
+            }
+            copied = true
+        }
+        val notice = noticeFile.orNull?.asFile
+        if (copied && notice != null) {
+            fileSystem.copy {
+                from(notice)
+                rename { "llama.cpp-NOTICE.txt" }
+                into(assets.resolve("licenses"))
+            }
+        }
+    }
+}
+
+val prepareNeuralNative = tasks.register<PrepareNeuralNative>("prepareNeuralNative") {
+    neuralArtifactsDir?.takeIf(File::isDirectory)?.let(artifactsDirectory::set)
+    rootProject.file("third_party/llama.cpp/NOTICE.txt").takeIf(File::isFile)?.let(noticeFile::set)
+    abis.set(mozcAbis)
+    jniLibsDirectory.set(layout.buildDirectory.dir("generated/neural/jniLibs"))
+    assetsDirectory.set(layout.buildDirectory.dir("generated/neural/assets"))
+}
+
 val prepareMozcNativeLibs = tasks.register<PrepareMozcNativeLibs>("prepareMozcNativeLibs") {
     mozcArtifactsDir?.resolve("native_libs.zip")?.takeIf(File::isFile)?.let(nativeLibsZip::set)
     abis.set(mozcAbis)
@@ -242,6 +320,14 @@ androidComponents {
         variant.sources.assets?.addGeneratedSourceDirectory(
             prepareMozcAssets,
             PrepareMozcAssets::outputDirectory,
+        )
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(
+            prepareNeuralNative,
+            PrepareNeuralNative::jniLibsDirectory,
+        )
+        variant.sources.assets?.addGeneratedSourceDirectory(
+            prepareNeuralNative,
+            PrepareNeuralNative::assetsDirectory,
         )
     }
 }
