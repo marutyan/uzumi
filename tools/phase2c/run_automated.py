@@ -198,6 +198,8 @@ class Snapshot:
     buttons: Dict[str, Tuple[int, int, int, int]]
     bar_bounds: Optional[Tuple[int, int, int, int]]
     hsv_bounds: Optional[Tuple[int, int, int, int]]
+    # ライブ変換で過去の文節を訂正中のとき、候補バーの左端の札に出る、その文節の読み。無ければNone。
+    focused_reading: Optional[str] = None
 
     @property
     def mode(self) -> str:
@@ -262,6 +264,7 @@ def dump_once() -> Snapshot:
     buttons: Dict[str, Tuple[int, int, int, int]] = {}
     bar_bounds = None
     hsv_bounds = None
+    focused_reading = None
     task_window_ok = False
     ime_seen = False
     for window in root.iter("window"):
@@ -323,8 +326,9 @@ def dump_once() -> Snapshot:
                 chips.append(text)
             elif bounds[3] <= hsv_bounds[3] and bounds[2] <= hsv_bounds[0] and "訂正中の文節" in (node.get("content-desc") or ""):
                 chips.append(text)
+                focused_reading = text
     del in_bar
-    return Snapshot(field_text, keys, candidates, grid, chips, buttons, bar_bounds, hsv_bounds)
+    return Snapshot(field_text, keys, candidates, grid, chips, buttons, bar_bounds, hsv_bounds, focused_reading)
 
 
 # ---- 入力の計画 ----
@@ -679,7 +683,8 @@ def remaining_targets(targets: List[str], committed: str) -> List[str]:
     return [t[len(committed):] for t in targets if t.startswith(committed)]
 
 
-def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all: bool = False) -> Snapshot:
+def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all: bool = False,
+                 reading: str = "") -> Snapshot:
     """明示変換（条件O）の訂正。変換キーで変換し、先頭文節の候補を目標と照合して選ぶ。
 
     先頭文節の候補のうち目標の残りの接頭辞になる最長の候補を選ぶ（第一候補なら確定操作、他は訂正操作）。
@@ -687,9 +692,12 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all:
     後ろの文節だけが誤っていても前の文節の第一候補を選んで確定していく。
     [commit_all]がtrueなら、表示が目標と一致しても未確定の文節が残る間は候補を選んで確定し続ける
     （句点を読みに含めて入力した過去訂正の課題では、句点の後に確定の操作が要るため）。
+    候補の全範囲に目標が無ければ、先頭文節の区切りを伸縮する規則（plan_explicit_resize）を試す。[reading]は
+    compositionの読みで、伸縮の位置を目標の表記から求めるためだけに使う。
     """
     committed = ""
     converted = False
+    resizes = 0
     snap = settle_snapshot(kb)
     for _ in range(MAX_FIX_STEPS):
         display = snap.field_text[len(committed):] if snap.field_text.startswith(committed) else None
@@ -710,14 +718,20 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all:
             continue
         choice = pick_prefix([c for c, _ in snap.candidates], rest)
         source = snap.candidates
+        seen = set(c for c, _ in snap.candidates)
         if choice is None and GRID_BUTTON in snap.buttons:
-            snap, source, choice = search_grid(kb, snap, lambda values: pick_prefix(values, rest), steps)
-            if choice is None:
+            snap, source, choice = search_grid(kb, snap, lambda values: pick_prefix(values, rest), steps, seen)
+        if choice is None:
+            plan = None if resizes >= MAX_RESIZES else plan_explicit_resize(targets, committed, reading, seen, steps)
+            if plan is None:
                 steps.append("no-candidate")
                 return snap
-        if choice is None:
-            steps.append("no-candidate")
-            return snap
+            direction, count = plan
+            long_press_arrow(kb, direction, count)
+            steps.append(f"resize-head{'-' if direction < 0 else '+'}{count}")
+            resizes += 1
+            snap = settle_snapshot(kb)
+            continue
         index, value = choice
         kb.tap(source[index][1])
         steps.append(f"pick{index}")
@@ -738,11 +752,12 @@ GRID_SCROLL_MS = 700
 GRID_MAX_SCROLLS = 15
 
 
-def search_grid(kb: "Keyboard", snap: Snapshot, choose, steps: List[str]):
+def search_grid(kb: "Keyboard", snap: Snapshot, choose, steps: List[str], seen_out: Optional[set] = None):
     """候補一覧を開き、見えている範囲で目標に合う候補を探し、無ければ下へスクロールして全範囲を探す。
 
     見つかれば一覧を開いたまま（押す候補が見えている画面と、その候補を）返す。最後まで無ければ一覧を閉じて
     Noneを返す。スクロールはIMEへ操作を送らないため評価用計数には入らず、手順の記録（steps）にだけ残す。
+    [seen_out]を渡すと、見えた候補をすべて加える（区切りの伸縮で文節の読みを候補のかな・カナから求めるため）。
     候補の文字列は記録せず、見つかったか（`grid-found-s<スクロール回数>`）と、全範囲に無かったか
     （`grid-absent-full`、打ち切った場合は`grid-absent-limit`）だけを残す。
     """
@@ -756,6 +771,8 @@ def search_grid(kb: "Keyboard", snap: Snapshot, choose, steps: List[str]):
         if choice is not None:
             steps.append(f"grid-found-s{scrolls}")
             return snap, snap.grid, choice
+        if seen_out is not None:
+            seen_out |= set(values)
         new = set(values) - seen
         if scrolls > 0 and not new:
             steps.append("grid-absent-full")
@@ -781,16 +798,19 @@ def pick_prefix(values: List[str], rest: List[str]) -> Optional[Tuple[int, str]]
     return best
 
 
-def fix_live(kb: Keyboard, targets: List[str], steps: List[str], base: int = 0) -> Snapshot:
+def fix_live(kb: Keyboard, targets: List[str], steps: List[str], base: int = 0, reading: str = "") -> Snapshot:
     """ライブ変換（条件N）の訂正。末尾の文節から「←」で前の文節へ移り、誤った文節の候補を選ぶ。
 
     右側の文節が目標と一致している前提で、対象の文節の表記を候補一覧から特定し（表示の残りの末尾に
     一致する最長の候補）、目標の対応する位置の末尾に一致しなければ、一致する候補を選ぶ。
     選んだ後に表示の右側が変わった場合は「末尾」で入力位置へ戻り、末尾から照合し直す。
     [base]は試験欄のうち確定済みの先頭の文字数で、compositionはその後ろから始まる（過去訂正の打ち直し用）。
+    候補の全範囲に目標が無ければ、文節の区切りを伸縮する規則（plan_live_resize）を試し、伸縮の後は「末尾」で
+    入力位置へ戻って末尾から照合し直す。[reading]は試験欄の先頭からの読みで、伸縮の位置を求めるためだけに使う。
     """
     snap = settle_snapshot(kb)
     end = len(snap.field_text)
+    resizes = 0
     for _ in range(MAX_FIX_STEPS):
         display = snap.field_text
         if display in targets:
@@ -823,15 +843,27 @@ def fix_live(kb: Keyboard, targets: List[str], steps: List[str], base: int = 0) 
             continue
         choice = pick_suffix(values, current, aligned)
         source = snap.candidates
+        seen = set(values)
         if choice is None and GRID_BUTTON in snap.buttons:
             # 候補バーに見えない候補は、候補一覧（∨）を開き、全範囲をスクロールして探す。
-            snap, source, choice = search_grid(kb, snap, lambda vals: pick_suffix(vals, current, aligned), steps)
-            if choice is None:
+            snap, source, choice = search_grid(kb, snap, lambda vals: pick_suffix(vals, current, aligned), steps, seen)
+        if choice is None:
+            plan = None if resizes >= MAX_RESIZES else plan_live_resize(
+                targets, suffix, base, reading, snap.focused_reading, seen, steps)
+            if plan is None:
                 steps.append("no-candidate")
                 return snap
-        if choice is None:
-            steps.append("no-candidate")
-            return snap
+            resizes += 1
+            if not run_live_resize(kb, plan, reading, steps):
+                steps.append("no-candidate")
+                return snap
+            snap = settle_snapshot(kb)
+            if "入力位置へ戻る" in snap.buttons:
+                kb.tap(snap.buttons["入力位置へ戻る"])
+                steps.append("return")
+                snap = settle_snapshot(kb)
+            end = len(snap.field_text)
+            continue
         index, value = choice
         kb.tap(source[index][1])
         steps.append(f"pick{index}")
@@ -858,6 +890,210 @@ def fix_live(kb: Keyboard, targets: List[str], steps: List[str], base: int = 0) 
         end = len(snap.field_text)
     steps.append("step-limit")
     return snap
+
+
+# ---- 文節の区切りの伸縮（版2の道具で追加） ----
+
+# 長押しの伸縮の時間（KeyRepeatPolicy）。押してから400 msで1回目の伸縮、以後300 msごとに繰り返す。
+# k回の伸縮を1回の長押しで行うため、k回目と(k+1)回目の中間（400 + 300×(k−1) + 150 ms）まで押し続ける。
+RESIZE_FIRST_MS = 400
+RESIZE_INTERVAL_MS = 300
+RESIZE_MARGIN_MS = 150
+# 1課題で試す伸縮の規則の回数の上限。同じ誤りで伸縮を繰り返さないための打ち切り。
+MAX_RESIZES = 3
+
+
+def long_press_arrow(kb: Keyboard, direction: int, count: int) -> None:
+    """←（direction<0、縮める）または→（伸ばす）を、伸縮がcount回繰り返される長さだけ押し続ける。
+    画面に触れるのは1回で、評価用計数ではキー1・訂正1と数えられる（同じ長押しの繰り返しは数えない）。"""
+    if kb.state[0] not in ("KANA", "QWERTY"):
+        kb.send(plan_switch(kb.state, "KANA"))
+    desc = "カーソルを左へ移動" if direction < 0 else "カーソルを右へ移動"
+    x, y = center(kb.layouts[kb.state[0]][desc])
+    hold = RESIZE_FIRST_MS + RESIZE_INTERVAL_MS * (count - 1) + RESIZE_MARGIN_MS
+    shell(f"input swipe {x} {y} {x} {y} {hold}", timeout=60)
+    kb.sent += 1
+
+
+def char_kind(char: str) -> str:
+    """語の始まりの判定に使う文字の種類。ひらがな、句読点、それ以外（漢字・カタカナ・英数字・記号）。"""
+    if "\u3041" <= char <= "\u3096":
+        return "hira"
+    if char in "、。":
+        return "punct"
+    return "other"
+
+
+@dataclass
+class TargetAlignment:
+    """目標の表記と読みの対応。to_readingは表記の位置（対応の区切り）から読みの位置への対応、
+    word_startsは目標の「語の始まり」の読みの位置（先頭、句読点の後、ひらがなの後に漢字・カタカナ・英数字が
+    始まる位置）。区切りの伸縮で、文節の境界を置く位置を決めるためだけに使う。"""
+    target: str
+    to_reading: Dict[int, int]
+    word_starts: List[int]
+
+
+def target_alignment(target: str, reading: str) -> Optional[TargetAlignment]:
+    """目標の表記を読みへ対応付け、語の始まりを求める。対応付けられなければNone。"""
+    groups = align_reading(target, reading)
+    if groups is None:
+        return None
+    to_reading: Dict[int, int] = {}
+    starts: List[int] = []
+    previous = None
+    for start, end, r_start, r_end in groups:
+        to_reading[start] = r_start
+        to_reading[end] = r_end
+        kind = char_kind(target[start])
+        if previous is None or previous == "punct" or (kind == "other" and previous == "hira"):
+            starts.append(r_start)
+        previous = kind
+    return TargetAlignment(target, to_reading, starts)
+
+
+def reading_from_values(values, reading: str, start: Optional[int] = None, end: Optional[int] = None) -> Optional[str]:
+    """候補のうち、カタカナをひらがなへ直すと読みの指定の位置（startから、またはendまで）に一致する最長のもの。
+    文節の読みを、候補に含まれるかな・カナの表記から求める。"""
+    best = None
+    for value in values:
+        hira = "".join(to_hiragana(c) for c in value)
+        if not hira:
+            continue
+        if end is not None:
+            ok = end - len(hira) >= 0 and reading[end - len(hira):end] == hira
+        else:
+            ok = reading[start:start + len(hira)] == hira
+        if ok and (best is None or len(hira) > len(best)):
+            best = hira
+    return best
+
+
+def plan_live_resize(targets: List[str], suffix: str, base: int, reading: str, focused_reading: Optional[str],
+                     seen, steps: List[str]):
+    """ライブ変換（条件N）で、対象の文節の候補の全範囲に目標が無いときの伸縮を決める。
+
+    右側（末尾側）は目標と一致を確かめ済みなので、文節の終わり（読みの位置b）は正しいとみなし、始まり（a）を見る。
+    - aが目標の語の始まりでない（語が前の文節とまたがる）：前の文節へ「←」で移り、その語の始まり（g）まで
+      前の文節を縮める。前の文節がg以降から始まる場合は、語の終わり（次の語の始まりかb）まで前の文節を伸ばす。
+    - aが語の始まりで、文節の内部に語の始まりがある（文節が二語以上を含む）：末尾側の語だけが後ろに残るよう、
+      内部の最後の語の始まりまで対象の文節を縮める。
+    - どちらでもなければNone（区切りでは直せない）。
+    """
+    for target in targets:
+        if not target.endswith(suffix):
+            continue
+        alignment = target_alignment(target, reading)
+        if alignment is None:
+            continue
+        b = alignment.to_reading.get(len(target) - len(suffix))
+        base_r = alignment.to_reading.get(base)
+        if b is None or base_r is None:
+            continue
+        seg = focused_reading if focused_reading else reading_from_values(seen, reading, end=b)
+        if not seg or reading[b - len(seg):b] != seg:
+            steps.append("resize-no-reading")
+            return None
+        a = b - len(seg)
+        starts = alignment.word_starts
+        if a > base_r and a not in starts:
+            g = max((w for w in starts if w < a), default=None)
+            h = min([w for w in starts if w > a] + [b])
+            if g is None or g < base_r:
+                steps.append("resize-none")
+                return None
+            return ("prev", g, h, a, b)
+        interior = [w for w in starts if a < w < b]
+        if interior:
+            return ("self", b - max(interior), a, b)
+        steps.append("resize-none")
+        return None
+    steps.append("resize-no-alignment")
+    return None
+
+
+def verify_resize(kb: Keyboard, reading: str, start: int, expected_end: int, steps: List[str]) -> None:
+    """伸縮の後、訂正中の文節の読み（札）が期待した範囲か確かめる。ずれていれば1回だけ長押しで合わせる。"""
+    snap = settle_snapshot(kb)
+    actual = snap.focused_reading
+    if actual is None or reading[start:start + len(actual)] != actual:
+        steps.append("resize-unverified")
+        return
+    diff = (expected_end - start) - len(actual)
+    if diff != 0:
+        long_press_arrow(kb, 1 if diff > 0 else -1, abs(diff))
+        steps.append(f"resize-adjust{diff:+d}")
+
+
+def run_live_resize(kb: Keyboard, plan, reading: str, steps: List[str]) -> bool:
+    """plan_live_resizeの決めた伸縮を行う。行えなければfalse。"""
+    if plan[0] == "self":
+        _, count, a, b = plan
+        long_press_arrow(kb, -1, count)
+        steps.append(f"resize-self-{count}")
+        verify_resize(kb, reading, a, b - count, steps)
+        return True
+    _, g, h, a, b = plan
+    move_left(kb)
+    steps.append("left")
+    snap = settle_snapshot(kb)
+    previous = snap.focused_reading
+    if not previous or reading[a - len(previous):a] != previous:
+        steps.append("resize-no-reading")
+        return False
+    p = a - len(previous)
+    if g > p:
+        long_press_arrow(kb, -1, a - g)
+        steps.append(f"resize-prev-{a - g}")
+        verify_resize(kb, reading, p, g, steps)
+        return True
+    if h > a:
+        long_press_arrow(kb, 1, h - a)
+        steps.append(f"resize-prev+{h - a}")
+        verify_resize(kb, reading, p, h, steps)
+        return True
+    steps.append("resize-none")
+    return False
+
+
+def plan_explicit_resize(targets: List[str], committed: str, reading: str, seen, steps: List[str]):
+    """明示変換（条件O）で、先頭文節の候補の全範囲に目標が無いときの伸縮を決める。返り値は（向き、回数）。
+
+    先頭文節の始まり（a）は確定済みの前半の直後で正しく、終わり（b）を見る（条件Nと左右を入れ替えた同じ規則）。
+    - bが目標の語の始まりでない（語が次の文節とまたがる）：先頭文節の内部にその語の始まり（g）があればgまで縮め、
+      無ければ語の終わり（次の語の始まりか読みの終わり）まで伸ばす。
+    - bが語の始まり（または読みの終わり）で、文節の内部に語の始まりがある：先頭側の語だけが残るよう、内部の最初の
+      語の始まりまで縮める。
+    - どちらでもなければNone。
+    """
+    for target in targets:
+        if not target.startswith(committed):
+            continue
+        alignment = target_alignment(target, reading)
+        if alignment is None:
+            continue
+        a = alignment.to_reading.get(len(committed))
+        if a is None:
+            continue
+        seg = reading_from_values(seen, reading, start=a)
+        if not seg:
+            steps.append("resize-no-reading")
+            return None
+        b = a + len(seg)
+        end_r = len(reading)
+        starts = alignment.word_starts
+        interior = [w for w in starts if a < w < b]
+        if b < end_r and b not in starts:
+            if interior:
+                return (-1, b - max(interior))
+            h = min([w for w in starts if w > b] + [end_r])
+            return (1, h - b)
+        if interior:
+            return (-1, b - min(interior))
+        steps.append("resize-none")
+        return None
+    steps.append("resize-no-alignment")
+    return None
 
 
 def move_left(kb: Keyboard) -> None:
@@ -989,7 +1225,7 @@ def run_past_correction(kb: Keyboard, task: Task, condition: str, steps: List[st
     presses, _ = plan_text(task.reading, kb.state)
     kb.send(presses)
     if condition == "O":
-        snap = fix_explicit(kb, task.accepted, steps, commit_all=True)
+        snap = fix_explicit(kb, task.accepted, steps, commit_all=True, reading=task.reading)
         return snap, device_ms() - first_ms
     snap = settle_snapshot(kb)
     committed = snap.field_text
@@ -1016,7 +1252,7 @@ def run_past_correction(kb: Keyboard, task: Task, condition: str, steps: List[st
     presses, _ = plan_text(retype, kb.state)
     kb.send(presses)
     steps.append(f"retype{len(retype)}")
-    snap = fix_live(kb, [t[:-1] for t in task.accepted], steps, base=keep)
+    snap = fix_live(kb, [t[:-1] for t in task.accepted], steps, base=keep, reading=task.reading[:-1])
     kb.send(plan_switch(kb.state, "KANA"))
     kb.send([Press("KANA", "読点", "L")])
     return snap, device_ms() - first_ms
@@ -1040,9 +1276,9 @@ def run_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
         # 終端操作の前の表示と照合する目標。句点で終える課題は、許容表記から末尾の句点を除いたもの。
         body_targets = [t[:-1] for t in task.accepted if t.endswith("。")] if terminator == "。" else task.accepted
         if condition == "O":
-            snap = fix_explicit(kb, body_targets, steps)
+            snap = fix_explicit(kb, body_targets, steps, reading=body)
         else:
-            snap = fix_live(kb, body_targets, steps)
+            snap = fix_live(kb, body_targets, steps, reading=body)
         if terminator == "。":
             kb.send(plan_switch(kb.state, "KANA"))
             kb.send([Press("KANA", "読点", "L")])

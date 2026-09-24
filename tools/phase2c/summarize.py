@@ -212,6 +212,105 @@ def summarize(o_rows: List[dict], n_rows: List[dict], past_o: List[dict], past_n
     return "\n".join(out)
 
 
+# ---- 版2で加えた集計 ----
+
+RESIZE_PREFIXES = ("resize-self", "resize-prev", "resize-head")
+
+
+def classify_error(row: dict) -> str:
+    """誤答の原因を手順の記録から分ける（版2の結果の「誤答の原因の分類」の規則）。"""
+    steps = row["fix_steps"].split(",") if row.get("fix_steps") else []
+    resized = any(s.startswith(RESIZE_PREFIXES) for s in steps)
+    if resized:
+        return "区切りの誤り"
+    if len(steps) >= 2 and steps[-2] == "resize-none" and steps[-1] == "no-candidate":
+        return "候補の全範囲に無い"
+    return "その他"
+
+
+def with_aligned_past(rows: Dict[str, dict]) -> Dict[str, dict]:
+    """過去訂正の課題の完了時間を、終点を揃えた値に置き換えた写し（両条件の終点を揃えて比べるため）。"""
+    out = {}
+    for task_id, r in rows.items():
+        if r["category"] == "過去訂正" and r.get("aligned_elapsed_ms", -1) >= 0:
+            out[task_id] = dict(r, elapsed_ms=r["aligned_elapsed_ms"])
+        else:
+            out[task_id] = r
+    return out
+
+
+def load_v1(path: Path) -> Dict[str, Dict[str, dict]]:
+    """版1のTSVから、過去訂正を再測定の結果で置いた条件O・Nの行を読む（版1の判定に使った範囲）。"""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    header = lines[0].split("\t")
+    rows = [dict(zip(header, line.split("\t"))) for line in lines[1:]]
+    result: Dict[str, Dict[str, dict]] = {"O": {}, "N": {}}
+    for cond in ("O", "N"):
+        for r in rows:
+            if r["status"] != "ok":
+                continue
+            if r["condition"] == cond and r["category"] != "過去訂正":
+                result[cond][r["task_id"]] = r
+            elif r["condition"] == f"{cond}-past":
+                result[cond][r["task_id"]] = dict(r, elapsed_ms=r["aligned_elapsed_ms"])
+    for cond in result:
+        for r in result[cond].values():
+            for key in ("correct", "no_intervention", "keys", "commits", "corrections", "elapsed_ms", "flicker"):
+                r[key] = int(r[key])
+    return result
+
+
+def v2_sections(ok_o: Dict[str, dict], ok_n: Dict[str, dict], v1: Optional[Dict[str, Dict[str, dict]]]) -> str:
+    """版2の要約：過去訂正の終点を揃えた比較、誤答の原因の分類、版1との同じ課題での比較。"""
+    out: List[str] = []
+    ao, an = with_aligned_past(ok_o), with_aligned_past(ok_n)
+    paired = sorted(set(ao) & set(an))
+    cond_table(out, "条件別（過去訂正の完了時間は終点を揃えた値）",
+               [("O", "全体", list(ao.values())), ("N", "全体", list(an.values()))])
+    paired_table(out, "対応のある比較：両条件で完了した課題（過去訂正の完了時間は終点を揃えた値）", ao, an, paired)
+    no_past = [t for t in paired if ao[t]["category"] != "過去訂正"]
+    paired_table(out, "対応のある比較：過去訂正を除く", ao, an, no_past)
+
+    out.append("### 誤答の原因の分類\n")
+    out.append("| 条件 | 分類 | 件数 | 課題 |")
+    out.append("|---|---|---:|---|")
+    for cond, table in (("O", ok_o), ("N", ok_n)):
+        groups: Dict[str, List[str]] = {}
+        for task_id, r in table.items():
+            if not r["correct"]:
+                groups.setdefault(classify_error(r), []).append(task_id)
+        for label in ("候補の全範囲に無い", "区切りの誤り", "その他"):
+            ids = groups.get(label, [])
+            out.append(f"| {cond} | {label} | {len(ids)} | {'、'.join(ids) or '—'} |")
+    out.append("")
+    resized = {c: [t for t, r in table.items() if any(s.startswith(RESIZE_PREFIXES) for s in r["fix_steps"].split(","))]
+               for c, table in (("O", ok_o), ("N", ok_n))}
+    for cond, ids in resized.items():
+        ok = [t for t in ids if (ok_o if cond == "O" else ok_n)[t]["correct"]]
+        out.append(f"伸縮をした課題（{cond}）：{len(ids)}件（{'、'.join(ids) or '—'}）。うち最終正解{len(ok)}件（{'、'.join(ok) or '—'}）。\n")
+
+    if v1 is not None:
+        out.append("### 版1との比較（同じ課題。版1はAPK 61cef48、過去訂正は版1の再測定の値）\n")
+        out.append("| 条件 | 対応課題数 | 最終正解 版1→版2 | 無介入正解 版1→版2 | キー操作数 中央値 版1→版2 | "
+                   "訂正操作数 平均 版1→版2 | 完了時間 ms 中央値 版1→版2 | 誤→正 | 正→誤 |")
+        out.append("|---|---:|---:|---:|---:|---:|---:|---|---|")
+        for cond, table in (("O", ao), ("N", an)):
+            old = v1[cond]
+            common = sorted(set(old) & set(table))
+            n = len(common)
+            fixed = [t for t in common if not old[t]["correct"] and table[t]["correct"]]
+            broken = [t for t in common if old[t]["correct"] and not table[t]["correct"]]
+            out.append(
+                f"| {cond} | {n} | {sum(old[t]['correct'] for t in common)}→{sum(table[t]['correct'] for t in common)} | "
+                f"{sum(old[t]['no_intervention'] for t in common)}→{sum(table[t]['no_intervention'] for t in common)} | "
+                f"{fmt(median([old[t]['keys'] for t in common]))}→{fmt(median([table[t]['keys'] for t in common]))} | "
+                f"{statistics.mean(old[t]['corrections'] for t in common):.2f}→{statistics.mean(table[t]['corrections'] for t in common):.2f} | "
+                f"{fmt(median([old[t]['elapsed_ms'] for t in common]), 0)}→{fmt(median([table[t]['elapsed_ms'] for t in common]), 0)} | "
+                f"{'、'.join(fixed) or '—'} | {'、'.join(broken) or '—'} |")
+        out.append("")
+    return "\n".join(out)
+
+
 def main() -> int:
     """結果を読み、課題IDごとのTSVを書き、要約を標準出力へ出す。"""
     parser = argparse.ArgumentParser()
@@ -221,6 +320,10 @@ def main() -> int:
     parser.add_argument("--past-n", help="過去訂正の再測定の結果（条件N）")
     parser.add_argument("--also", action="append", default=[],
                         help="集計には入れず、課題IDごとのTSVにだけ加える結果（ラベル=jsonlの場所）。途中で止めた回の記録に使う")
+    parser.add_argument("--v2", action="store_true", help="版2の要約（過去訂正を本測定に含む）を出す")
+    parser.add_argument("--v1-rows", help="版1の課題IDごとのTSV（版1との比較に使う）")
+    parser.add_argument("--extra-n", help="条件Nの残りの課題を別に流した結果。条件Nの集計に加える（版2の残り9課題）")
+    parser.add_argument("--exclude", default="", help="集計から外す課題ID（カンマ区切り）。感度分析に使う")
     args = parser.parse_args()
     work = Path(args.work)
     readings = load_readings()
@@ -242,6 +345,21 @@ def main() -> int:
     for label, rows in (("O-past", past_o), ("N-past", past_n)):
         for row in rows:
             row["row_label"] = label
+    if args.v2:
+        if args.extra_n:
+            # 残りの課題の結果を条件Nへ加える。本測定で中断した課題は、完了した行だけを残す。
+            extra = load_results(Path(args.extra_n), readings)
+            done = {r["task_id"] for r in extra if r["status"] == "ok"}
+            n_rows = [r for r in n_rows if r["task_id"] not in done] + extra
+        excluded = set(filter(None, args.exclude.split(",")))
+        o_rows = [r for r in o_rows if r["task_id"] not in excluded]
+        n_rows = [r for r in n_rows if r["task_id"] not in excluded]
+        ok_o = {r["task_id"]: r for r in o_rows if r["status"] == "ok"}
+        ok_n = {r["task_id"]: r for r in n_rows if r["status"] == "ok"}
+        v1 = load_v1(Path(args.v1_rows)) if args.v1_rows else None
+        print(summarize(o_rows, n_rows, [], []))
+        print(v2_sections(ok_o, ok_n, v1))
+        return 0
     print(summarize(o_rows, n_rows, past_o, past_n))
     return 0
 
