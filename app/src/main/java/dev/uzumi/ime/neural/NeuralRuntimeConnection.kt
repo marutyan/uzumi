@@ -94,11 +94,11 @@ class NeuralRuntimeConnection(
     }
 
     /**
-     * 別プロセスの終了が上限を超え、接続し直すのをやめたか。IMEは次の入力欄の開始でこの接続を作り直す
-     * （上限を超えた後もMozcだけで続けるのは、その入力欄の間だけにする）。UIスレッドから読む。
+     * 上限の回数まで接続し直し、その最後の接続も終了したため、接続し直すのをやめたか。予約中の再接続がある間は偽。
+     * IMEは新しい入力欄の開始でこの接続を作り直す（Mozcだけで続けるのは、その入力欄の間だけにする）。UIスレッドから読む。
      */
     val gaveUp: Boolean
-        get() = !closed && runtime == null && restarts.exhausted
+        get() = !closed && restarts.gaveUp
 
     /** serviceへbindしてモデルの準備を始める。 */
     fun open() {
@@ -138,7 +138,7 @@ class NeuralRuntimeConnection(
     private fun modelFile(): File = modelDirectory(context).resolve(spec.fileName)
 
     companion object {
-        /** 別プロセスの終了後に接続し直す回数の上限。超えたらこの入力欄の間はMozcだけで続け、次の入力欄で作り直す。 */
+        /** 別プロセスの終了後に接続し直す回数の上限。超えたらこの入力欄の間はMozcだけで続け、新しい入力欄で作り直す。 */
         const val MAX_RESTARTS = 3
 
         /** 接続し直すまでの間隔（ミリ秒）。回数に比例して延ばす。 */
@@ -156,14 +156,33 @@ class NeuralRuntimeConnection(
 class NeuralRestartPolicy(private val maxRestarts: Int, private val baseDelayMillis: Long) {
     private var restarts = 0
 
-    /** 上限まで接続し直したか。 */
+    /** 上限の回数まで再接続を予約したか（最後の再接続を試している途中も含む）。 */
     val exhausted: Boolean
         get() = restarts >= maxRestarts
 
-    /** 次に接続し直すまでの間隔（ミリ秒）を返し、回数を数える。上限を超えたらnull。 */
+    /** 上限の回数の再接続を試し終え、その後の終了でも接続し直さないと決めたか。 */
+    var gaveUp: Boolean = false
+        private set
+
+    /** 終了を受けて、次に接続し直すまでの間隔（ミリ秒）を返し、回数を数える。上限を超えた終了ならnullを返し、やめたと記録する。 */
     fun nextDelayMillis(): Long? {
-        if (exhausted) return null
+        if (exhausted) {
+            gaveUp = true
+            return null
+        }
         restarts += 1
         return baseDelayMillis * restarts
     }
 }
+
+/**
+ * 入力欄の開始で、`:neural`への接続を作り直すかを決める。選択が変わったら作り直す。同じモデルでは、接続し直すのをやめた
+ * 接続を新しい入力欄の開始（[restarting]が偽）でだけ作り直す。同じ欄の再開始では、予約中の再接続も回数も変えない
+ * （終了と再開始を繰り返す欄で、上限を越えて接続し直し続けないため）。
+ */
+fun shouldRecreateNeuralConnection(
+    currentSpec: NeuralModelSpec?,
+    currentGaveUp: Boolean,
+    selected: NeuralModelSpec?,
+    restarting: Boolean,
+): Boolean = currentSpec != selected || (currentGaveUp && !restarting)
