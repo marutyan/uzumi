@@ -2,19 +2,31 @@ package dev.uzumi.ime
 
 import android.content.Intent
 import android.content.ClipboardManager
+import android.graphics.drawable.Icon
 import android.inputmethodservice.InputMethodService
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.BackgroundColorSpan
+import android.util.Size
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InlineSuggestionsRequest
+import android.view.inputmethod.InlineSuggestionsResponse
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.inline.InlineContentView
+import android.widget.inline.InlinePresentationSpec
+import androidx.autofill.inline.UiVersions
+import androidx.autofill.inline.common.TextViewStyle
+import androidx.autofill.inline.common.ViewStyle
+import androidx.autofill.inline.v1.InlineSuggestionUi
 import dev.uzumi.ime.conversion.ConversionOutcome
 import dev.uzumi.ime.conversion.ConversionWorker
 import dev.uzumi.ime.conversion.EngineHealth
@@ -26,6 +38,7 @@ import dev.uzumi.ime.dictionary.UserDictionaries
 import dev.uzumi.ime.clipboard.RecentClipboard
 import dev.uzumi.ime.editor.AndroidInputConnectionPort
 import dev.uzumi.ime.editor.EditorSession
+import dev.uzumi.ime.editor.InlineAutofillPolicy
 import dev.uzumi.ime.editor.InputFieldPolicy
 import dev.uzumi.ime.evaluation.ConversionProgress
 import dev.uzumi.ime.evaluation.CorrectnessJudge
@@ -41,6 +54,7 @@ import dev.uzumi.ime.evaluation.TimingSample
 import dev.uzumi.ime.keyboard.CandidateBarViews
 import dev.uzumi.ime.keyboard.CandidateGridView
 import dev.uzumi.ime.keyboard.KeyboardAction
+import dev.uzumi.ime.keyboard.KeyboardColors
 import dev.uzumi.ime.keyboard.KeyboardDimens
 import dev.uzumi.ime.keyboard.KeyboardPanel
 import dev.uzumi.ime.keyboard.KeyboardPreferences
@@ -89,6 +103,10 @@ class UzumiInputMethodService : InputMethodService() {
     private var clipboardExpiry: Runnable? = null
     private var clipboardSuggestionSessionEpoch: Long? = null
     private var inputViewVisible = false
+    // Inline Autofill候補の表示部品。中身はOSが描画し、IMEは読まない（ログ・計数・学習・設定へ送らない）。
+    private var inlineSuggestions: List<InlineSuggestionItem> = emptyList()
+    // 受けたInline応答の通し番号。展開中に新しい応答が来た場合や欄が替わった場合に、古い展開結果を捨てる。
+    private var inlineResponseGeneration = 0L
     private var currentPolicy: InputFieldPolicy? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var conversionExecutor: ExecutorService? = null
@@ -272,6 +290,7 @@ class UzumiInputMethodService : InputMethodService() {
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
         closeSession()
+        clearInlineSuggestions()
         candidateGrid?.hide()
         toolbarPanel?.hide()
         currentPolicy = null
@@ -360,6 +379,7 @@ class UzumiInputMethodService : InputMethodService() {
         candidateGrid?.hide()
         toolbarPanel?.hide()
         stopClipboardObservation()
+        clearInlineSuggestions()
         super.onFinishInputView(finishingInput)
     }
 
@@ -371,9 +391,87 @@ class UzumiInputMethodService : InputMethodService() {
         toolbarPanel?.hide()
         stopClipboardObservation()
         closeSession()
+        clearInlineSuggestions()
         currentPolicy = null
         refreshCandidates()
         super.onFinishInput()
+    }
+
+    /**
+     * Autofill serviceへ渡すInline候補の要求を作る。札の配色はキーボードのライト／ダークに合わせ、高さは候補バーに収める。
+     * OSの描画側がv1の見た目に対応しない場合はnullを返し、従来のAutofill表示に任せる。
+     */
+    override fun onCreateInlineSuggestionsRequest(uiExtras: Bundle): InlineSuggestionsRequest? {
+        if (UiVersions.INLINE_UI_VERSION_1 !in UiVersions.getVersions(uiExtras)) return null
+        val colors = KeyboardColors.from(this)
+        val density = resources.displayMetrics.density
+        val px = { dp: Float -> (dp * density).toInt() }
+        val chipBackground = Icon.createWithResource(this, R.drawable.inline_suggestion_chip).setTint(colors.keyBackground)
+        val style = InlineSuggestionUi.newStyleBuilder()
+            .setSingleIconChipStyle(ViewStyle.Builder().setBackground(chipBackground).build())
+            .setChipStyle(
+                ViewStyle.Builder()
+                    .setBackground(chipBackground)
+                    .setPadding(px(INLINE_CHIP_PADDING_DP), 0, px(INLINE_CHIP_PADDING_DP), 0)
+                    .build(),
+            )
+            .setTitleStyle(TextViewStyle.Builder().setTextColor(colors.text).setTextSize(INLINE_TITLE_TEXT_SP).build())
+            .setSubtitleStyle(TextViewStyle.Builder().setTextColor(colors.textSecondary).setTextSize(INLINE_SUBTITLE_TEXT_SP).build())
+            .build()
+        val spec = InlinePresentationSpec.Builder(
+            Size(px(INLINE_MIN_WIDTH_DP), px(INLINE_HEIGHT_DP)),
+            Size(px(INLINE_MAX_WIDTH_DP), px(INLINE_HEIGHT_DP)),
+        ).setStyle(UiVersions.newStylesBuilder().addStyle(style).build()).build()
+        return InlineSuggestionsRequest.Builder(listOf(spec))
+            .setMaxSuggestionCount(INLINE_MAX_SUGGESTIONS)
+            .build()
+    }
+
+    /**
+     * Inline候補を展開して候補バーへ置く。全件の展開を終えた時点で、同じ欄の最新の応答である場合だけ採用する。
+     * 空の応答や入力欄のない応答では一覧を空にしてfalseを返す。候補の中身はどこへも記録しない。
+     */
+    override fun onInlineSuggestionsResponse(response: InlineSuggestionsResponse): Boolean {
+        val generation = ++inlineResponseGeneration
+        val epoch = session?.sessionEpoch
+        val suggestions = response.inlineSuggestions
+        if (epoch == null || suggestions.isEmpty()) {
+            detachInlineViews()
+            inlineSuggestions = emptyList()
+            refreshCandidates()
+            return false
+        }
+        val inflated = arrayOfNulls<InlineContentView>(suggestions.size)
+        var remaining = suggestions.size
+        val size = Size(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        suggestions.forEachIndexed { index, suggestion ->
+            suggestion.inflate(this, size, mainExecutor) { view ->
+                inflated[index] = view
+                remaining -= 1
+                if (remaining == 0 &&
+                    InlineAutofillPolicy.acceptsResponse(epoch, session?.sessionEpoch, generation, inlineResponseGeneration)
+                ) {
+                    detachInlineViews()
+                    inlineSuggestions = suggestions.indices.mapNotNull { i ->
+                        inflated[i]?.let { InlineSuggestionItem(it, suggestions[i].info.isPinned) }
+                    }
+                    refreshCandidates()
+                }
+            }
+        }
+        return true
+    }
+
+    /** Inline候補を捨て、展開中の応答も採用しないようにする。欄の切り替えと入力の終了で呼ぶ。 */
+    private fun clearInlineSuggestions() {
+        inlineResponseGeneration += 1
+        detachInlineViews()
+        inlineSuggestions = emptyList()
+    }
+
+    /** 表示中のInline候補の部品を親から外す。同じ部品を別の親へ付け直す前と、破棄する前に呼ぶ。 */
+    private fun detachInlineViews() {
+        inlineSuggestions.forEach { (it.view.parent as? ViewGroup)?.removeView(it.view) }
     }
 
     /** キーボード操作を現在の編集セッションへ一度だけ送る。 */
@@ -816,6 +914,9 @@ class UzumiInputMethodService : InputMethodService() {
         }
     }
 
+    /** OSが描画するInline Autofill候補一つ。[pinned]は候補バーの右端に固定する候補。 */
+    private class InlineSuggestionItem(val view: InlineContentView, val pinned: Boolean)
+
     /** 候補バーの一項目。押したときの操作を持つ。 */
     private class CandidateEntry(val label: String, val selected: Boolean, val onPick: () -> Unit)
 
@@ -875,14 +976,58 @@ class UzumiInputMethodService : InputMethodService() {
         }
     }
 
-    /** 入力していない間の候補バーに案内とキーボードを閉じる操作を置く。 */
+    /**
+     * 入力していない間の候補バーに案内とキーボードを閉じる操作を置く。Inline Autofill候補がある間は、案内の代わりに候補を並べる。
+     */
     private fun showIdleBar(current: EditorSession?, trailing: LinearLayout) {
         val views = barViews ?: return
-        candidateRow?.addView(views.hint(hintText(current?.policy, current?.isLiveMode == true)))
+        val row = candidateRow ?: return
+        val showInline = current != null && InlineAutofillPolicy.shouldShow(
+            hasComposition = current.hasComposition,
+            hasRegularCandidates = false,
+            inlineCount = inlineSuggestions.size,
+        )
+        if (showInline) {
+            addInlineSuggestions(row)
+        } else {
+            row.addView(views.hint(hintText(current?.policy, current?.isLiveMode == true)))
+        }
         trailing.addView(views.symbolButton("⌄", getString(R.string.close_keyboard)) {
             evaluation.record(OperationKind.OTHER)
             requestHideSelf(0)
         })
+    }
+
+    /** Inline候補を候補バーの中央へ横に並べる。pinnedの候補は横スクロールの外の右端に固定する。 */
+    private fun addInlineSuggestions(row: LinearLayout) {
+        val density = resources.displayMetrics.density
+        val wrap = LinearLayout.LayoutParams.WRAP_CONTENT
+        val match = LinearLayout.LayoutParams.MATCH_PARENT
+        val margin = (INLINE_MARGIN_DP * density).toInt()
+        val (pinned, regular) = inlineSuggestions.partition { it.pinned }
+        // 候補の部品はrefreshCandidatesのたびに付け直すため、前の親から外してから加える。
+        detachInlineViews()
+        val inlineParams = {
+            LinearLayout.LayoutParams(wrap, wrap).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setMargins(margin, 0, margin, 0)
+            }
+        }
+        val scrolling = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            regular.forEach { addView(it.view, inlineParams()) }
+        }
+        val line = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(HorizontalScrollView(this@UzumiInputMethodService).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(scrolling, FrameLayout.LayoutParams(wrap, match))
+            }, LinearLayout.LayoutParams(0, match, 1f))
+            pinned.forEach { addView(it.view, inlineParams()) }
+        }
+        row.addView(line, LinearLayout.LayoutParams(match, (CandidateBarViews.BAR_HEIGHT_DP * density).toInt()))
     }
 
     /** 設定画面を開く。IMEから開くため新しいtaskで起動する。 */
@@ -958,6 +1103,24 @@ class UzumiInputMethodService : InputMethodService() {
         /** 設定時は両バー最大6段。表示時は画面高に応じて制限する。 */
         const val MAX_VISIBLE_BAR_ROWS = 6
         const val BAR_ROW_HEIGHT_WITH_DIVIDER_DP = 53
+
+        /** Inline Autofill候補の札の高さ（dp）。52dpの候補バーへ上下の余白を残して収める。 */
+        const val INLINE_HEIGHT_DP = 36f
+
+        /** Inline候補の札の幅の範囲（dp）。下限はタップ領域、上限は長い名前でも数件が並ぶ幅。 */
+        const val INLINE_MIN_WIDTH_DP = 48f
+        const val INLINE_MAX_WIDTH_DP = 240f
+
+        /** Inline候補の札の左右の内側余白と、札どうしの間隔（dp）。 */
+        const val INLINE_CHIP_PADDING_DP = 12f
+        const val INLINE_MARGIN_DP = 4f
+
+        /** Inline候補の題名と補足の文字の大きさ（sp）。候補バーの札（14dp）と揃える。 */
+        const val INLINE_TITLE_TEXT_SP = 14f
+        const val INLINE_SUBTITLE_TEXT_SP = 12f
+
+        /** Autofill serviceへ求めるInline候補の最大件数。 */
+        const val INLINE_MAX_SUGGESTIONS = 6
 
         /** 訂正中のsegmentの背景色（半透明の青）。下線だけのsegmentと区別できる濃さにする。 */
         const val FOCUSED_SEGMENT_COLOR = 0x553F7FFF

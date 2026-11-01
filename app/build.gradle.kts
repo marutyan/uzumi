@@ -334,6 +334,8 @@ androidComponents {
 
 dependencies {
     implementation("com.google.protobuf:protobuf-javalite:$mozcProtobufVersion")
+    // Inline Autofillの候補の見た目（style）をOSの描画側へ渡す形式を作る。
+    implementation("androidx.autofill:autofill:1.3.0")
     protocExecutable("com.google.protobuf:protoc:$mozcProtobufVersion:${protocClassifier()}@exe")
     testImplementation("junit:junit:4.13.2")
 }

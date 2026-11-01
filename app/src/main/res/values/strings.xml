@@ -53,7 +53,7 @@
     <string name="candidate_hint_conversion">変換キーで漢字候補</string>
     <string name="candidate_hint_no_dictionary">辞書なし：かな・カナ候補のみ</string>
     <string name="candidate_status_no_dictionary">辞書なし</string>
-    <string name="candidate_hint_sensitive">機密入力：候補を表示しません</string>
+    <string name="candidate_hint_sensitive">機密入力：変換候補を表示しません</string>
     <string name="candidate_hint_compatibility">互換入力：候補を表示しません</string>
     <string name="candidate_hint_live">ライブ変換：入力すると変換します</string>
     <string name="live_return_label">末尾</string>

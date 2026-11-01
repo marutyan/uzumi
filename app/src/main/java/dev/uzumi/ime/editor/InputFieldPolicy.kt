@@ -115,6 +115,26 @@ data class InputFieldPolicy(
 }
 
 /**
+ * Inline Autofill候補（パスワードやSMS認証コードなど、Autofill serviceが出す候補）を候補バーへ出すかの判定。
+ * 候補の中身はOSが描画し、IMEは中身を読まないため、判定には入力状態と件数・世代だけを使う。
+ * 機密欄でもOSの候補は出すが、通常の変換候補と学習の抑止は[InputFieldPolicy]のまま変えない。
+ */
+object InlineAutofillPolicy {
+    /** 未確定文字も通常候補もない待機中で、Inline候補が1件以上あるときだけ待機表示の代わりに並べる。 */
+    fun shouldShow(hasComposition: Boolean, hasRegularCandidates: Boolean, inlineCount: Int): Boolean {
+        return !hasComposition && !hasRegularCandidates && inlineCount > 0
+    }
+
+    /**
+     * 展開を終えた応答を表示へ採用するか。応答を受けた欄の編集セッション番号が今の番号と同じで、
+     * かつその応答が最後に受けた応答（[responseGeneration]が[latestGeneration]と同じ）である場合だけ採用する。
+     */
+    fun acceptsResponse(responseEpoch: Long?, currentEpoch: Long?, responseGeneration: Long, latestGeneration: Long): Boolean {
+        return responseEpoch != null && responseEpoch == currentEpoch && responseGeneration == latestGeneration
+    }
+}
+
+/**
  * Enter入力を改行として扱うか、editor actionとして送るかを判定する。
  */
 object EditorActionPolicy {

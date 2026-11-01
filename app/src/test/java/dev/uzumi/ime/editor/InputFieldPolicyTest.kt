@@ -124,4 +124,37 @@ class InputFieldPolicyTest {
         assertFalse(typeNull.usesLiveConversion(liveSettingEnabled = true))
         assertFalse(number.usesLiveConversion(liveSettingEnabled = true))
     }
+
+    /** Inline候補は未確定文字も通常候補もない待機中だけ出し、入力を始めたら通常の表示を優先する。 */
+    @Test
+    fun inlineAutofillShowsOnlyWhileIdle() {
+        assertTrue(InlineAutofillPolicy.shouldShow(hasComposition = false, hasRegularCandidates = false, inlineCount = 2))
+        assertFalse(InlineAutofillPolicy.shouldShow(hasComposition = true, hasRegularCandidates = false, inlineCount = 2))
+        assertFalse(InlineAutofillPolicy.shouldShow(hasComposition = false, hasRegularCandidates = true, inlineCount = 2))
+        assertFalse(InlineAutofillPolicy.shouldShow(hasComposition = false, hasRegularCandidates = false, inlineCount = 0))
+    }
+
+    /** 機密欄でもInline候補は出せるが、通常の変換候補と学習は従来どおり止める。 */
+    @Test
+    fun sensitiveFieldKeepsSuppressionWhileAllowingInlineAutofill() {
+        val hiddenField = InputFieldPolicy.fromRaw(
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD,
+            EditorInfo.IME_ACTION_DONE,
+            null,
+        )
+
+        assertTrue(hiddenField.suppressSuggestions)
+        assertTrue(hiddenField.suppressLearning)
+        assertTrue(InlineAutofillPolicy.shouldShow(hasComposition = false, hasRegularCandidates = false, inlineCount = 1))
+    }
+
+    /** 別の欄の応答、セッションのない応答、後から来た応答に追い越された応答は捨てる。 */
+    @Test
+    fun inlineAutofillDropsStaleResponses() {
+        assertTrue(InlineAutofillPolicy.acceptsResponse(responseEpoch = 3, currentEpoch = 3, responseGeneration = 5, latestGeneration = 5))
+        assertFalse(InlineAutofillPolicy.acceptsResponse(responseEpoch = 3, currentEpoch = 4, responseGeneration = 5, latestGeneration = 5))
+        assertFalse(InlineAutofillPolicy.acceptsResponse(responseEpoch = null, currentEpoch = null, responseGeneration = 5, latestGeneration = 5))
+        assertFalse(InlineAutofillPolicy.acceptsResponse(responseEpoch = 3, currentEpoch = null, responseGeneration = 5, latestGeneration = 5))
+        assertFalse(InlineAutofillPolicy.acceptsResponse(responseEpoch = 3, currentEpoch = 3, responseGeneration = 4, latestGeneration = 5))
+    }
 }
