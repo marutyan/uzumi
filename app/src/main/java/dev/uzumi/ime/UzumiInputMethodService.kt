@@ -789,12 +789,12 @@ class UzumiInputMethodService : InputMethodService() {
             refreshCandidates()
         })
         addToolbarEntry(trailing, current)
-        resizeCandidateBar(indexRows.size)
+        resizeCandidateBar(effectiveRows.second)
         // 一覧を開いたまま候補が変わった場合は、一覧も新しい候補で描き直す
         if (grid?.isShowing == true) showCandidateGrid(current, entries)
     }
 
-    /** 機能バーと候補バーを設定に応じた段数で表示する。候補数より多い空段は作らない。 */
+    /** 候補バーを設定に応じた段数の高さで表示する。候補が少なくても高さを変えず、キーボードの上下動を防ぐ。 */
     private fun resizeCandidateBar(rows: Int) {
         val density = resources.displayMetrics.density
         val dividerHeight = (density + 0.5f).toInt()
@@ -892,7 +892,8 @@ class UzumiInputMethodService : InputMethodService() {
     }
 
     private fun toolbarActionLabel(action: ToolbarAction): String = when (action) {
-        ToolbarAction.PASTE -> clipboardSuggestion?.label ?: getString(R.string.toolbar_paste)
+        // 本文の冒頭は候補バーの提案だけに出し、機能バーでは同じ本文を重ねて見せない。
+        ToolbarAction.PASTE -> getString(R.string.toolbar_paste)
         ToolbarAction.UNDO -> getString(R.string.toolbar_undo)
         ToolbarAction.USER_DICTIONARY -> getString(R.string.open_user_dictionary)
         ToolbarAction.SETTINGS -> getString(R.string.open_settings)
