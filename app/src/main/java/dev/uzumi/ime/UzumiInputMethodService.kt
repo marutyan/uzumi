@@ -98,9 +98,10 @@ class UzumiInputMethodService : InputMethodService() {
     private var builtPreferences: KeyboardPreferences? = null
     private var builtToolbarPreferences: ToolbarPreferences? = null
 
-    // 入力Viewで実際に受け取った下端Insets（px）と、入力Viewを作った時点の使える高さ（dp）。差が出たら作り直す。
+    // 入力Viewで実際に受け取った下端Insets（px）と、入力Viewを作った時点のバー段数上限・表示用キー行高。
+    // 実測Insetsでこの組が変わる場合だけ作り直し、表示に影響しない作り直しで初回表示が崩れるのを避ける。
     private var observedBottomInsetPx = 0
-    private var builtAvailableHeightDp: Int? = null
+    private var builtInputLayout: Pair<Int, Float>? = null
     private var toolbarViews: ToolbarBarViews? = null
     // クリップボード本文はRecentClipboardの一時候補にだけ保持し、ログや設定へ保存しない。
     private var recentClipboard: RecentClipboard? = null
@@ -255,10 +256,10 @@ class UzumiInputMethodService : InputMethodService() {
         val keyboardArea = FrameLayout(this)
         val preferences = UzumiSettings.keyboardPreferences(this)
         builtPreferences = preferences
-        builtAvailableHeightDp = availableInputHeightDp()
         val rowBudget = maximumBarRows()
         val reservedBarRows = minOf(toolbarPreferences.toolbarRows + toolbarPreferences.candidateRows, rowBudget)
         val displayPreferences = displayKeyboardPreferences(preferences, reservedBarRows)
+        builtInputLayout = rowBudget to displayPreferences.rowHeightDp
         keyboardPanel = KeyboardPanel(
             this,
             ::handleKeyboardAction,
@@ -291,12 +292,21 @@ class UzumiInputMethodService : InputMethodService() {
             // IMEのナビゲーション領域は端末全体の推定より高い場合があるため、実測値が変わったら段数と行高を計算し直す
             if (systemInsets.bottom != observedBottomInsetPx) {
                 observedBottomInsetPx = systemInsets.bottom
-                if (builtAvailableHeightDp != null && builtAvailableHeightDp != availableInputHeightDp()) {
+                val built = builtInputLayout
+                if (built != null && built != currentInputLayout()) {
                     targetView.post { setInputView(onCreateInputView()) }
                 }
             }
             insets
         }
+    }
+
+    /** 現在の設定と画面寸法から、入力Viewを作るときと同じ方法でバー段数上限と表示用キー行高を求める。 */
+    private fun currentInputLayout(): Pair<Int, Float> {
+        val rowBudget = maximumBarRows()
+        val toolbarPreferences = UzumiSettings.toolbarPreferences(this)
+        val reservedBarRows = minOf(toolbarPreferences.toolbarRows + toolbarPreferences.candidateRows, rowBudget)
+        return rowBudget to displayKeyboardPreferences(UzumiSettings.keyboardPreferences(this), reservedBarRows).rowHeightDp
     }
 
     /**
@@ -715,9 +725,8 @@ class UzumiInputMethodService : InputMethodService() {
         val availableCandidateWidthDp = (resources.configuration.screenWidthDp - CANDIDATE_FIXED_WIDTH_DP)
             .coerceAtLeast(MIN_CANDIDATE_SLOT_DP)
         val maxItemsPerRow = availableCandidateWidthDp / MIN_CANDIDATE_SLOT_DP
-        val requestedCandidateRows = if (entries.isEmpty()) 1 else {
-            preferences.candidateIndexRows(entries.size, maxItemsPerRow).size
-        }
+        // 候補の件数で候補列の高さが変わるとキーボード全体が上下し、長押し中の操作が途切れるため、設定段数で固定する。
+        val requestedCandidateRows = preferences.candidateRows
         val effectiveRows = fitBarRows(requestedToolbarRows, requestedCandidateRows)
         refreshToolbar(effectiveRows.first)
         if (entries.isEmpty()) {
