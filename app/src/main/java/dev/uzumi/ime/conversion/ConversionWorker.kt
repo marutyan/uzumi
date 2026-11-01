@@ -193,6 +193,8 @@ class ConversionWorker(
      * ユーザー辞書の登録語を表示したsegmentは記録しない。辞書から消した後も学習から表示され続けるのを防ぐ。
      * 2segment以上の単位では、先頭からの累積句（1〜2番目、1〜3番目…、最後は単位の読み全体）も句として記録する。
      * 句は登録語のsegmentを含むところで打ち切る。登録語を含む句も、辞書から消した後に登録語を表示し続けるためである。
+     * 顔文字・絵文字のsegmentでも句を打ち切る。句の表記は顔文字と判定されないことがあり、次回の表示値になるためである。
+     * 顔文字・絵文字のsegment自体は、候補の順位を上げる回数のために一語として記録する。
      * 新しい句は、ユーザーが候補を選んだsegmentを含む場合だけ作る。選ばずに確定した句はエンジンの結果の再現なので、
      * 覚えても表示は変わらず上限を埋めるだけだからである。既に覚えている句は、選ばなくても時刻と回数を更新する。
      */
@@ -201,10 +203,11 @@ class ConversionWorker(
         // 読みと表記がユーザー辞書の登録語と一致するsegmentか。
         fun registered(segment: LearnedSegment): Boolean =
             dictionary?.exactMatches(segment.reading)?.any { it.surface == segment.surface } == true
+        val emoticons = EmoticonJudge(dictionary, learningStore = null)
         for (unit in units) {
             unit.filterNot(::registered).forEach { store.record(it.reading, it.surface) }
-            // 登録語のsegmentより前だけを句にする。
-            val phraseSource = unit.takeWhile { !registered(it) }
+            // 登録語と顔文字・絵文字のsegmentより前だけを句にする。
+            val phraseSource = unit.takeWhile { !registered(it) && !emoticons.isEmoticon(it.reading, it.surface) }
             for (end in 2..phraseSource.size) {
                 val phrase = phraseSource.subList(0, end)
                 store.recordPhrase(

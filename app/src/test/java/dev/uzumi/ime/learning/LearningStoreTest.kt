@@ -144,6 +144,17 @@ class LearningStoreTest {
         assertEquals(2, store.allWords().size)
     }
 
+    /** ASCIIだけの表記のうち顔文字は、選んだ回数で順位を上げるために覚える。英字の語は従来どおり覚えない。 */
+    @Test
+    fun asciiKaomojiIsRecordedButAsciiWordsAreNot() {
+        val store = store()
+        assertTrue(store.record("かお", "(^_^)"))
+        assertTrue(store.record("あせ", "^^;"))
+        assertFalse(store.record("うずみ", "Uzumi"))
+        assertFalse(store.record("かっこ", "(a)"))
+        assertEquals(listOf("(^_^)", "^^;"), store.allWords().map { it.surface }.sorted())
+    }
+
     /** OFFの間は記録も参照もせず、ONに戻せば保存済みの語を再び返す。ON/OFFは保存される。 */
     @Test
     fun disabledStoreNeitherRecordsNorReturnsWords() {

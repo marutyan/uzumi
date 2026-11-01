@@ -1,5 +1,6 @@
 package dev.uzumi.ime.learning
 
+import dev.uzumi.ime.conversion.EmoticonText
 import dev.uzumi.ime.dictionary.writeFileAtomically
 import java.io.File
 import java.io.IOException
@@ -34,12 +35,13 @@ object LearningRules {
     /**
      * 読みと表記が学習の対象か。表記がひらがなだけのもの、ASCIIだけのもの、読みと同じもの、
      * 長すぎるもの、保存形式の区切り（タブ・改行）を含むものは覚えない。
+     * ただしASCIIだけの顔文字（「(^_^)」など）は、選んだ回数で候補の順位を上げるために覚える。
      */
     fun isLearnable(reading: String, surface: String): Boolean {
         if (reading.isEmpty() || surface.isEmpty() || surface == reading) return false
         if (surface.length > MAX_SURFACE_LENGTH) return false
         if (listOf(reading, surface).any { text -> text.any { it == '\t' || it == '\n' || it == '\r' } }) return false
-        if (surface.all { it.code < 0x80 }) return false
+        if (surface.all { it.code < 0x80 } && !EmoticonText.isEmoticon(surface)) return false
         return !surface.all { it in '\u3041'..'\u309F' || it == 'ー' }
     }
 }

@@ -20,6 +20,7 @@ data class ConversionSegment(
     val reading: String,
     val value: String,
     // 表記がユーザー辞書の登録語か。エンジンの変換結果ではないため、確定してもエンジンへ学習させない。
+    // エンジンの顔文字・絵文字を別の値へ差し替えた文節も、エンジンの選択と表記が違うためtrueにする。
     val fromUserDictionary: Boolean = false,
 )
 

@@ -160,6 +160,7 @@ object EmoticonCandidates {
     /**
      * 明示変換の先頭文節の候補を並べ直し、表示する文節の値が顔文字・絵文字なら替える。
      * 先頭文節は同じ読みを確定する顔文字・絵文字でない最初の候補へ、それ以外の文節と候補が無い場合は読みへ替える。
+     * 差し替えた文節はエンジンの選択と表記が違うため、登録語と同じく全文確定をエンジンへ学習させない印を付ける。
      */
     fun arrangeExplicit(conversion: EngineConversion, judge: EmoticonJudge): EngineConversion {
         val isEmoticon = { candidate: ConversionCandidate -> judge.isEmoticon(candidate.reading, candidate.value) }
@@ -170,7 +171,7 @@ object EmoticonCandidates {
                 ?.firstOrNull { it.reading == segment.reading && !isEmoticon(it) }
                 ?.value
                 ?: segment.reading
-            segment.copy(value = replacement)
+            segment.copy(value = replacement, fromUserDictionary = true)
         }
         return EngineConversion(segments = segments, headCandidates = ranked)
     }

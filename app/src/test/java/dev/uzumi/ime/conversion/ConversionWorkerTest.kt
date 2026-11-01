@@ -803,6 +803,8 @@ class ConversionWorkerTest {
             fixture.executor.runAll()
             val result = (fixture.outcomes.last() as ConversionOutcome.Converted).result
             assertEquals("笑い", result.display)
+            // エンジンの第一候補（絵文字）から表示を差し替えたため、全文確定をエンジンへ学習させない印が付く。
+            assertTrue(result.segments.single().fromUserDictionary)
             if (value != null) {
                 fixture.worker.commitCandidate(request, result.headCandidates.first { it.value == value }.id)
                 fixture.executor.runAll()
@@ -943,6 +945,50 @@ class ConversionWorkerTest {
         assertEquals(2, learning.exactMatches("わらい").single { it.surface == "😂" }.useCount)
         assertEquals("笑い", twice.surface)
         assertEquals(1, twice.candidates.indexOf("😂"))
+    }
+
+    /**
+     * ライブ変換で手で選んだ顔文字の文節では句を打ち切る。「ありがとう(^^)」のような句を覚えると、句の表記は
+     * 顔文字と判定されないため次回の表示値になるからである。顔文字の文節は一語として記録し、次回も表示値にしない。
+     * 明示変換でも、その句が先頭の候補にならない。
+     */
+    @Test
+    fun phraseEndingWithChosenKaomojiIsNotLearned() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.segmentsFor = { reading ->
+            if (reading == "ありがとうにこにこ") {
+                listOf(
+                    EngineSegment("ありがとう", "ありがとう", listOf("ありがとう", "有難う")),
+                    EngineSegment("にこにこ", "ニコニコ", listOf("ニコニコ", "にこにこ", "(^^)")),
+                )
+            } else {
+                listOf(EngineSegment(reading, reading, listOf(reading)))
+            }
+        }
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "ありがとうにこにこ"))
+        fixture.executor.runAll()
+
+        fixture.worker.learnCommitted(
+            7,
+            listOf(listOf(LearnedSegment("ありがとう", "ありがとう"), LearnedSegment("にこにこ", "(^^)", chosen = true))),
+        )
+        fixture.executor.runAll()
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 2, reading = "ありがとうにこにこ"))
+        fixture.executor.runAll()
+
+        assertTrue(learning.exactPhraseMatches("ありがとうにこにこ").isEmpty())
+        assertEquals(listOf("(^^)"), learning.exactMatches("にこにこ").map { it.surface })
+        val segments = fixture.liveResults.last().second.segments
+        assertEquals("ありがとうニコニコ", segments.joinToString("") { it.surface })
+        assertEquals(listOf("ニコニコ", "にこにこ", "(^^)"), segments.last().candidates)
+
+        fixture.worker.requestConversion(request(reading = "ありがとうにこにこ"))
+        fixture.executor.runAll()
+        val explicit = (fixture.outcomes.last() as ConversionOutcome.Converted).result
+        assertFalse(EmoticonText.isEmoticon(explicit.headCandidates.first().value))
+        assertTrue(explicit.headCandidates.none { it.value == "ありがとう(^^)" })
     }
 
     // 学習キャッシュのテスト用の保存先と時計。
