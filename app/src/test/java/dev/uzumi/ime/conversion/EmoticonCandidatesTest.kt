@@ -23,6 +23,10 @@ class EmoticonCandidatesTest {
             "⭐",
             "✨",
             "笑😂",
+            // 異体字セレクタの付かない顔の記号
+            "\u263A",
+            "\u263B",
+            "\u2639",
         )
         for (surface in emoji) assertTrue(surface, EmoticonText.isEmoticon(surface))
     }
