@@ -2,6 +2,7 @@ package dev.uzumi.ime
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
@@ -11,6 +12,7 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.RadioButton
@@ -22,6 +24,8 @@ import android.widget.TextView
 import android.widget.Toast
 import dev.uzumi.ime.conversion.NeuralModelSpec
 import dev.uzumi.ime.keyboard.KeyboardPreferences
+import dev.uzumi.ime.keyboard.ToolbarAction
+import dev.uzumi.ime.keyboard.ToolbarPreferences
 import dev.uzumi.ime.learning.LearningStores
 import dev.uzumi.ime.neural.NeuralRuntimeConnection
 import dev.uzumi.ime.neural.NeuralSelection
@@ -56,6 +60,20 @@ class SettingsActivity : Activity() {
         content.addView(heightControl())
         content.addView(switchRow(R.string.settings_key_preview, R.string.settings_key_preview_description,
             UzumiSettings.keyboardPreferences(this).keyPreview) { UzumiSettings.setKeyPreview(this, it) })
+
+        content.addView(section(R.string.settings_section_toolbar))
+        content.addView(label(R.string.settings_toolbar_tiles, R.string.settings_toolbar_tiles_description))
+        content.addView(toolbarActionControl())
+        content.addView(rowCountControl(
+            R.string.settings_toolbar_rows,
+            UzumiSettings.toolbarPreferences(this).toolbarRows,
+            UzumiSettings::setToolbarRows,
+        ))
+        content.addView(rowCountControl(
+            R.string.settings_candidate_rows,
+            UzumiSettings.toolbarPreferences(this).candidateRows,
+            UzumiSettings::setCandidateRows,
+        ))
 
         content.addView(section(R.string.settings_section_feedback))
         content.addView(switchRow(R.string.settings_vibration, null,
@@ -272,6 +290,129 @@ class SettingsActivity : Activity() {
             showHeight(selectedHeight, updateInput = true, save = false)
         }
     }
+
+    /** 機能バーへ常時表示するタイルを選び、上下ボタンで順序を変える。 */
+    private fun toolbarActionControl(): View {
+        val selected = UzumiSettings.toolbarPreferences(this).selectedActions
+        return Button(this).apply {
+            text = toolbarActionSummary(selected)
+            contentDescription = getString(R.string.settings_toolbar_tiles)
+            setOnClickListener { showToolbarActionDialog(this) }
+        }
+    }
+
+    /** 選択可能な機能の一覧をチェック欄と上下ボタンで編集する。 */
+    private fun showToolbarActionDialog(summaryButton: Button) {
+        val preferences = UzumiSettings.toolbarPreferences(this)
+        val ordered = (preferences.selectedActions + ToolbarPreferences.AVAILABLE_ACTIONS)
+            .distinct()
+            .toMutableList()
+        val selected = preferences.selectedActions.toMutableSet()
+        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        fun redraw() {
+            rows.removeAllViews()
+            ordered.forEachIndexed { index, action ->
+                val check = CheckBox(this).apply {
+                    text = toolbarActionLabel(action)
+                    isChecked = action in selected
+                    minimumHeight = px(48)
+                    setOnCheckedChangeListener { _, checked ->
+                        if (checked) selected.add(action) else selected.remove(action)
+                    }
+                }
+                val up = Button(this).apply {
+                    text = "↑"
+                    contentDescription = getString(R.string.settings_toolbar_move_up, toolbarActionLabel(action))
+                    minimumWidth = px(48)
+                    minimumHeight = px(48)
+                    isEnabled = index > 0
+                    setOnClickListener {
+                        if (index > 0) {
+                            val item = ordered.removeAt(index)
+                            ordered.add(index - 1, item)
+                            redraw()
+                        }
+                    }
+                }
+                val down = Button(this).apply {
+                    text = "↓"
+                    contentDescription = getString(R.string.settings_toolbar_move_down, toolbarActionLabel(action))
+                    minimumWidth = px(48)
+                    minimumHeight = px(48)
+                    isEnabled = index < ordered.lastIndex
+                    setOnClickListener {
+                        if (index < ordered.lastIndex) {
+                            val item = ordered.removeAt(index)
+                            ordered.add(index + 1, item)
+                            redraw()
+                        }
+                    }
+                }
+                rows.addView(LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    addView(check, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(up)
+                    addView(down)
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, px(52)))
+            }
+        }
+        redraw()
+        val scroll = ScrollView(this).apply {
+            addView(rows)
+            isFillViewport = true
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.settings_toolbar_tiles)
+            .setView(scroll)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val actions = ordered.filter { it in selected }
+                UzumiSettings.setToolbarActions(this, actions)
+                summaryButton.text = toolbarActionSummary(actions)
+            }
+            .show()
+    }
+
+    /** 機能バーまたは候補バーの段数を1〜3段から選ぶ。 */
+    private fun rowCountControl(titleId: Int, selectedRows: Int, save: (Context, Int) -> Unit): View {
+        val title = TextView(this).apply {
+            text = getString(titleId)
+            textSize = 14f
+            setPadding(0, px(8), 0, px(2))
+        }
+        val choices = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+            (ToolbarPreferences.MIN_ROWS..ToolbarPreferences.MAX_ROWS).forEach { count ->
+                addView(RadioButton(this@SettingsActivity).apply {
+                    id = View.generateViewId()
+                    text = getString(R.string.settings_rows_value, count)
+                    minimumHeight = px(48)
+                    isChecked = count == selectedRows
+                    setOnCheckedChangeListener { _, checked -> if (checked) save(this@SettingsActivity, count) }
+                })
+            }
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, px(4), 0, px(4))
+            addView(title)
+            addView(choices)
+        }
+    }
+
+    private fun toolbarActionLabel(action: ToolbarAction): String = when (action) {
+        ToolbarAction.PASTE -> getString(R.string.toolbar_paste)
+        ToolbarAction.UNDO -> getString(R.string.toolbar_undo)
+        ToolbarAction.USER_DICTIONARY -> getString(R.string.open_user_dictionary)
+        ToolbarAction.SETTINGS -> getString(R.string.open_settings)
+        ToolbarAction.CLOSE_KEYBOARD -> getString(R.string.close_keyboard)
+    }
+
+    private fun toolbarActionSummary(actions: List<ToolbarAction>): String =
+        actions.joinToString("・") { toolbarActionLabel(it) }
+            .ifEmpty { getString(R.string.settings_toolbar_tiles_none) }
 
     /**
      * 変換エンジン（開発用）の「Mozc／ZS／ZX／JS／JX」。ユーザーが実機でモデルを試すための項目で、選ぶとadbの

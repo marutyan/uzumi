@@ -635,6 +635,20 @@ class EditorSession(
         return true
     }
 
+    /** 未確定の入力を先に確定し、貼り付け文字列を変換・学習へ渡さずそのまま入力する。 */
+    fun pasteText(text: String): Boolean {
+        if (!active || text.isEmpty()) return false
+        if (hasComposition && !commitComposition()) return false
+        deletionUndo = null
+        val start = knownSelectionStart()
+        if (!connection.commitText(text, 1)) {
+            failClosed()
+            return false
+        }
+        updateExternalSelectionAfterCommit(text, start)
+        return true
+    }
+
     /**
      * 表示中の変換候補を選び、先頭文節をその候補で確定する。
      * 残りの読みは新しいcompositionとして続けて変換を依頼する。表示元の要求が古ければ拒否する。

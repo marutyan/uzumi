@@ -42,6 +42,66 @@ class EditorSessionTest {
         assertTrue(session.compositionSnapshot().reading.isEmpty())
     }
 
+    /** 貼り付けでは既存のcompositionを先に確定し、空白・改行を変換せずそのまま送る。 */
+    @Test
+    fun pasteTextKeepsWhitespaceAndFinishesCompositionFirst() {
+        val connection = FakeEditorConnection()
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        val pasted = "  line one\n\tline two  "
+
+        assertTrue(session.inputText("かな"))
+        assertTrue(session.pasteText(pasted))
+
+        assertEquals(listOf("かな", pasted), connection.committedTexts)
+        assertTrue(session.compositionSnapshot().reading.isEmpty())
+        assertTrue(client.requests.isEmpty())
+        assertTrue(client.committedAll.isEmpty())
+    }
+
+    /** 貼り付け本文はライブ変換要求と個人学習へ渡さない。 */
+    @Test
+    fun pasteTextDoesNotEnterLiveConversionOrLearning() {
+        val connection = FakeEditorConnection()
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        val pasted = "one\n two\t"
+
+        assertTrue(session.pasteText(pasted))
+
+        assertEquals(listOf(pasted), connection.committedTexts)
+        assertTrue(client.requests.isEmpty())
+        assertTrue(client.learned.isEmpty())
+    }
+
+    /** 貼り付けの書込み失敗後に、同じ内容を二重送信しない。 */
+    @Test
+    fun failedPasteInvalidatesSessionWithoutRetry() {
+        val connection = FakeEditorConnection().apply { commitAccepted = false }
+        val session = EditorSession(connection, normalPolicy())
+
+        assertFalse(session.pasteText("single"))
+        assertFalse(session.pasteText("single"))
+
+        assertEquals(listOf("single"), connection.committedTexts)
+        assertFalse(session.isActive)
+        assertTrue(connection.invalidated)
+    }
+
+    /** compositionの確定に失敗した場合は、貼り付け本文を送らない。 */
+    @Test
+    fun pasteDoesNotContinueWhenCompositionCommitFails() {
+        val connection = FakeEditorConnection()
+        val session = EditorSession(connection, normalPolicy())
+        assertTrue(session.inputText("かな"))
+        connection.commitAccepted = false
+
+        assertFalse(session.pasteText("clipboard"))
+
+        assertEquals(listOf("かな"), connection.committedTexts)
+        assertFalse(session.isActive)
+    }
+
     /** composition送信失敗後は接続を無効化し、同じ読みを再送しない。 */
     @Test
     fun composingFailureInvalidatesSessionWithoutRetry() {
@@ -1485,6 +1545,7 @@ private class FakeEditorConnection : EditorConnectionPort {
     var composingAccepted = true
     var selectionAccepted = true
     var finishAccepted = true
+    var commitAccepted = true
     var beforeCursor: CharSequence? = ""
     var afterCursor: CharSequence? = ""
     var invalidated = false
@@ -1505,7 +1566,7 @@ private class FakeEditorConnection : EditorConnectionPort {
     override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
         if (invalidated) return false
         committedTexts += text.toString()
-        return true
+        return commitAccepted
     }
 
     override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {

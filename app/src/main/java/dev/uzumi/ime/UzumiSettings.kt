@@ -3,6 +3,8 @@ package dev.uzumi.ime
 import android.content.Context
 import android.content.SharedPreferences
 import dev.uzumi.ime.keyboard.KeyboardPreferences
+import dev.uzumi.ime.keyboard.ToolbarAction
+import dev.uzumi.ime.keyboard.ToolbarPreferences
 import kotlin.math.roundToInt
 
 /**
@@ -26,6 +28,9 @@ object UzumiSettings {
     private const val KEY_VIBRATION = "vibration"
     private const val KEY_SOUND = "key_sound"
     private const val KEY_DELETE_DRAG = "delete_drag"
+    private const val KEY_TOOLBAR_ACTIONS = "toolbar_actions"
+    private const val KEY_TOOLBAR_ROWS = "toolbar_rows"
+    private const val KEY_CANDIDATE_ROWS = "candidate_rows"
 
     /** キーボードの見た目と反応の設定を読む。未設定の項目は既定値にする。 */
     fun keyboardPreferences(context: Context): KeyboardPreferences {
@@ -38,6 +43,38 @@ object UzumiSettings {
             keySound = prefs.getBoolean(KEY_SOUND, defaults.keySound),
             deleteDrag = prefs.getBoolean(KEY_DELETE_DRAG, defaults.deleteDrag),
         )
+    }
+
+    /** 機能バーの選択順と、機能バー・候補バーの段数を読む。 */
+    fun toolbarPreferences(context: Context): ToolbarPreferences {
+        val prefs = preferences(context)
+        val defaultActions = ToolbarPreferences.DEFAULT_ACTIONS.joinToString(",") { it.name }
+        val actions = prefs.getString(KEY_TOOLBAR_ACTIONS, defaultActions)
+            ?.split(',')
+            ?.mapNotNull { name -> ToolbarAction.entries.firstOrNull { it.name == name } }
+            ?: ToolbarPreferences.DEFAULT_ACTIONS
+        return ToolbarPreferences(
+            selectedActions = actions,
+            toolbarRows = prefs.getInt(KEY_TOOLBAR_ROWS, ToolbarPreferences.DEFAULT_ROWS),
+            candidateRows = prefs.getInt(KEY_CANDIDATE_ROWS, ToolbarPreferences.DEFAULT_ROWS),
+        ).normalized()
+    }
+
+    /** 機能バーへ出す機能と順序を保存する。 */
+    fun setToolbarActions(context: Context, actions: List<ToolbarAction>) {
+        preferences(context).edit()
+            .putString(KEY_TOOLBAR_ACTIONS, ToolbarPreferences.normalizeActions(actions).joinToString(",") { it.name })
+            .apply()
+    }
+
+    /** 機能バーの段数を保存する。 */
+    fun setToolbarRows(context: Context, rows: Int) {
+        preferences(context).edit().putInt(KEY_TOOLBAR_ROWS, ToolbarPreferences.normalizeRows(rows)).apply()
+    }
+
+    /** 候補バーの段数を保存する。 */
+    fun setCandidateRows(context: Context, rows: Int) {
+        preferences(context).edit().putInt(KEY_CANDIDATE_ROWS, ToolbarPreferences.normalizeRows(rows)).apply()
     }
 
     /** 保存済みのdp値を読み、初回だけ従来の「低・中・高」を同じ高さへ引き継ぐ。 */
