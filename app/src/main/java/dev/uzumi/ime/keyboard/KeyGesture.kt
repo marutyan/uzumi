@@ -78,6 +78,75 @@ fun resolveTextKeyRelease(
 }
 
 /**
+ * 空白・変換キー上の横ドラッグを、書記素単位のカーソル移動へ変換する。
+ * 最初の移動距離を越えた後は、開始点からの距離に応じて方向反転も差分として返す。
+ */
+class SpaceCursorDragTracker(
+    private val startThresholdPx: Float,
+    private val stepPx: Float,
+) {
+    private var startX = 0f
+    private var startY = 0f
+    private var lastSteps = 0
+
+    /** DOWNからの横ドラッグが開始したか。開始後に指を戻してもtrueを保つ。 */
+    var hasDragged = false
+        private set
+
+    /** 押下とドラッグ追跡中か。 */
+    var isTracking = false
+        private set
+
+    /** 押下開始位置を記録する。 */
+    fun down(x: Float, y: Float) {
+        startX = x
+        startY = y
+        lastSteps = 0
+        hasDragged = false
+        isTracking = true
+    }
+
+    /** 移動イベントの差分を符号付きの書記素数で返す。縦優位の動きでは開始しない。 */
+    fun move(x: Float, y: Float): Int {
+        if (!isTracking) return 0
+        val dx = x - startX
+        val dy = y - startY
+        if (!hasDragged) {
+            if (kotlin.math.abs(dx) < startThresholdPx || kotlin.math.abs(dx) <= kotlin.math.abs(dy)) return 0
+            hasDragged = true
+        }
+
+        val distance = kotlin.math.abs(dx)
+        val steps = if (distance < startThresholdPx) {
+            0
+        } else {
+            1 + ((distance - startThresholdPx) / stepPx).toInt()
+        }
+        val signedSteps = if (dx < 0f) -steps else steps
+        val delta = signedSteps - lastSteps
+        lastSteps = signedSteps
+        return delta
+    }
+
+    /** UP時にドラッグだったかを返し、次の入力のために状態を消す。 */
+    fun finish(): Boolean {
+        val dragged = hasDragged
+        reset()
+        return dragged
+    }
+
+    /** CANCEL、ポインタ交代、キー定義の変更で追跡状態を消す。 */
+    fun reset() {
+        hasDragged = false
+        isTracking = false
+        lastSteps = 0
+    }
+}
+
+/** 横ドラッグが始まらず、キー内で離したときだけ従来の空白・変換タップを送る。 */
+fun shouldSendSpaceCursorKeyTap(isInside: Boolean, dragWasActive: Boolean): Boolean = isInside && !dragWasActive
+
+/**
  * 削除・カーソルキーの連続実行の時間を決める。押下直後に一回実行し、一定時間後から繰り返す。
  * 加速は控えめにし、指を止める前に削除しすぎないよう最短間隔を設ける。
  */

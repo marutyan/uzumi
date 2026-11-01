@@ -342,6 +342,8 @@ class UzumiInputMethodService : InputMethodService() {
             } else {
                 current.moveCursor(action.delta)
             }
+            // Space・変換キーの横ドラッグは、ライブ変換中も文節焦点ではなく実カーソルを動かす。
+            is KeyboardAction.MoveEditorCursor -> current.moveCursor(action.delta)
             KeyboardAction.Enter -> current.handleEnter()
             KeyboardAction.Space -> current.insertSpace()
             KeyboardAction.Convert -> current.convert()

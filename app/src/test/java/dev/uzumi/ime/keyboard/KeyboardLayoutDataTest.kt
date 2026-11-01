@@ -205,6 +205,14 @@ class KeyboardLayoutDataTest {
     }
 
     @Test
+    fun spaceAndConvertHintsExplainCursorSwipeAndTalkBackActions() {
+        assertTrue(KeySpeech.spaceCursorDragHint(KeyboardAction.Space).contains("タップで空白"))
+        assertTrue(KeySpeech.spaceCursorDragHint(KeyboardAction.Convert).contains("タップで変換"))
+        assertEquals("カーソルを左へ移動", KeySpeech.actionDescription(KeyboardAction.MoveEditorCursor(-1)))
+        assertEquals("カーソルを右へ移動", KeySpeech.actionDescription(KeyboardAction.MoveEditorCursor(1)))
+    }
+
+    @Test
     fun modeDescriptionsNameEveryMode() {
         val descriptions = KeyboardMode.entries.map(KeySpeech::modeSwitchDescription)
         assertEquals(KeyboardMode.entries.size, descriptions.toSet().size)

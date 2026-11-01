@@ -137,6 +137,50 @@ class FlickDirectionTest {
     }
 
     @Test
+    fun spaceCursorDragMovesByDistanceAndReversesOneGraphemeAtATime() {
+        val drag = SpaceCursorDragTracker(startThresholdPx = 18f, stepPx = 24f)
+        drag.down(100f, 50f)
+
+        assertEquals(0, drag.move(83f, 50f))
+        assertEquals(-1, drag.move(82f, 50f))
+        assertEquals(-1, drag.move(58f, 50f))
+        assertEquals(-1, drag.move(34f, 50f))
+        assertEquals(1, drag.move(58f, 50f))
+        assertEquals(1, drag.move(82f, 50f))
+        // 開始点まで戻っても一度ドラッグした事実は残り、空白・変換タップを送らない。
+        assertEquals(1, drag.move(100f, 50f))
+        assertTrue(drag.finish())
+        assertFalse(drag.isTracking)
+        assertFalse(shouldSendSpaceCursorKeyTap(isInside = true, dragWasActive = true))
+    }
+
+    @Test
+    fun spaceCursorDragIgnoresVerticalOnlyMovementAndKeepsTap() {
+        val drag = SpaceCursorDragTracker(startThresholdPx = 18f, stepPx = 24f)
+        drag.down(50f, 50f)
+
+        assertEquals(0, drag.move(52f, 80f))
+        assertFalse(drag.finish())
+        assertTrue(shouldSendSpaceCursorKeyTap(isInside = true, dragWasActive = false))
+        assertFalse(shouldSendSpaceCursorKeyTap(isInside = false, dragWasActive = false))
+    }
+
+    @Test
+    fun spaceCursorDragUsesUpPositionWhenMoveWasNotDeliveredAndResetCancelsTracking() {
+        val drag = SpaceCursorDragTracker(startThresholdPx = 18f, stepPx = 24f)
+        drag.down(100f, 50f)
+        // ACTION_DOWNの後にACTION_UPだけ届いた場合も、UP座標をmoveとして扱える。
+        assertEquals(-2, drag.move(58f, 50f))
+        assertTrue(drag.finish())
+
+        drag.down(100f, 50f)
+        assertEquals(-1, drag.move(82f, 50f))
+        drag.reset() // ACTION_CANCEL、別ポインタ、replaceSpec、detach
+        assertEquals(0, drag.move(58f, 50f))
+        assertFalse(drag.finish())
+    }
+
+    @Test
     fun repeatStartsAfterInitialDelayAndAcceleratesModestly() {
         assertEquals(400L, KeyRepeatPolicy.INITIAL_DELAY_MS)
         assertEquals(KeyRepeatPolicy.START_INTERVAL_MS, KeyRepeatPolicy.intervalAfter(0))
@@ -163,6 +207,7 @@ class FlickDirectionTest {
         assertTrue(KeyRepeatPolicy.isRepeatable(KeyboardAction.Delete))
         assertTrue(KeyRepeatPolicy.isRepeatable(KeyboardAction.MoveCursor(-1)))
         assertTrue(KeyRepeatPolicy.isRepeatable(KeyboardAction.MoveCursor(1)))
+        assertFalse(KeyRepeatPolicy.isRepeatable(KeyboardAction.MoveEditorCursor(1)))
         assertFalse(KeyRepeatPolicy.isRepeatable(KeyboardAction.Enter))
         assertFalse(KeyRepeatPolicy.isRepeatable(KeyboardAction.Space))
         assertFalse(KeyRepeatPolicy.isRepeatable(KeyboardAction.Convert))

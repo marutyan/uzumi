@@ -655,6 +655,20 @@ class EditorSessionTest {
         assertEquals("今日は天気がいいですね世", connection.text)
     }
 
+    /** ライブ変換中の実カーソル移動後は、次の文字を移動先へ挿入する。 */
+    @Test
+    fun liveCursorMoveChangesInputPositionInsteadOfCandidateFocus() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        typeLive(session, client, "あいう")
+
+        assertTrue(session.moveCursor(-1))
+        assertTrue(session.inputText("え"))
+
+        assertEquals("あいえう", connection.text)
+    }
+
     /** 変換済み表示の内部をEditorでタップすると、そのsegmentを候補バーの対象にする。 */
     @Test
     fun liveTapInsideConvertedSegmentFocusesIt() {

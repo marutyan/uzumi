@@ -58,7 +58,7 @@ object OperationClassifier {
     /**
      * キーボードの操作[action]の種類。変換キーは、明示変換（[liveMode]がfalse）では変換を始める確定操作、
      * ライブ変換では次の候補へ切り替える訂正操作とする。Enterは入力中でも確定と改行・送信を一度に行うため終端操作とする。
-     * キー操作数は画面に指が触れた回数なので、同じ長押しで繰り返した文節の伸縮（2回目以降）は数えずnullを返す。
+     * 同じ長押しの文節伸縮と、カーソルドラッグの2回目以降の書記素移動は一回の操作として数え、続きにnullを返す。
      */
     fun keyboardAction(action: KeyboardAction, liveMode: Boolean): OperationKind? = when (action) {
         is KeyboardAction.Text -> text(action.value)
@@ -69,6 +69,7 @@ object OperationClassifier {
         is KeyboardAction.MoveCursor,
         KeyboardAction.ToKatakana,
         -> OperationKind.CORRECTION
+        is KeyboardAction.MoveEditorCursor -> if (action.continued) null else OperationKind.CORRECTION
         is KeyboardAction.ResizeSegment -> if (action.continued) null else OperationKind.CORRECTION
         KeyboardAction.Enter -> OperationKind.TERMINATOR
     }
