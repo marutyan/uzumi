@@ -288,7 +288,9 @@ class ConversionWorker(
             conversion,
             lookupLearningStore().takeUnless { request.incognito },
         )
-        val merged = UserDictionaryCandidates.mergeExplicit(request.reading, learned, lookupUserDictionary())
+        val withUser = UserDictionaryCandidates.mergeExplicit(request.reading, learned, lookupUserDictionary())
+        // 顔文字・絵文字は先頭へ置かず、表示する文節の値にも使わない。昇格には学習の回数を使う。
+        val merged = EmoticonCandidates.arrangeExplicit(withUser, emoticonJudge(learningAllowed = !request.incognito))
         lastHeadCandidates[request.sessionEpoch] = merged.headCandidates
         val result = ConversionResult(request, merged.segments, merged.headCandidates)
         onOutcome(
@@ -351,6 +353,8 @@ class ConversionWorker(
             learnedSurfaces = learnedSurfaces(request.learningAllowed),
             // 部分範囲の先頭からの読みに一致する句で区切りを合わせる。学習禁止欄では参照しない。
             learnedPhrases = learnedPhrases(request.learningAllowed),
+            // 顔文字・絵文字はニューラル変換やMozcの第一候補、学習語、登録語でも表示値にしない。
+            emoticons = emoticonJudge(request.learningAllowed),
             // ユーザーが伸縮で区切りを決めた読みは、Mozcの文節の幅を合わせて一文節として変換する。
             convertFixed = { reading ->
                 if (isAsciiOnly(reading)) {
@@ -387,7 +391,13 @@ class ConversionWorker(
             learnedSurfaces(request.learningAllowed),
             learnedPhrases(request.learningAllowed),
         )
-        val candidates = mergeSegmentCandidates(request.reading, segment.candidates, lookupUserDictionary(), exactSurfaces)
+        val candidates = mergeSegmentCandidates(
+            request.reading,
+            segment.candidates,
+            lookupUserDictionary(),
+            exactSurfaces,
+            emoticonJudge(request.learningAllowed),
+        )
         onCandidateResult(sessionEpoch, CandidateResult(request, candidates))
     }
 
@@ -402,6 +412,10 @@ class ConversionWorker(
         lookupLearningStore()?.takeIf { learningAllowed }?.let { store ->
             { reading -> store.exactPhraseMatches(reading).map { it.surface } }
         }
+
+    /** 顔文字・絵文字の判定を作る。学習禁止欄では学習の回数を参照せず、昇格させない。 */
+    private fun emoticonJudge(learningAllowed: Boolean): EmoticonJudge =
+        EmoticonJudge(lookupUserDictionary(), lookupLearningStore().takeIf { learningAllowed })
 
     /** ユーザー辞書を開いて返す。読めなければ登録語なしで変換を続ける。 */
     private fun lookupUserDictionary(): UserDictionaryLookup? = runCatching { userDictionary() }.getOrNull()

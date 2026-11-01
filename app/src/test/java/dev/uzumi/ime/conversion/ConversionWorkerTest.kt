@@ -1,5 +1,7 @@
 package dev.uzumi.ime.conversion
 
+import dev.uzumi.ime.dictionary.UserDictionaryCategory
+import dev.uzumi.ime.dictionary.UserDictionaryEntry
 import dev.uzumi.ime.evaluation.LiveRequestReport
 import dev.uzumi.ime.learning.LearningStore
 import dev.uzumi.ime.live.CandidateRequest
@@ -783,6 +785,166 @@ class ConversionWorkerTest {
         assertTrue(report.samples.isEmpty())
     }
 
+    /**
+     * 明示変換では、顔文字・絵文字はエンジンの第一候補でも6番目以降へ置き、表示する文節の値にも使わない。
+     * 2回以上選ぶと2番目へ上がるが、先頭にはならない。
+     */
+    @Test
+    fun explicitConversionKeepsEmoticonsBehindAndPromotesAfterRepeatedChoice() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.convertValuesFor = { listOf("😂", "笑い", "わらい", "ワライ", "藁い", "嗤い", "(^o^)") }
+
+        // 変換して候補一覧を返し、valueの候補を選んで確定する。
+        fun convertAndChoose(revision: Long, value: String?): List<ConversionCandidate> {
+            val request = request(revision = revision, reading = "わらい")
+            fixture.worker.requestConversion(request)
+            fixture.executor.runAll()
+            val result = (fixture.outcomes.last() as ConversionOutcome.Converted).result
+            assertEquals("笑い", result.display)
+            if (value != null) {
+                fixture.worker.commitCandidate(request, result.headCandidates.first { it.value == value }.id)
+                fixture.executor.runAll()
+            }
+            return result.headCandidates
+        }
+
+        assertEquals(
+            listOf("笑い", "わらい", "ワライ", "藁い", "嗤い", "😂", "(^o^)"),
+            convertAndChoose(revision = 1, value = "😂").map { it.value },
+        )
+        // 1回だけ選んだ段階では、学習語として先頭へ来ても6番目へ戻す。
+        assertEquals(5, convertAndChoose(revision = 2, value = "😂").indexOfFirst { it.value == "😂" })
+        assertEquals(
+            listOf("笑い", "😂", "わらい", "ワライ", "藁い", "嗤い", "(^o^)"),
+            convertAndChoose(revision = 3, value = null).map { it.value },
+        )
+    }
+
+    /** ユーザー辞書の顔文字は、読み全体に一致しても読み全体の一文節として表示せず、候補の後ろへ置く。 */
+    @Test
+    fun explicitConversionDoesNotDisplayRegisteredEmoticon() {
+        val dictionary = FakeLookup(listOf(UserDictionaryEntry("わら", "（笑）", UserDictionaryCategory.EMOTICON)))
+        val fixture = Fixture(dictionary = dictionary)
+        fixture.startReady()
+        fixture.engine.convertValuesFor = { listOf("藁", "わら") }
+
+        fixture.worker.requestConversion(request(reading = "わら"))
+        fixture.executor.runAll()
+
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        assertEquals("藁", result.display)
+        assertFalse(result.segments.single().fromUserDictionary)
+        assertEquals(listOf("藁", "わら", "（笑）"), result.headCandidates.map { it.value })
+    }
+
+    /** ライブ変換では、Mozcの第一候補が絵文字でも表示値にせず、候補の取り直しでも先頭に置かない。 */
+    @Test
+    fun liveConversionDoesNotDisplayEngineEmoji() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.segmentsFor = { listOf(EngineSegment("わらい", "😂", listOf("😂", "笑い", "わらい"))) }
+        fixture.engine.segmentFor = { _, reading, _ -> EngineSegment(reading, "😂", listOf("😂", "笑い")) }
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "わらい"))
+        fixture.worker.requestSegmentCandidates(1, candidateRequest("わらい"))
+        fixture.executor.runAll()
+
+        assertEquals(
+            listOf(ResultSegment("わらい", "笑い", listOf("笑い", "わらい", "😂"))),
+            fixture.liveResults.single().second.segments,
+        )
+        assertEquals(listOf("笑い", "😂"), fixture.candidateResults.single().second.candidates)
+    }
+
+    /** ニューラル変換の出力が絵文字でも表示値にせず、辞書の候補を表示する。 */
+    @Test
+    fun liveConversionDoesNotDisplayNeuralEmoji() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.segmentsFor = { listOf(EngineSegment("わらい", "笑い", listOf("笑い", "わらい"))) }
+        val backend = FakeNeuralBackend { _, _ -> NeuralModelOutput.Completed("😂") }
+        fixture.worker.setNeuralBackend(backend)
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "わらい"))
+        fixture.executor.runAll()
+
+        assertEquals(listOf("わらい" to ""), backend.calls)
+        val segment = fixture.liveResults.single().second.segments.single()
+        assertEquals("笑い", segment.surface)
+        assertEquals("笑い", segment.candidates.first())
+        assertTrue("😂" in segment.candidates)
+    }
+
+    /** 候補がすべて絵文字なら、読みのまま表示し、絵文字は読みの後ろの候補に残す。 */
+    @Test
+    fun liveConversionShowsReadingWhenAllCandidatesAreEmoji() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.segmentsFor = { listOf(EngineSegment("にこ", "😊", listOf("😊", "☺️"))) }
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "にこ"))
+        fixture.executor.runAll()
+
+        assertEquals(
+            listOf(ResultSegment("にこ", "にこ", listOf("にこ", "😊", "☺️"))),
+            fixture.liveResults.single().second.segments,
+        )
+    }
+
+    /** ユーザー辞書に品詞「顔文字」で登録した語は、読みに完全一致してもライブ変換の表示値にしない。 */
+    @Test
+    fun liveConversionDoesNotDisplayRegisteredEmoticon() {
+        val dictionary = FakeLookup(listOf(UserDictionaryEntry("わら", "（笑）", UserDictionaryCategory.EMOTICON)))
+        val fixture = Fixture(dictionary = dictionary)
+        fixture.startReady()
+        fixture.engine.segmentsFor = { listOf(EngineSegment("わら", "藁", listOf("藁"))) }
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "わら"))
+        fixture.executor.runAll()
+
+        assertEquals(
+            listOf(ResultSegment("わら", "藁", listOf("藁", "わら", "（笑）"))),
+            fixture.liveResults.single().second.segments,
+        )
+    }
+
+    /**
+     * ライブ変換で選んで確定した絵文字は、学習語の先頭になり、エンジンが第一候補に返しても次のライブ変換で自動表示しない。
+     * 2回確定した後は候補の2番目へ上がる。
+     */
+    @Test
+    fun liveCommittedEmojiIsNotDisplayedAutomatically() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.segmentsFor = { listOf(EngineSegment("わらい", "笑い", listOf("笑い", "わらい", "ワライ", "藁い", "嗤い", "哂い", "😂"))) }
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "わらい"))
+        fixture.executor.runAll()
+
+        fixture.worker.learnCommitted(7, listOf(listOf(LearnedSegment("わらい", "😂", chosen = true))))
+        fixture.executor.runAll()
+        // Mozcが確定を学習し、絵文字を第一候補に返すようになった場合を再現する。
+        fixture.engine.segmentsFor = { listOf(EngineSegment("わらい", "😂", listOf("😂", "笑い", "わらい", "ワライ", "藁い", "嗤い", "哂い"))) }
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 2, reading = "わらい"))
+        fixture.executor.runAll()
+
+        val once = fixture.liveResults.last().second.segments.single()
+        assertEquals("笑い", once.surface)
+        assertEquals(5, once.candidates.indexOf("😂"))
+
+        fixture.worker.learnCommitted(7, listOf(listOf(LearnedSegment("わらい", "😂", chosen = true))))
+        fixture.executor.runAll()
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 3, reading = "わらい"))
+        fixture.executor.runAll()
+
+        val twice = fixture.liveResults.last().second.segments.single()
+        assertEquals(2, learning.exactMatches("わらい").single { it.surface == "😂" }.useCount)
+        assertEquals("笑い", twice.surface)
+        assertEquals(1, twice.candidates.indexOf("😂"))
+    }
+
     // 学習キャッシュのテスト用の保存先と時計。
     private val learningDirectory: File = Files.createTempDirectory("worker-learning").toFile().apply { deleteOnExit() }
     private val learningFile = File(learningDirectory, "learning.tsv")
@@ -903,6 +1065,9 @@ private class FakeConversionEngine : ConversionEngine {
     var knownConversionValues = listOf("漢字", "感じ")
     var segmentReadingOverride: String? = null
 
+    // 明示変換で返す先頭文節の候補の表記。既定では「かんじ」だけknownConversionValuesを返し、他は読みをそのまま返す。
+    var convertValuesFor: (String) -> List<String> = { reading -> if (reading == "かんじ") knownConversionValues else listOf(reading) }
+
     override fun load(): EngineHealth = loadResult()
 
     override fun createSession(): Long {
@@ -921,7 +1086,7 @@ private class FakeConversionEngine : ConversionEngine {
 
     override fun convert(sessionId: Long, reading: String, headLength: Int?): EngineConversion {
         calls += if (headLength == null) "convert($sessionId,$reading)" else "convert($sessionId,$reading,$headLength)"
-        val values = if (reading == "かんじ") knownConversionValues else listOf(reading)
+        val values = convertValuesFor(reading)
         val segmentReading = segmentReadingOverride ?: reading
         return EngineConversion(
             segments = listOf(ConversionSegment(segmentReading, values.first())),
