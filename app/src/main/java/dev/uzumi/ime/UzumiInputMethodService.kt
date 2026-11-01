@@ -331,8 +331,8 @@ class UzumiInputMethodService : InputMethodService() {
     private fun handleKeyboardAction(action: KeyboardAction) {
         val current = session ?: return
         OperationClassifier.keyboardAction(action, current.isLiveMode)?.let(evaluation::record)
-        // 左ドラッグで消した文字列は、次の操作をした時点で戻せなくする
-        if (action != KeyboardAction.DeleteToLineStart) current.forgetLineDelete()
+        // Backspaceが続く間は削除内容をまとめ、それ以外の操作でUndo記録を終える。
+        if (action != KeyboardAction.Delete && action != KeyboardAction.DeleteToLineStart) current.forgetDeletionUndo()
         when (action) {
             is KeyboardAction.Text -> current.inputText(action.value)
             KeyboardAction.Delete -> current.deleteBackward()
@@ -449,10 +449,10 @@ class UzumiInputMethodService : InputMethodService() {
         leading.removeAllViews()
         trailing.removeAllViews()
         val current = session
-        if (current?.canUndoLineDelete == true) {
+        if (current?.canUndoDeletion == true) {
             leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.line_delete_undo_description), true) {
                 evaluation.record(OperationKind.CORRECTION)
-                if (session === current) current.undoLineDelete()
+                if (session === current) current.undoDeletion()
                 refreshCandidates()
             })
         }
@@ -506,7 +506,7 @@ class UzumiInputMethodService : InputMethodService() {
     private fun pickCandidate(shown: EditorSession?, entry: CandidateEntry, index: Int) {
         evaluation.record(OperationClassifier.candidatePick(index))
         if (shown == null || session !== shown) return
-        shown.forgetLineDelete()
+        shown.forgetDeletionUndo()
         entry.onPick()
         refreshCandidates()
     }
@@ -536,7 +536,7 @@ class UzumiInputMethodService : InputMethodService() {
     private fun liveEntries(current: EditorSession, leading: LinearLayout, trailing: LinearLayout): List<CandidateEntry> {
         val views = barViews ?: return emptyList()
         val state = current.liveCandidateState() ?: return emptyList()
-        if (state.canUndo && !current.canUndoLineDelete) {
+        if (state.canUndo && !current.canUndoDeletion) {
             leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.live_undo), true) {
                 evaluation.record(OperationKind.CORRECTION)
                 if (session === current) current.undoLive()

@@ -65,7 +65,7 @@
     <string name="licenses_title">第三者ライセンス</string>
     <string name="licenses_missing">このビルドには第三者表示が含まれていません。</string>
     <string name="line_delete_undo">↶ 元に戻す</string>
-    <string name="line_delete_undo_description">行頭までの削除を元に戻す</string>
+    <string name="line_delete_undo_description">直前に削除した文字を元に戻す</string>
     <string name="open_settings">Uzumiの設定を開く</string>
     <string name="close_keyboard">キーボードを閉じる</string>
     <string name="candidate_list_toggle">候補の一覧を開く、または閉じる</string>

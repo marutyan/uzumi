@@ -33,6 +33,9 @@ interface EditorConnectionPort {
     /** カーソル移動に使う直後の文字列を取得する。 */
     fun textAfterCursor(maxChars: Int): CharSequence?
 
+    /** 選択範囲の文字列を取得する。取得できないEditorではnullを返す。 */
+    fun selectedText(): CharSequence?
+
     /** 接続を無効にする。 */
     fun invalidate()
 }
@@ -93,6 +96,11 @@ class AndroidInputConnectionPort(
     override fun textAfterCursor(maxChars: Int): CharSequence? {
         if (!active) return null
         return runCatching { delegate.getTextAfterCursor(maxChars, 0) }.getOrNull()
+    }
+
+    override fun selectedText(): CharSequence? {
+        if (!active) return null
+        return runCatching { delegate.getSelectedText(0) }.getOrNull()
     }
 
     private fun call(operation: () -> Boolean): Boolean {

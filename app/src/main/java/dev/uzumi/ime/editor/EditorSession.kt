@@ -58,6 +58,8 @@ class EditorSession(
     private var revision = 0L
     private var pendingConversion: ConversionRequest? = null
     private var appliedConversion: ConversionResult? = null
+    // Undoで画面用revisionを更新しても、変換エンジンが保持する要求との一致を保つ。
+    private var appliedConversionCommitRequest: ConversionRequest? = null
     // 変換が失敗・時間超過したrevision。同じ読みでの再度の変換操作はカナ候補へ戻す。
     private var failedConversionRevision: Long? = null
     private var active = true
@@ -119,8 +121,8 @@ class EditorSession(
     val hasComposition: Boolean
         get() = active && (liveCore?.display?.isNotEmpty() ?: !buffer.isEmpty)
 
-    // 削除キーの左ドラッグで消した文字列。「元に戻す」で使い、ほかの操作や一致しない周辺文字列で捨てる。
-    private var lineDeletion: LineDeletion? = null
+    // 直前の削除内容と復元位置。別操作・位置変更・外部編集の後は使わない。
+    private var deletionUndo: DeletionUndo? = null
 
     /** 変換の進み具合（revisionと真偽だけ）。評価用の受信口が、自動測定の待ち合わせのために読む。 */
     fun conversionProgress(): ConversionProgress = ConversionProgress(
@@ -175,24 +177,59 @@ class EditorSession(
         return false
     }
 
-    /**
-     * 読み末尾または外部カーソル直前の書記素を削除する。
-     */
+    /** 読み末尾または外部カーソル直前の書記素を削除する。連続した削除は一度のUndoにまとめる。 */
     fun deleteBackward(): Boolean {
         if (!active) return false
+        val previous = activeBackspaceDeletion()
         liveCore?.let { core ->
-            // composition先頭での削除は、明示変換と同じく何もしない（Editor側の位置の追跡を崩さないため）。
-            if (core.display.isNotEmpty()) return performLive { it.deleteBackward() } ?: false
-            return deleteOutsideComposition()
+            if (core.display.isNotEmpty()) {
+                if (policy.isSensitive) {
+                    val accepted = performLive { it.deleteBackward() } ?: false
+                    if (accepted) deletionUndo = null
+                    return accepted
+                }
+                val depthBefore = core.undoDepth
+                val accepted = performLive { it.deleteBackward() } ?: false
+                if (!accepted) return false
+                val addedUndoSteps = (core.undoDepth - depthBefore).coerceAtLeast(0)
+                rememberBackspaceDeletion(
+                    previous = previous,
+                    explicitComposition = previous?.explicitComposition,
+                    liveUndoSteps = (previous?.liveUndoSteps ?: 0) + addedUndoSteps,
+                    originalCompositionStart = previous?.originalCompositionStart ?: compositionStart,
+                )
+                return true
+            }
+            return deleteOutsideComposition(previous)
         }
         if (!buffer.isEmpty) {
+            val snapshot = if (policy.isSensitive) null else previous?.explicitComposition ?: buffer.snapshot()
+            val conversion = if (policy.isSensitive) null else previous?.explicitConversion ?: currentConversion()
+            val conversionCommitRequest = if (policy.isSensitive) null else {
+                previous?.explicitConversionCommitRequest ?: appliedConversionCommitRequest ?: conversion?.request
+            }
+            val originalStart = previous?.originalCompositionStart ?: compositionStart
             if (!buffer.deleteBackward()) return false
             markCompositionChanged()
-            if (synchronizeComposition()) return true
-            failClosed()
-            return false
+            if (!synchronizeComposition()) {
+                failClosed()
+                return false
+            }
+            if (policy.isSensitive) {
+                deletionUndo = null
+            } else {
+                rememberBackspaceDeletion(
+                    previous = previous,
+                    explicitComposition = snapshot,
+                    explicitConversion = conversion,
+                    explicitConversionCommitRequest = conversionCommitRequest,
+                    liveUndoSteps = previous?.liveUndoSteps ?: 0,
+                    originalCompositionStart = originalStart,
+                )
+            }
+            return true
         }
-        return deleteOutsideComposition()
+        return deleteOutsideComposition(previous)
     }
 
     /**
@@ -212,7 +249,7 @@ class EditorSession(
      * 行頭にいる場合は直前の改行一つを消す。消した文字列は、機密欄・学習禁止欄を除いて「元に戻す」のために覚える。
      */
     fun deleteToLineStart(): Boolean {
-        lineDeletion = null
+        deletionUndo = null
         if (!active) return false
         if (hasComposition) {
             val reading = liveCore?.segments?.joinToString("") { it.reading } ?: buffer.reading
@@ -221,82 +258,290 @@ class EditorSession(
             return true
         }
         if (selectionStart != null && selectionEnd != null && selectionStart != selectionEnd) {
-            return deleteOutsideComposition()
+            return deleteOutsideComposition(previous = null)
         }
         val before = connection.textBeforeCursor(LINE_DELETE_MAX_CHARS)?.toString() ?: return false
         val target = lineDeleteTarget(before)
         if (target.isEmpty()) return false
+        val oldStart = selectionStart
+        val oldEnd = selectionEnd
         if (!connection.deleteSurroundingText(target.length, 0)) return false
-        // hostの選択通知より先に次の操作が来ても、消した後のカーソル位置を使う
-        selectionEnd?.let { end -> (end - target.length).coerceAtLeast(0).let { selectionStart = it; selectionEnd = it } }
+        // hostの選択通知より先に次の操作が来ても、消した後のカーソル位置を使う。
+        if (oldStart != null && oldStart == oldEnd) {
+            val cursor = (oldStart - target.length).coerceAtLeast(0)
+            recordExpectedExternalSelection(oldStart, oldEnd, cursor)
+        }
         rememberLineDeletion(target, fromComposition = false)
         return true
     }
 
-    /** 左ドラッグで消した文字列を戻せるか。候補バーの「元に戻す」の表示に使う。 */
-    val canUndoLineDelete: Boolean
-        get() = active && lineDeletion != null
+    /** 直前の削除を戻せるか。候補バーの「元に戻す」の表示に使う。 */
+    val canUndoDeletion: Boolean
+        get() = active && deletionUndo != null
 
     /**
-     * 左ドラッグで消した文字列を戻す。カーソルの前後の文字列が消した直後と同じで、範囲選択も入力中の読みも無い場合だけ戻す。
-     * 別の編集が入っていれば何もせず記録を捨て、利用者の別の文字列を壊さない。
+     * 直前に消した文字列を戻す。前後32文字とカーソル位置が削除直後のままの場合だけ復元する。
+     * 外部選択や別の編集が入っていれば記録を捨て、利用者の別の文字列を壊さない。
      */
-    fun undoLineDelete(): Boolean {
-        val record = lineDeletion ?: return false
-        lineDeletion = null
-        if (!active || hasComposition) return false
-        if (selectionStart != null && selectionStart != selectionEnd) return false
-        val before = connection.textBeforeCursor(LINE_DELETE_CONTEXT_CHARS)?.toString() ?: return false
-        val after = connection.textAfterCursor(LINE_DELETE_CONTEXT_CHARS)?.toString() ?: return false
-        if (before != record.before || after != record.after) return false
-        if (record.fromComposition) return inputText(record.removed)
-        val accepted = connection.commitText(record.removed, 1)
-        if (accepted) updateExternalSelectionAfterCommit(record.removed)
-        return accepted
+    fun undoDeletion(): Boolean {
+        val record = deletionUndo ?: return false
+        deletionUndo = null
+        if (!active || !matchesDeletionLocation(record)) return false
+
+        if (record.kind == DeletionUndoKind.LINE_START) {
+            if (hasComposition) return false
+            if (record.fromComposition) return inputText(record.lineText)
+            return restoreExternalText(record.lineText)
+        }
+
+        if (record.removedExternal.isNotEmpty()) {
+            if (hasComposition) return false
+            if ((record.explicitComposition != null || record.liveUndoSteps > 0) && !connection.finishComposingText()) {
+                failClosed()
+                return false
+            }
+            if (!restoreExternalText(record.removedExternal)) return false
+        }
+        record.explicitComposition?.let { snapshot ->
+            if (liveCore != null) return false
+            buffer.restore(snapshot)
+            compositionStart = if (record.removedExternal.isEmpty()) {
+                record.originalCompositionStart
+            } else {
+                knownSelectionStart()
+            }
+            markCompositionChanged()
+            if (!synchronizeComposition()) {
+                failClosed()
+                return false
+            }
+            appliedConversion = record.explicitConversion?.copy(
+                request = record.explicitConversion.request.copy(revision = revision),
+            )
+            appliedConversionCommitRequest = record.explicitConversionCommitRequest
+            return true
+        }
+        if (record.liveUndoSteps > 0) {
+            val core = liveCore ?: return false
+            if (!core.isActive || !core.isLiveEnabled || core.undoDepth < record.liveUndoSteps) return false
+            return performLive { live ->
+                var update = LiveUpdate.NOT_HANDLED
+                repeat(record.liveUndoSteps) { update = live.undo() }
+                update
+            } ?: false
+        }
+        return record.removedExternal.isNotEmpty()
     }
 
-    /** 左ドラッグの「元に戻す」の記録を捨てる。ほかの操作をしたときに呼ぶ。 */
-    fun forgetLineDelete() {
-        lineDeletion = null
+    /** 削除のUndo記録を捨てる。削除以外の操作をしたときに呼ぶ。 */
+    fun forgetDeletionUndo() {
+        deletionUndo = null
     }
 
-    /** 消した文字列と、そのときのカーソルの前後の文字列を覚える。機密欄・学習禁止欄では覚えない。 */
+    /** 行頭削除で消した本文と削除直後の位置を記録する。機密欄・学習禁止欄では本文を保持しない。 */
     private fun rememberLineDeletion(removed: String, fromComposition: Boolean) {
         if (policy.isSensitive || removed.isEmpty()) return
-        val before = connection.textBeforeCursor(LINE_DELETE_CONTEXT_CHARS)?.toString() ?: return
-        val after = connection.textAfterCursor(LINE_DELETE_CONTEXT_CHARS)?.toString() ?: return
-        lineDeletion = LineDeletion(removed, before, after, fromComposition)
+        val location = captureDeletionLocation() ?: return
+        deletionUndo = DeletionUndo(
+            kind = DeletionUndoKind.LINE_START,
+            lineText = removed,
+            fromComposition = fromComposition,
+            before = location.before,
+            after = location.after,
+            cursor = location.cursor,
+            composition = location.composition,
+        )
+    }
+
+    /** 同じ連続Backspaceで削除した本文と、削除前のcomposition状態を保持する。 */
+    private fun rememberBackspaceDeletion(
+        previous: DeletionUndo?,
+        explicitComposition: CompositionSnapshot?,
+        explicitConversion: ConversionResult? = previous?.explicitConversion,
+        explicitConversionCommitRequest: ConversionRequest? = previous?.explicitConversionCommitRequest,
+        liveUndoSteps: Int,
+        originalCompositionStart: Int?,
+        removedExternal: String = previous?.removedExternal.orEmpty(),
+    ) {
+        if (policy.isSensitive) {
+            deletionUndo = null
+            return
+        }
+        val location = captureDeletionLocation() ?: run {
+            deletionUndo = null
+            return
+        }
+        deletionUndo = DeletionUndo(
+            kind = DeletionUndoKind.BACKSPACE,
+            removedExternal = removedExternal,
+            explicitComposition = explicitComposition,
+            explicitConversion = explicitConversion,
+            explicitConversionCommitRequest = explicitConversionCommitRequest,
+            liveUndoSteps = liveUndoSteps,
+            originalCompositionStart = originalCompositionStart,
+            before = location.before,
+            after = location.after,
+            cursor = location.cursor,
+            composition = location.composition,
+        )
+    }
+
+    /** 同じ入力位置で続いたBackspaceなら、既存の削除グループを返す。 */
+    private fun activeBackspaceDeletion(): DeletionUndo? {
+        val record = deletionUndo?.takeIf { it.kind == DeletionUndoKind.BACKSPACE } ?: return null
+        return record.takeIf(::matchesDeletionLocation)
+    }
+
+    /** 現在の周辺文字列・カーソル・compositionが記録した削除直後の状態と一致するかを確かめる。 */
+    private fun matchesDeletionLocation(record: DeletionUndo): Boolean {
+        val location = captureDeletionLocation() ?: return false
+        return location.before == record.before &&
+            location.after == record.after &&
+            location.cursor == record.cursor &&
+            location.composition == record.composition
+    }
+
+    /** Undoの照合に使う削除直後の状態を読む。値が足りなければ復元記録を作らない。 */
+    private fun captureDeletionLocation(): DeletionLocation? {
+        val start = selectionStart ?: return null
+        val end = selectionEnd ?: return null
+        if (start != end) return null
+        val before = connection.textBeforeCursor(DELETION_CONTEXT_CHARS)?.toString() ?: return null
+        val after = connection.textAfterCursor(DELETION_CONTEXT_CHARS)?.toString() ?: return null
+        return DeletionLocation(
+            before = before,
+            after = after,
+            cursor = start,
+            composition = currentCompositionGeometry(),
+        )
+    }
+
+    /** compositionの範囲と表示上のカーソルを、Editorの通知照合と同じ座標で表す。 */
+    private fun currentCompositionGeometry(): CompositionGeometry? {
+        if (!hasComposition) return null
+        val cursorOffset = when {
+            liveCore != null -> liveCursorUtf16
+            buffer.display == buffer.reading -> buffer.cursorUtf16Offset()
+            else -> buffer.display.length
+        }
+        return CompositionGeometry(compositionStart, ownedDisplay.length, cursorOffset)
+    }
+
+    /** 自分が送った削除の通知は残し、別のselection移動や選択範囲はUndo対象から外す。 */
+    private fun invalidateDeletionUndoUnlessSelectionMatches(
+        start: Int,
+        end: Int,
+        candidatesStart: Int,
+        candidatesEnd: Int,
+    ) {
+        val record = deletionUndo ?: return
+        val matchesCursor = start >= 0 && start == end && start == record.cursor
+        val matchesComposition = when (val geometry = record.composition) {
+            null -> candidatesStart < 0 || candidatesEnd < candidatesStart
+            else -> candidatesStart >= 0 && geometry.matches(candidatesStart, candidatesEnd, start)
+        }
+        if (!matchesCursor || !matchesComposition) deletionUndo = null
+    }
+
+    /** 遅れて届くEditorの選択通知を、削除操作が送った選択遷移として照合する。 */
+    private fun recordExpectedExternalSelection(oldStart: Int, oldEnd: Int, cursor: Int) {
+        recordCommittedSelection(SelectionTransition(oldStart, oldEnd, cursor, cursor))
+        selectionStart = cursor
+        selectionEnd = cursor
+    }
+
+    /** compositionの後ろに削除した確定本文を、削除直後のカーソル位置へ戻す。 */
+    private fun restoreExternalText(text: String): Boolean {
+        if (text.isEmpty()) return true
+        if (!connection.commitText(text, 1)) {
+            failClosed()
+            return false
+        }
+        updateExternalSelectionAfterCommit(text)
+        return true
+    }
+
+    /** Editorへの非同期結果による表示更新後も、Undoの位置を最新の状態へ合わせる。 */
+    private fun refreshDeletionLocation() {
+        val record = deletionUndo ?: return
+        val location = captureDeletionLocation() ?: run {
+            deletionUndo = null
+            return
+        }
+        deletionUndo = record.copy(
+            before = location.before,
+            after = location.after,
+            cursor = location.cursor,
+            composition = location.composition,
+        )
     }
 
     /** Editor上の未確定の表示を消し、内部のcompositionも捨てる。書込みに失敗したら接続を閉じる。 */
     private fun clearComposition(): Boolean {
         // 消した後のカーソルはcompositionの先頭になる
         val start = compositionStart
+        val oldStart = selectionStart
+        val oldEnd = selectionEnd
+        val oldGeometry = expectedComposition
         if (!connection.setComposingText("", 1)) {
             failClosed()
             return false
         }
         discardCompositionWithoutEditorCall()
+        oldGeometry?.let(::rememberStaleComposition)
         connection.finishComposingText()
         if (start != null) {
-            selectionStart = start
-            selectionEnd = start
+            recordExpectedExternalSelection(oldStart ?: start, oldEnd ?: start, start)
         }
         return true
     }
 
     /** compositionが無いときの削除。選択範囲、またはカーソル直前の一書記素を消す。 */
-    private fun deleteOutsideComposition(): Boolean {
+    private fun deleteOutsideComposition(previous: DeletionUndo?): Boolean {
         if (selectionStart != null && selectionEnd != null && selectionStart != selectionEnd) {
+            val selected = if (policy.isSensitive) null else connection.selectedText()?.toString()
             val accepted = connection.commitText("", 1)
-            if (accepted) selectionEnd = selectionStart
+            if (accepted) {
+                updateExternalSelectionAfterCommit("")
+                if (selected.isNullOrEmpty()) {
+                    deletionUndo = null
+                } else {
+                    rememberBackspaceDeletion(
+                        previous = null,
+                        explicitComposition = null,
+                        liveUndoSteps = 0,
+                        originalCompositionStart = null,
+                        removedExternal = selected,
+                    )
+                }
+            }
             return accepted
         }
 
         val beforeCursor = connection.textBeforeCursor(64)?.toString() ?: return false
         val deleteLength = GraphemeClusters.previousUtf16Length(beforeCursor)
         if (deleteLength == 0) return false
-        return connection.deleteSurroundingText(deleteLength, 0)
+        val removed = beforeCursor.substring(beforeCursor.length - deleteLength)
+        val oldStart = selectionStart
+        val oldEnd = selectionEnd
+        if (!connection.deleteSurroundingText(deleteLength, 0)) return false
+        if (oldStart != null && oldStart == oldEnd) {
+            val cursor = (oldStart - deleteLength).coerceAtLeast(0)
+            recordExpectedExternalSelection(oldStart, oldEnd, cursor)
+        }
+        if (policy.isSensitive) {
+            deletionUndo = null
+        } else {
+            rememberBackspaceDeletion(
+                previous = previous,
+                explicitComposition = previous?.explicitComposition,
+                explicitConversion = previous?.explicitConversion,
+                liveUndoSteps = previous?.liveUndoSteps ?: 0,
+                originalCompositionStart = previous?.originalCompositionStart,
+                removedExternal = removed + previous?.removedExternal.orEmpty(),
+            )
+        }
+        return true
     }
 
     /**
@@ -381,10 +626,12 @@ class EditorSession(
         }
         if (buffer.isEmpty) return true
         val conversion = currentConversion()
+        val commitRequest = appliedConversionCommitRequest ?: conversion?.request
         if (!commitCompositionAs(buffer.display)) return false
         // 登録語を表示していた場合、エンジン側の変換とは表記が違うため、確定をエンジンへ学習させない。
-        conversion?.takeIf { result -> result.segments.none { it.fromUserDictionary } }
-            ?.let { conversionClient?.commitAll(it.request) }
+        if (conversion?.segments?.none { it.fromUserDictionary } == true && commitRequest != null) {
+            conversionClient?.commitAll(commitRequest)
+        }
         return true
     }
 
@@ -397,12 +644,13 @@ class EditorSession(
         val conversion = currentConversion() ?: return false
         if (conversion.request != choice.request) return false
         val candidate = conversion.headCandidates.firstOrNull { it.id == choice.candidateId } ?: return false
+        val commitRequest = appliedConversionCommitRequest ?: conversion.request
         // isConsistentにより、候補が確定する読みは現在の読みの接頭辞であることが保証されている。
         // 複数の文節をまとめる候補では、その候補が覆う文節すべてが確定される。
         val remainingReading = buffer.reading.substring(candidate.reading.length)
         if (!commitCompositionAs(candidate.value)) return false
         // 登録語はエンジンの候補ではないため、エンジンへ確定を通知しない。
-        if (!candidate.fromUserDictionary) conversionClient?.commitCandidate(conversion.request, candidate.id)
+        if (!candidate.fromUserDictionary) conversionClient?.commitCandidate(commitRequest, candidate.id)
         if (remainingReading.isEmpty()) return true
         if (!inputText(remainingReading)) return false
         return convert()
@@ -428,6 +676,7 @@ class EditorSession(
             return false
         }
         appliedConversion = result
+        appliedConversionCommitRequest = result.request
         return true
     }
 
@@ -567,6 +816,16 @@ class EditorSession(
             return
         }
         if (ownedDisplay.isEmpty()) {
+            if (hasComposingSpan) {
+                val staleIndex = staleCompositions.indexOfFirst {
+                    it.matches(candidatesStart, candidatesEnd, newSelectionStart)
+                }
+                if (staleIndex >= 0) {
+                    staleCompositions.removeAt(staleIndex)
+                    return
+                }
+            }
+            invalidateDeletionUndoUnlessSelectionMatches(newSelectionStart, newSelectionEnd, candidatesStart, candidatesEnd)
             compositionStart = null
             clearCompositionExpectations()
             pendingCommittedSelections.clear()
@@ -575,6 +834,7 @@ class EditorSession(
         }
 
         if (!hasComposingSpan) {
+            deletionUndo = null
             // hostがspanを終了済みなら、旧readingを次の入力で再挿入しない。
             discardCompositionWithoutEditorCall()
             updateKnownSelection(newSelectionStart, newSelectionEnd)
@@ -582,12 +842,14 @@ class EditorSession(
         }
 
         if (newSelectionStart < 0 || newSelectionEnd < 0 || newSelectionStart != newSelectionEnd) {
+            deletionUndo = null
             finishAndDiscardComposition(newSelectionStart, newSelectionEnd)
             return
         }
 
         val expected = expectedComposition
         if (expected?.matches(candidatesStart, candidatesEnd, newSelectionStart) == true) {
+            invalidateDeletionUndoUnlessSelectionMatches(newSelectionStart, newSelectionEnd, candidatesStart, candidatesEnd)
             if (acceptCompositionSelection(candidatesStart, newSelectionStart)) {
                 expectedComposition = expected.copy(start = candidatesStart)
                 staleCompositions.clear()
@@ -604,6 +866,9 @@ class EditorSession(
 
         val sameCurrentSpan = expected?.matchesSpan(candidatesStart, candidatesEnd) == true ||
             (expected == null && candidatesEnd - candidatesStart == ownedDisplay.length)
+        if (sameCurrentSpan) {
+            invalidateDeletionUndoUnlessSelectionMatches(newSelectionStart, newSelectionEnd, candidatesStart, candidatesEnd)
+        }
         if (sameCurrentSpan && acceptCompositionSelection(candidatesStart, newSelectionStart)) {
             recordExpectedComposition(
                 CompositionGeometry(
@@ -616,6 +881,7 @@ class EditorSession(
         }
 
         // host側に残るspanを確定してから内部readingを捨て、次入力の誤置換を防ぐ。
+        deletionUndo = null
         finishAndDiscardComposition(newSelectionStart, newSelectionEnd)
     }
 
@@ -626,7 +892,7 @@ class EditorSession(
     fun close() {
         if (!active) return
         active = false
-        lineDeletion = null
+        deletionUndo = null
         buffer.clear()
         liveCore?.finishField()
         markCompositionChanged()
@@ -946,6 +1212,7 @@ class EditorSession(
         revision += 1
         pendingConversion = null
         appliedConversion = null
+        appliedConversionCommitRequest = null
     }
 
     /** 表示中の変換結果が現在のrevisionと読みに一致する場合だけ返す。 */
@@ -977,9 +1244,12 @@ class EditorSession(
         val start = compositionStart ?: selectionStart
         if (text.isEmpty()) {
             compositionStart = null
+            val oldGeometry = expectedComposition
             clearCompositionExpectations()
+            oldGeometry?.let(::rememberStaleComposition)
             selectionStart = start
             selectionEnd = start
+            refreshDeletionLocation()
             return true
         }
 
@@ -993,6 +1263,7 @@ class EditorSession(
         if (start == null) {
             selectionStart = null
             selectionEnd = null
+            refreshDeletionLocation()
             return true
         }
 
@@ -1015,6 +1286,7 @@ class EditorSession(
                     ),
                 )
             }
+            refreshDeletionLocation()
         }
         return selectionAccepted
     }
@@ -1065,11 +1337,16 @@ class EditorSession(
 
     /** 現在送信したcompositionを保持し、一つ前までの通知を遅延判定へ残す。 */
     private fun recordExpectedComposition(geometry: CompositionGeometry) {
-        expectedComposition?.takeIf { it != geometry }?.let(staleCompositions::add)
+        expectedComposition?.takeIf { it != geometry }?.let(::rememberStaleComposition)
+        expectedComposition = geometry
+    }
+
+    /** compositionを消した後も、先に送った選択通知を遅延判定できるよう残す。 */
+    private fun rememberStaleComposition(geometry: CompositionGeometry) {
+        staleCompositions += geometry
         while (staleCompositions.size > MAX_STALE_COMPOSITIONS) {
             staleCompositions.removeAt(0)
         }
-        expectedComposition = geometry
     }
 
     /** 現在のcomposing span内にある書記素境界だけをcursorとして受け入れる。 */
@@ -1128,24 +1405,36 @@ class EditorSession(
         }
     }
 
-    /** 遅延した確定通知なら、それ以前の確定通知とともに消費する。 */
+    /** 遅延した確定通知なら、連続する自己遷移をまとめて消費する。 */
     private fun consumeCommittedSelection(
         oldStart: Int,
         oldEnd: Int,
         newStart: Int,
         newEnd: Int,
     ): Boolean {
-        val index = pendingCommittedSelections.indexOfFirst {
-            it.matches(oldStart, oldEnd, newStart, newEnd)
+        for (endIndex in pendingCommittedSelections.indices) {
+            val end = pendingCommittedSelections[endIndex]
+            if (!end.endsAt(newStart, newEnd)) continue
+            for (startIndex in 0..endIndex) {
+                if (!pendingCommittedSelections[startIndex].startsAt(oldStart, oldEnd)) continue
+                val isContinuous = (startIndex until endIndex).all { index ->
+                    pendingCommittedSelections[index].endsAt(
+                        pendingCommittedSelections[index + 1].oldStart,
+                        pendingCommittedSelections[index + 1].oldEnd,
+                    )
+                }
+                if (!isContinuous) continue
+                repeat(endIndex + 1) { pendingCommittedSelections.removeAt(0) }
+                return true
+            }
         }
-        if (index < 0) return false
-        repeat(index + 1) { pendingCommittedSelections.removeAt(0) }
-        return true
+        return false
     }
 
     /** 接続結果が不明な場合に状態を破棄し、同じ本文を再送できなくする。 */
     private fun failClosed() {
         active = false
+        deletionUndo = null
         buffer.clear()
         liveCore?.finishField()
         markCompositionChanged()
@@ -1163,7 +1452,7 @@ class EditorSession(
         const val EVALUATION_PREFIX_MAX_CHARS = 200
 
         /** 「元に戻す」の前に一致を確かめる、カーソルの前後の文字数。 */
-        const val LINE_DELETE_CONTEXT_CHARS = 32
+        const val DELETION_CONTEXT_CHARS = 32
 
         /**
          * 遅延通知の照合に残す過去composition数の上限。ライブ変換では一打鍵で読みの表示と変換結果の表示の
@@ -1182,13 +1471,16 @@ private data class SelectionTransition(
     val newStart: Int,
     val newEnd: Int,
 ) {
-    /** host通知がこの確定操作のselection遷移と一致するかを返す。 */
-    fun matches(oldStart: Int, oldEnd: Int, newStart: Int, newEnd: Int): Boolean {
-        if (oldStart < 0 || oldEnd < 0 || newStart < 0 || newEnd < 0) return false
-        return this.oldStart == minOf(oldStart, oldEnd) &&
-            this.oldEnd == maxOf(oldStart, oldEnd) &&
-            this.newStart == minOf(newStart, newEnd) &&
-            this.newEnd == maxOf(newStart, newEnd)
+    /** hostのselectionがこの遷移の開始範囲と一致するかを返す。 */
+    fun startsAt(start: Int, end: Int): Boolean {
+        if (oldStart < 0 || oldEnd < 0 || start < 0 || end < 0) return false
+        return oldStart == minOf(start, end) && oldEnd == maxOf(start, end)
+    }
+
+    /** hostのselectionがこの遷移の終了範囲と一致するかを返す。 */
+    fun endsAt(start: Int, end: Int): Boolean {
+        if (newStart < 0 || newEnd < 0 || start < 0 || end < 0) return false
+        return newStart == minOf(start, end) && newEnd == maxOf(start, end)
     }
 }
 
@@ -1211,15 +1503,35 @@ private data class CompositionGeometry(
     }
 }
 
-/**
- * 削除キーの左ドラッグで消した文字列と、消した直後のカーソルの前後の文字列。「元に戻す」の前の照合に使う。
- */
-private data class LineDeletion(
-    val removed: String,
+/** 一回分のBackspace連続削除、または行頭削除を戻す記録。本文は機密欄では保持しない。 */
+private data class DeletionUndo(
+    val kind: DeletionUndoKind,
+    val removedExternal: String = "",
+    val lineText: String = "",
+    val explicitComposition: CompositionSnapshot? = null,
+    val explicitConversion: ConversionResult? = null,
+    val explicitConversionCommitRequest: ConversionRequest? = null,
+    val liveUndoSteps: Int = 0,
+    val originalCompositionStart: Int? = null,
+    val cursor: Int,
     val before: String,
     val after: String,
-    // 入力中の読みを消した場合はtrue。戻すときは読みを入力し直す。
-    val fromComposition: Boolean,
+    val composition: CompositionGeometry?,
+    // 行頭までの削除で未確定読みを消した場合は、戻すときに読みを再入力する。
+    val fromComposition: Boolean = false,
+)
+
+private enum class DeletionUndoKind {
+    BACKSPACE,
+    LINE_START,
+}
+
+/** Undoできる削除直後の本文・selection位置を表す。 */
+private data class DeletionLocation(
+    val before: String,
+    val after: String,
+    val cursor: Int,
+    val composition: CompositionGeometry?,
 )
 
 /**

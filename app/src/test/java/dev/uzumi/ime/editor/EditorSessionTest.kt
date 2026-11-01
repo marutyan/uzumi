@@ -899,15 +899,15 @@ class EditorSessionTest {
 
         assertTrue(session.deleteToLineStart())
         assertEquals("明日は駅前\n", connection.text)
-        assertTrue(session.canUndoLineDelete)
-        assertTrue(session.undoLineDelete())
+        assertTrue(session.canUndoDeletion)
+        assertTrue(session.undoDeletion())
         assertEquals(text, connection.text)
-        assertFalse(session.canUndoLineDelete)
+        assertFalse(session.canUndoDeletion)
 
         // 消した後に別の文字を入れた場合は、周りの文字列が一致しないため戻さない
         assertTrue(session.deleteToLineStart())
         connection.commitText("雨", 1)
-        assertFalse(session.undoLineDelete())
+        assertFalse(session.undoDeletion())
         assertEquals("明日は駅前\n雨", connection.text)
     }
 
@@ -920,7 +920,7 @@ class EditorSessionTest {
 
         assertFalse(session.deleteToLineStart())
         assertEquals("", connection.text)
-        assertFalse(session.canUndoLineDelete)
+        assertFalse(session.canUndoDeletion)
     }
 
     /** 機密欄では消した文字列を覚えず、元に戻す入口を出さない。 */
@@ -932,8 +932,8 @@ class EditorSessionTest {
 
         assertTrue(session.deleteToLineStart())
         assertEquals("", connection.text)
-        assertFalse(session.canUndoLineDelete)
-        assertFalse(session.undoLineDelete())
+        assertFalse(session.canUndoDeletion)
+        assertFalse(session.undoDeletion())
     }
 
     /** 設定で学習を止めても欄は機密ではないため、変換は学習禁止で送り、削除の「元に戻す」は使える。 */
@@ -945,7 +945,7 @@ class EditorSessionTest {
         val connection = ModelEditorConnection(text = "明日", selectionStart = 2, selectionEnd = 2)
         val session = EditorSession(connection, policy, initialSelectionStart = 2, initialSelectionEnd = 2)
         assertTrue(session.deleteToLineStart())
-        assertTrue(session.canUndoLineDelete)
+        assertTrue(session.canUndoDeletion)
 
         val client = FakeLiveClient()
         val live = liveSession(ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0), client, policy)
@@ -965,7 +965,7 @@ class EditorSessionTest {
         assertTrue(session.deleteToLineStart())
         assertEquals("明日\n", connection.text)
         assertFalse(session.hasComposition)
-        assertTrue(session.undoLineDelete())
+        assertTrue(session.undoDeletion())
         assertEquals("明日\nかさ", connection.text)
         assertTrue(session.hasComposition)
     }
@@ -982,7 +982,284 @@ class EditorSessionTest {
         assertTrue(session.deleteToLineStart())
         assertEquals("", connection.text)
         assertFalse(session.hasComposition)
-        assertTrue(session.canUndoLineDelete)
+        assertTrue(session.canUndoDeletion)
+    }
+
+    /** 連続Backspaceは改行・絵文字を含めて一度に戻り、空欄での追加削除も記録を消さない。 */
+    @Test
+    fun consecutiveBackspacesRestoreGraphemesAndKeepUndoAfterEmptyDelete() {
+        val original = "a👩‍💻\n"
+        val connection = ModelEditorConnection(text = original, selectionStart = original.length, selectionEnd = original.length)
+        val session = EditorSession(connection, normalPolicy(), original.length, original.length)
+
+        assertTrue(session.deleteBackward())
+        assertTrue(session.deleteBackward())
+        assertTrue(session.deleteBackward())
+        assertEquals("", connection.text)
+        assertTrue(session.canUndoDeletion)
+        assertFalse(session.deleteBackward())
+        assertTrue(session.canUndoDeletion)
+
+        assertTrue(session.undoDeletion())
+        assertEquals(original, connection.text)
+    }
+
+    /** 連続Backspaceの遅延selection通知がまとめられても、Undo位置を最新のカーソルに保つ。 */
+    @Test
+    fun coalescedBackspaceSelectionNotificationKeepsUndoAtLatestCursor() {
+        val connection = ModelEditorConnection(text = "abcd", selectionStart = 4, selectionEnd = 4)
+        val session = EditorSession(connection, normalPolicy(), 4, 4)
+        repeat(3) { assertTrue(session.deleteBackward()) }
+        assertEquals("a", connection.text)
+
+        // 先の2回分だけをまとめた通知が、3回目の削除より後に届く。
+        session.updateSelection(4, 4, 2, 2, -1, -1)
+
+        assertTrue(session.canUndoDeletion)
+        assertTrue(session.undoDeletion())
+        assertEquals("abcd", connection.text)
+    }
+
+    /** 遅延通知の移動先が自己遷移の連続経路に無ければ、Undoを無効化する。 */
+    @Test
+    fun unrelatedSelectionNotificationDoesNotMatchBackspaceGroup() {
+        val connection = ModelEditorConnection(text = "abcd", selectionStart = 4, selectionEnd = 4)
+        val session = EditorSession(connection, normalPolicy(), 4, 4)
+        repeat(3) { assertTrue(session.deleteBackward()) }
+
+        session.updateSelection(4, 4, 0, 0, -1, -1)
+
+        assertFalse(session.canUndoDeletion)
+        assertFalse(session.undoDeletion())
+        assertEquals("a", connection.text)
+    }
+
+    /** 全選択を逆向きにBackspaceしても、絵文字と改行を含む選択文字列を戻す。 */
+    @Test
+    fun backspaceRestoresReverseSelectedText() {
+        val prefix = "前"
+        val selected = "今日は👩‍💻\n晴れ"
+        val suffix = "後"
+        val original = prefix + selected + suffix
+        val start = prefix.length
+        val end = start + selected.length
+        val connection = ModelEditorConnection(text = original, selectionStart = end, selectionEnd = start)
+        val session = EditorSession(connection, normalPolicy(), end, start)
+
+        assertTrue(session.deleteBackward())
+        assertEquals(prefix + suffix, connection.text)
+        assertTrue(session.canUndoDeletion)
+        assertTrue(session.undoDeletion())
+        assertEquals(original, connection.text)
+    }
+
+    /** 選択文字列を読めないEditorでも削除は実行し、復元だけを無効にする。 */
+    @Test
+    fun selectedTextUnavailableKeepsBackspaceButDisablesUndo() {
+        val connection = ModelEditorConnection(text = "文章", selectionStart = 0, selectionEnd = 2).apply {
+            selectedTextSupported = false
+        }
+        val session = EditorSession(connection, normalPolicy(), 0, 2)
+
+        assertTrue(session.deleteBackward())
+        assertEquals("", connection.text)
+        assertFalse(session.canUndoDeletion)
+    }
+
+    /** 明示変換した表示を連続削除しても、Undoで読み・表記・候補を削除前へ戻す。 */
+    @Test
+    fun consecutiveBackspacesRestoreExplicitConvertedComposition() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        assertTrue(session.inputText("かんじ"))
+        assertTrue(session.convert())
+        assertTrue(session.applyConversionOutcome(converted(client.requests.single(), "漢字", "感じ")))
+
+        repeat(3) { assertTrue(session.deleteBackward()) }
+        assertEquals("", connection.text)
+        assertTrue(session.undoDeletion())
+
+        assertEquals("漢字", connection.text)
+        assertEquals("かんじ", session.compositionSnapshot().reading)
+        assertEquals(listOf("漢字", "感じ"), session.candidateOptions().map(CandidateOption::value))
+    }
+
+    /** 変換候補をUndo後に確定しても、エンジンには最後に変換した要求を渡す。 */
+    @Test
+    fun restoredExplicitConversionCommitsCandidateWithOriginalRequest() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        assertTrue(session.inputText("かんじ"))
+        assertTrue(session.convert())
+        val engineRequest = client.requests.single()
+        assertTrue(session.applyConversionOutcome(converted(engineRequest, "漢字", "感じ")))
+
+        repeat(3) { assertTrue(session.deleteBackward()) }
+        assertTrue(session.undoDeletion())
+        repeat(3) { assertTrue(session.deleteBackward()) }
+        assertTrue(session.undoDeletion())
+        val choice = session.candidateOptions().last().conversionChoice!!
+        assertTrue(choice.request.revision != engineRequest.revision)
+
+        assertTrue(session.selectConversionCandidate(choice))
+
+        assertEquals("感じ", connection.text)
+        assertEquals(listOf(engineRequest to choice.candidateId), client.committedCandidates)
+    }
+
+    /** 変換結果をUndo後にそのまま確定しても、エンジンへ元の変換要求で通知する。 */
+    @Test
+    fun restoredExplicitConversionCommitsAllWithOriginalRequest() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        assertTrue(session.inputText("かんじ"))
+        assertTrue(session.convert())
+        val engineRequest = client.requests.single()
+        assertTrue(session.applyConversionOutcome(converted(engineRequest, "漢字")))
+
+        repeat(3) { assertTrue(session.deleteBackward()) }
+        assertTrue(session.undoDeletion())
+        repeat(3) { assertTrue(session.deleteBackward()) }
+        assertTrue(session.undoDeletion())
+
+        assertTrue(session.commitComposition())
+
+        assertEquals("漢字", connection.text)
+        assertEquals(listOf(engineRequest), client.committedAll)
+    }
+
+    /** ライブ変換のBackspace undoはLiveCoreの履歴をまとめて戻し、変換済み表記を保つ。 */
+    @Test
+    fun consecutiveBackspacesRestoreLiveConvertedComposition() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        typeLive(session, client, "きょうは")
+        assertEquals("今日は", connection.text)
+
+        repeat(4) { assertTrue(session.deleteBackward()) }
+        assertEquals("", connection.text)
+        assertTrue(session.undoDeletion())
+
+        assertEquals("今日は", connection.text)
+        assertTrue(session.hasComposition)
+    }
+
+    /** ライブ変換を消し切った後、確定済み文字も消した連続Backspaceを元の表記へ一度で戻す。 */
+    @Test
+    fun backspaceUndoRestoresLiveCompositionAndCommittedTextAsOneGroup() {
+        val committed = "old"
+        val connection = ModelEditorConnection(text = committed, selectionStart = committed.length, selectionEnd = committed.length)
+        val client = FakeLiveClient()
+        val session = EditorSession(
+            connection = connection,
+            policy = normalPolicy(),
+            initialSelectionStart = committed.length,
+            initialSelectionEnd = committed.length,
+            sessionEpoch = 5,
+            liveCore = LiveConversionCore(),
+            liveClient = client,
+        )
+        typeLive(session, client, "きょうは")
+        assertEquals("old今日は", connection.text)
+
+        repeat(4) { assertTrue(session.deleteBackward()) }
+        assertEquals(committed, connection.text)
+        assertFalse(session.hasComposition)
+        assertTrue(session.deleteBackward())
+        assertEquals("ol", connection.text)
+        assertTrue(session.canUndoDeletion)
+
+        assertTrue(session.undoDeletion())
+
+        assertEquals("old今日は", connection.text)
+        assertTrue(session.hasComposition)
+    }
+
+    /** Backspaceでcompositionを消し切ってから確定文字も消した後、一度のUndoで両方戻す。 */
+    @Test
+    fun backspaceUndoRestoresCompositionAndCommittedTextAsOneGroup() {
+        val committed = "old"
+        val connection = ModelEditorConnection(text = committed, selectionStart = committed.length, selectionEnd = committed.length)
+        val session = EditorSession(connection, normalPolicy(), committed.length, committed.length)
+        assertTrue(session.inputText("かな"))
+
+        repeat(2) { assertTrue(session.deleteBackward()) }
+        assertEquals(committed, connection.text)
+        repeat(3) { assertTrue(session.deleteBackward()) }
+        assertEquals("", connection.text)
+        assertFalse(session.deleteBackward())
+        assertTrue(session.canUndoDeletion)
+
+        assertTrue(session.undoDeletion())
+        assertEquals("oldかな", connection.text)
+        assertEquals("かな", session.compositionSnapshot().reading)
+    }
+
+    /** カーソル移動、外部編集、欄切替の後は古い削除を元の位置へ戻さない。 */
+    @Test
+    fun deletionUndoIsRejectedAfterSelectionChangeExternalEditOrClose() {
+        val movedConnection = ModelEditorConnection(text = "abc", selectionStart = 3, selectionEnd = 3)
+        val moved = EditorSession(movedConnection, normalPolicy(), 3, 3)
+        assertTrue(moved.deleteBackward())
+        movedConnection.hostSetSelection(0, 0)
+        moved.updateSelection(2, 2, 0, 0, -1, -1)
+        assertFalse(moved.canUndoDeletion)
+        assertFalse(moved.undoDeletion())
+        assertEquals("ab", movedConnection.text)
+
+        val editedConnection = ModelEditorConnection(text = "abc", selectionStart = 3, selectionEnd = 3)
+        val edited = EditorSession(editedConnection, normalPolicy(), 3, 3)
+        assertTrue(edited.deleteBackward())
+        editedConnection.commitText("X", 1)
+        assertFalse(edited.undoDeletion())
+        assertEquals("abX", editedConnection.text)
+
+        val closedConnection = ModelEditorConnection(text = "abc", selectionStart = 3, selectionEnd = 3)
+        val closed = EditorSession(closedConnection, normalPolicy(), 3, 3)
+        assertTrue(closed.deleteBackward())
+        closed.close()
+        assertFalse(closed.canUndoDeletion)
+        assertFalse(closed.undoDeletion())
+        assertEquals("ab", closedConnection.text)
+    }
+
+    /** パスワード欄と個人化禁止欄では、Backspace本文をUndo用に保持しない。 */
+    @Test
+    fun backspaceDoesNotRecordSensitiveOrNoPersonalizedLearningText() {
+        val policies = listOf(
+            normalPolicy().copy(isPassword = true),
+            normalPolicy().copy(noPersonalizedLearning = true),
+        )
+        policies.forEach { policy ->
+            val connection = ModelEditorConnection(text = "secret", selectionStart = 6, selectionEnd = 6)
+            val session = EditorSession(connection, policy, 6, 6)
+            assertTrue(session.deleteBackward())
+            assertEquals("secre", connection.text)
+            assertFalse(session.canUndoDeletion)
+        }
+    }
+
+    /** 確定本文の復元後にcomposition書込みが失敗したら、接続を閉じて再送を防ぐ。 */
+    @Test
+    fun partialBackspaceUndoFailureClosesConnectionWithoutDuplicateRestore() {
+        val connection = ModelEditorConnection(text = "old", selectionStart = 3, selectionEnd = 3)
+        val session = EditorSession(connection, normalPolicy(), 3, 3)
+        assertTrue(session.inputText("かな"))
+        repeat(2) { assertTrue(session.deleteBackward()) }
+        assertTrue(session.deleteBackward())
+        assertEquals("ol", connection.text)
+        connection.composingAccepted = false
+
+        assertFalse(session.undoDeletion())
+        assertEquals("old", connection.text)
+        assertFalse(session.isActive)
+        assertFalse(session.undoDeletion())
+        assertFalse(session.inputText("か"))
+        assertEquals("old", connection.text)
     }
 
     /**
@@ -1216,6 +1493,7 @@ private class FakeEditorConnection : EditorConnectionPort {
     val deleteCalls = mutableListOf<Pair<Int, Int>>()
     val selectionCalls = mutableListOf<Pair<Int, Int>>()
     val editorActions = mutableListOf<Int>()
+    var selectedTextValue: CharSequence? = null
 
     override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
         composingTexts += text.toString()
@@ -1255,6 +1533,8 @@ private class FakeEditorConnection : EditorConnectionPort {
 
     override fun textAfterCursor(maxChars: Int): CharSequence? = if (invalidated) null else afterCursor
 
+    override fun selectedText(): CharSequence? = if (invalidated) null else selectedTextValue
+
     override fun invalidate() {
         invalidated = true
     }
@@ -1275,6 +1555,10 @@ private class ModelEditorConnection(
     private var composingStart: Int? = null
     private var composingEnd: Int? = null
     private var active = true
+    var selectedTextSupported = true
+    var composingAccepted = true
+    var commitAccepted = true
+    var finishAccepted = true
 
     /** host側だけでcomposing spanを終了する。 */
     fun hostFinishComposition() {
@@ -1289,7 +1573,7 @@ private class ModelEditorConnection(
     }
 
     override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
-        if (!active) return false
+        if (!active || !composingAccepted) return false
         val start = composingStart ?: minOf(selectionStart, selectionEnd)
         val end = composingEnd ?: maxOf(selectionStart, selectionEnd)
         replace(start, end, text.toString())
@@ -1300,14 +1584,14 @@ private class ModelEditorConnection(
     }
 
     override fun finishComposingText(): Boolean {
-        if (!active) return false
+        if (!active || !finishAccepted) return false
         finishComposingCalls += 1
         hostFinishComposition()
         return true
     }
 
     override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
-        if (!active) return false
+        if (!active || !commitAccepted) return false
         val start = composingStart ?: minOf(selectionStart, selectionEnd)
         val end = composingEnd ?: maxOf(selectionStart, selectionEnd)
         replace(start, end, text.toString())
@@ -1349,6 +1633,11 @@ private class ModelEditorConnection(
         if (!active) return null
         val start = maxOf(selectionStart, selectionEnd)
         return text.substring(start, (start + maxChars).coerceAtMost(text.length))
+    }
+
+    override fun selectedText(): CharSequence? {
+        if (!active || !selectedTextSupported) return null
+        return text.substring(minOf(selectionStart, selectionEnd), maxOf(selectionStart, selectionEnd))
     }
 
     override fun invalidate() {
