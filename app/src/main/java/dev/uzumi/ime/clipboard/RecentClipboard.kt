@@ -40,6 +40,10 @@ class RecentClipboard(
     @Volatile
     private var observing = false
 
+    // ✕または貼り付けで閉じたclip。本文は持たず、同じclipの提案を再表示しないために使う。IMEを閉じても保持する。
+    @Volatile
+    private var dismissedIdentity: ClipboardIdentity? = null
+
     private val clipChangedListener = ClipboardManager.OnPrimaryClipChangedListener {
         changeVersion.incrementAndGet()
         if (observing) onClipboardChanged()
@@ -67,6 +71,8 @@ class RecentClipboard(
         val metadata = snapshot(readDescription() ?: return null) ?: return null
         if (!RecentClipboardRules.isFresh(metadata.timestamp, clockMillis(), lifetimeMillis)) return null
         if (!RecentClipboardRules.hasPlainTextMimeType(metadata.mimeTypes)) return null
+
+        if (dismissedIdentity?.let { matches(metadata, it) } == true) return null
 
         val previewSuppressed = metadata.clipboardSensitive || sensitiveField
         val preview = if (RecentClipboardRules.shouldReadTextBody(metadata.clipboardSensitive, sensitiveField)) {
@@ -115,6 +121,11 @@ class RecentClipboard(
         val version = changeVersion.get()
         val metadata = snapshot(readDescription() ?: return null) ?: return null
         return readCurrentText(version, metadata, requireFresh = false)
+    }
+
+    /** 提案を閉じ、同じclipでは自動提案を出さない。明示的な貼り付けは引き続きできる。 */
+    fun dismiss(suggestion: Suggestion) {
+        dismissedIdentity = suggestion.identity
     }
 
     /** IME非表示時に監視を止め、表示中に作った候補を無効にする。 */

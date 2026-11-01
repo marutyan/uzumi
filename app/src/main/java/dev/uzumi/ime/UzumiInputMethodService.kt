@@ -654,11 +654,8 @@ class UzumiInputMethodService : InputMethodService() {
 
     /** キーボード非表示時に監視・期限処理・本文を参照できる候補を破棄する。 */
     private fun stopClipboardObservation() {
-        clipboardExpiry?.let(mainHandler::removeCallbacks)
-        clipboardExpiry = null
         recentClipboard?.close()
-        clipboardSuggestion = null
-        clipboardSuggestionSessionEpoch = null
+        clearClipboardSuggestion()
     }
 
     /** 設定値を変えず、キーボード最小高を残した画面内のバー段数上限を返す。 */
@@ -714,9 +711,7 @@ class UzumiInputMethodService : InputMethodService() {
         val grid = candidateGrid
         val preferences = UzumiSettings.toolbarPreferences(this)
         val visibleActions = availableToolbarActions(current)
-        val requestedToolbarRows = preferences.copy(
-            selectedActions = selectedToolbarActions(preferences, visibleActions),
-        ).toolbarActionRows(visibleActions).size
+        val requestedToolbarRows = preferences.toolbarActionRows(visibleActions).size
         val availableCandidateWidthDp = (resources.configuration.screenWidthDp - CANDIDATE_FIXED_WIDTH_DP)
             .coerceAtLeast(MIN_CANDIDATE_SLOT_DP)
         val maxItemsPerRow = availableCandidateWidthDp / MIN_CANDIDATE_SLOT_DP
@@ -806,10 +801,8 @@ class UzumiInputMethodService : InputMethodService() {
         val views = toolbarViews ?: return
         val preferences = UzumiSettings.toolbarPreferences(this)
         val visibleActions = availableToolbarActions(session)
-        val rows = if (maxRows <= 0) emptyList() else preferences.copy(
-            selectedActions = selectedToolbarActions(preferences, visibleActions),
-            toolbarRows = maxRows,
-        ).toolbarActionRows(visibleActions)
+        val rows = if (maxRows <= 0) emptyList() else preferences.copy(toolbarRows = maxRows)
+            .toolbarActionRows(visibleActions)
         views.addToolbarRows(parent, rows, ::toolbarActionLabel, ::handleToolbarAction)
         val height = (ToolbarBarViews.BAR_ROW_HEIGHT_DP * resources.displayMetrics.density * rows.size).toInt()
         parent.layoutParams = parent.layoutParams?.apply { this.height = height }
@@ -817,18 +810,6 @@ class UzumiInputMethodService : InputMethodService() {
         parent.requestLayout()
     }
 
-    /** コピー直後の自動提案がある間だけ貼り付けを先頭へ一時表示し、選択済み機能の順序は保つ。 */
-    private fun selectedToolbarActions(
-        preferences: ToolbarPreferences,
-        visibleActions: List<ToolbarAction>,
-    ): List<ToolbarAction> = if (ToolbarAction.PASTE in visibleActions &&
-        ToolbarAction.PASTE !in preferences.selectedActions &&
-        hasCurrentClipboardSuggestion(session)
-    ) {
-        listOf(ToolbarAction.PASTE) + preferences.selectedActions
-    } else {
-        preferences.selectedActions
-    }
 
     /** 画面高に収まらない場合、候補を最低1段残して両バーの実段数を縮める。 */
     private fun fitBarRows(toolbarRows: Int, candidateRows: Int): Pair<Int, Int> {
@@ -909,6 +890,21 @@ class UzumiInputMethodService : InputMethodService() {
         ToolbarAction.CLOSE_KEYBOARD -> getString(R.string.close_keyboard)
     }
 
+    /** ✕で閉じた提案は同じclipでは再表示せず、通常の候補バーへ戻す。 */
+    private fun dismissClipboardSuggestion() {
+        clipboardSuggestion?.let { recentClipboard?.dismiss(it) }
+        clearClipboardSuggestion()
+        refreshCandidates()
+    }
+
+    /** 表示中の提案と期限タイマーを捨てる。 */
+    private fun clearClipboardSuggestion() {
+        clipboardExpiry?.let(mainHandler::removeCallbacks)
+        clipboardExpiry = null
+        clipboardSuggestion = null
+        clipboardSuggestionSessionEpoch = null
+    }
+
     /** 自動提案が現在の編集セッションに対して有効かを返す。 */
     private fun hasCurrentClipboardSuggestion(current: EditorSession?): Boolean =
         current != null && clipboardSuggestion != null && clipboardSuggestionSessionEpoch == current.sessionEpoch
@@ -929,6 +925,8 @@ class UzumiInputMethodService : InputMethodService() {
         }
         if (!inputViewVisible || session !== current || !current.isActive) return
         current.pasteText(text)
+        suggestion?.let { observer.dismiss(it) }
+        clearClipboardSuggestion()
         scheduleConversionTimeout(current)
         refreshCandidates()
     }
@@ -1015,18 +1013,37 @@ class UzumiInputMethodService : InputMethodService() {
             hasRegularCandidates = false,
             inlineCount = inlineSuggestions.size,
         )
-        if (showInline) {
-            addInlineSuggestions(row)
-        } else {
-            row.addView(views.hint(hintText(current?.policy, current?.isLiveMode == true)))
+        val line = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
+        // コピー直後は先頭に本文の冒頭を見せた貼り付けボタンと、提案を閉じて通常のバーへ戻す✕を置く。
+        val suggestion = clipboardSuggestion?.takeIf { hasCurrentClipboardSuggestion(current) }
+        if (suggestion != null) {
+            line.addView(views.chip(getString(R.string.clipboard_suggestion_label, suggestion.label),
+                getString(R.string.clipboard_suggestion_description), true) {
+                evaluation.record(OperationKind.OTHER)
+                pasteFromClipboard()
+            })
+            line.addView(views.symbolButton("✕", getString(R.string.clipboard_suggestion_dismiss)) {
+                dismissClipboardSuggestion()
+            })
+        }
+        when {
+            showInline -> addInlineSuggestions(line)
+            suggestion == null -> line.addView(views.hint(hintText(current?.policy, current?.isLiveMode == true)))
+        }
+        row.addView(line, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            (CandidateBarViews.BAR_HEIGHT_DP * resources.displayMetrics.density).toInt(),
+        ))
         trailing.addView(views.symbolButton("⌄", getString(R.string.close_keyboard)) {
             evaluation.record(OperationKind.OTHER)
             requestHideSelf(0)
         })
     }
 
-    /** Inline候補を候補バーの中央へ横に並べる。pinnedの候補は横スクロールの外の右端に固定する。 */
+    /** Inline候補を待機中のバーへ横に並べる。pinnedの候補は横スクロールの外の右端に固定する。 */
     private fun addInlineSuggestions(row: LinearLayout) {
         val density = resources.displayMetrics.density
         val wrap = LinearLayout.LayoutParams.WRAP_CONTENT
@@ -1055,7 +1072,7 @@ class UzumiInputMethodService : InputMethodService() {
             }, LinearLayout.LayoutParams(0, match, 1f))
             pinned.forEach { addView(it.view, inlineParams()) }
         }
-        row.addView(line, LinearLayout.LayoutParams(match, (CandidateBarViews.BAR_HEIGHT_DP * density).toInt()))
+        row.addView(line, LinearLayout.LayoutParams(0, match, 1f))
     }
 
     /** 設定画面を開く。IMEから開くため新しいtaskで起動する。 */
