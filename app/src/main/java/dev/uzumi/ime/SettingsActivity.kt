@@ -6,9 +6,16 @@ import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
 import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
+import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.SeekBar
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
@@ -18,6 +25,8 @@ import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.learning.LearningStores
 import dev.uzumi.ime.neural.NeuralRuntimeConnection
 import dev.uzumi.ime.neural.NeuralSelection
+import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * Uzumiの設定画面。入力・表示・操作の反応・学習と辞書に分けて並べ、値はUzumiSettingsだけに保存する。
@@ -44,7 +53,7 @@ class SettingsActivity : Activity() {
 
         content.addView(section(R.string.settings_section_display))
         content.addView(label(R.string.settings_height, R.string.settings_height_description))
-        content.addView(heightChoices())
+        content.addView(heightControl())
         content.addView(switchRow(R.string.settings_key_preview, R.string.settings_key_preview_description,
             UzumiSettings.keyboardPreferences(this).keyPreview) { UzumiSettings.setKeyPreview(this, it) })
 
@@ -167,25 +176,100 @@ class SettingsActivity : Activity() {
         (0 until row.childCount).map(row::getChildAt).filterIsInstance<Switch>().firstOrNull()
     }
 
-    /** キーボードの高さの「低・中・高」。選ぶとすぐ保存する。 */
-    private fun heightChoices(): RadioGroup {
-        val labels = mapOf(
-            KeyboardPreferences.Height.LOW to R.string.settings_height_low,
-            KeyboardPreferences.Height.MEDIUM to R.string.settings_height_medium,
-            KeyboardPreferences.Height.HIGH to R.string.settings_height_high,
-        )
-        val current = UzumiSettings.keyboardHeight(this)
-        return RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            labels.forEach { (height, labelId) ->
-                addView(RadioButton(this@SettingsActivity).apply {
-                    id = View.generateViewId()
-                    text = getString(labelId)
-                    minimumHeight = px(48)
-                    isChecked = height == current
-                    setOnCheckedChangeListener { _, checked -> if (checked) UzumiSettings.setKeyboardHeight(this@SettingsActivity, height) }
-                })
+    /** キー1段の高さをスライダーとdp入力のどちらからも変更できるようにする。 */
+    private fun heightControl(): LinearLayout {
+        val minimum = KeyboardPreferences.MIN_ROW_HEIGHT_DP
+        val maximum = KeyboardPreferences.MAX_ROW_HEIGHT_DP
+        var selectedHeight = UzumiSettings.keyboardHeightDp(this)
+        var updatingInput = false
+
+        val valueLabel = TextView(this).apply { textSize = 14f }
+        val heightInput = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            setSingleLine(true)
+            setSelectAllOnFocus(true)
+            gravity = android.view.Gravity.CENTER
+            contentDescription = getString(R.string.settings_height_input_description)
+        }
+        val seekBar = SeekBar(this).apply {
+            max = maximum - minimum
+            contentDescription = getString(R.string.settings_height)
+        }
+
+        fun showHeight(value: Int, updateInput: Boolean, save: Boolean) {
+            selectedHeight = KeyboardPreferences.normalizeRowHeightDp(value)
+            valueLabel.text = getString(R.string.settings_height_value, selectedHeight)
+            val progress = selectedHeight - minimum
+            if (seekBar.progress != progress) seekBar.progress = progress
+            if (updateInput && heightInput.text.toString() != selectedHeight.toString()) {
+                updatingInput = true
+                // 数値入力と保存値の読み取りを一致させるため、入力欄はASCIIの数字にそろえる。
+                heightInput.setText(String.format(Locale.ROOT, "%d", selectedHeight))
+                heightInput.setSelection(heightInput.text.length)
+                updatingInput = false
             }
+            if (save) UzumiSettings.setKeyboardHeightDp(this, selectedHeight)
+        }
+
+        seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) showHeight(minimum + progress, updateInput = true, save = true)
+            }
+
+            override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(bar: SeekBar?) = Unit
+        })
+
+        heightInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) = Unit
+
+            override fun afterTextChanged(text: Editable?) {
+                if (updatingInput) return
+                val value = text?.toString()?.toIntOrNull() ?: return
+                if (value in minimum..maximum) showHeight(value, updateInput = false, save = true)
+            }
+        })
+        heightInput.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                val value = heightInput.text.toString().toIntOrNull() ?: selectedHeight
+                showHeight(value, updateInput = true, save = true)
+            }
+        }
+        heightInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                heightInput.clearFocus()
+                true
+            } else {
+                false
+            }
+        }
+
+        val inputRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            addView(heightInput, LinearLayout.LayoutParams(px(88), px(48)))
+            addView(TextView(this@SettingsActivity).apply {
+                text = getString(R.string.settings_height_unit)
+                setPadding(px(8), 0, 0, 0)
+            })
+        }
+        val reset = Button(this).apply {
+            text = getString(R.string.settings_height_reset)
+            setOnClickListener {
+                heightInput.clearFocus()
+                showHeight(KeyboardPreferences().rowHeightDp.roundToInt(), updateInput = true, save = true)
+            }
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, px(4), 0, px(8))
+            addView(valueLabel)
+            addView(seekBar)
+            addView(inputRow)
+            addView(reset)
+            showHeight(selectedHeight, updateInput = true, save = false)
         }
     }
 

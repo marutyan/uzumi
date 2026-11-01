@@ -293,6 +293,13 @@ class KeyboardLayoutDataTest {
             assertTrue(Math.abs(prefs.rowHeightDp * 4 - prefs.qwertyRowHeightDp * 5) < 2f)
             assertTrue("タップ領域が48dp未満: $height", prefs.rowHeightDp >= 48f)
         }
+        assertEquals(52, KeyboardPreferences.normalizeRowHeightDp(1))
+        assertEquals(66, KeyboardPreferences.normalizeRowHeightDp(66))
+        assertEquals(96, KeyboardPreferences.normalizeRowHeightDp(120))
+        listOf(52, 66, 84, 96).forEach { heightDp ->
+            val prefs = KeyboardPreferences(rowHeightDp = heightDp.toFloat())
+            assertTrue(Math.abs(prefs.rowHeightDp * 4 - prefs.qwertyRowHeightDp * 5) < 2f)
+        }
     }
 
     @Test

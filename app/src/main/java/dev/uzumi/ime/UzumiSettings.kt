@@ -3,6 +3,7 @@ package dev.uzumi.ime
 import android.content.Context
 import android.content.SharedPreferences
 import dev.uzumi.ime.keyboard.KeyboardPreferences
+import kotlin.math.roundToInt
 
 /**
  * 利用者が設定画面で切り替える値をSharedPreferencesへ保存する。設定画面が書き、IMEは入力開始ごとに読む。
@@ -18,8 +19,9 @@ object UzumiSettings {
     /** ライブ変換の既定値。確定操作を省ける入力から始められるようONにする。 */
     const val DEFAULT_LIVE_CONVERSION = true
 
-    // キーボードの高さ（KeyboardPreferences.Heightの名前）、拡大表示、振動、キー音、削除ドラッグを保存するキー。
+    // キーボードの高さ（dp）、拡大表示、振動、キー音、削除ドラッグを保存するキー。
     private const val KEY_HEIGHT = "keyboard_height"
+    private const val KEY_ROW_HEIGHT_DP = "keyboard_row_height_dp"
     private const val KEY_PREVIEW = "key_preview"
     private const val KEY_VIBRATION = "vibration"
     private const val KEY_SOUND = "key_sound"
@@ -30,7 +32,7 @@ object UzumiSettings {
         val prefs = preferences(context)
         val defaults = KeyboardPreferences()
         return KeyboardPreferences(
-            rowHeightDp = keyboardHeight(context).rowHeightDp,
+            rowHeightDp = keyboardHeightDp(context).toFloat(),
             keyPreview = prefs.getBoolean(KEY_PREVIEW, defaults.keyPreview),
             vibration = prefs.getBoolean(KEY_VIBRATION, defaults.vibration),
             keySound = prefs.getBoolean(KEY_SOUND, defaults.keySound),
@@ -38,15 +40,24 @@ object UzumiSettings {
         )
     }
 
-    /** キーボードの高さの段階。保存値が読めなければ既定の「高」にする。 */
-    fun keyboardHeight(context: Context): KeyboardPreferences.Height {
-        val name = preferences(context).getString(KEY_HEIGHT, null)
-        return KeyboardPreferences.Height.entries.firstOrNull { it.name == name } ?: KeyboardPreferences.Height.HIGH
+    /** 保存済みのdp値を読み、初回だけ従来の「低・中・高」を同じ高さへ引き継ぐ。 */
+    fun keyboardHeightDp(context: Context): Int {
+        val prefs = preferences(context)
+        if (prefs.contains(KEY_ROW_HEIGHT_DP)) {
+            val defaultHeight = KeyboardPreferences().rowHeightDp.roundToInt()
+            return KeyboardPreferences.normalizeRowHeightDp(prefs.getInt(KEY_ROW_HEIGHT_DP, defaultHeight))
+        }
+        val legacyName = prefs.getString(KEY_HEIGHT, null)
+        val legacyHeight = KeyboardPreferences.Height.entries.firstOrNull { it.name == legacyName }
+            ?: KeyboardPreferences.Height.HIGH
+        return legacyHeight.rowHeightDp.roundToInt()
     }
 
-    /** キーボードの高さの段階を保存する。 */
-    fun setKeyboardHeight(context: Context, height: KeyboardPreferences.Height) {
-        preferences(context).edit().putString(KEY_HEIGHT, height.name).apply()
+    /** キーボードの1行の高さをdpで保存する。 */
+    fun setKeyboardHeightDp(context: Context, heightDp: Int) {
+        preferences(context).edit()
+            .putInt(KEY_ROW_HEIGHT_DP, KeyboardPreferences.normalizeRowHeightDp(heightDp))
+            .apply()
     }
 
     /** 拡大表示を保存する。 */

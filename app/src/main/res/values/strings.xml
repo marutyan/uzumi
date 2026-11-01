@@ -78,10 +78,11 @@
     <string name="settings_delete_drag">削除キーの左ドラッグ</string>
     <string name="settings_delete_drag_description">左へ動かして離すと、カーソルから行頭までを削除します。候補バーの「元に戻す」で戻せます。</string>
     <string name="settings_height">キーボードの高さ</string>
-    <string name="settings_height_description">次にキーボードを表示したときから変わります。</string>
-    <string name="settings_height_low">低</string>
-    <string name="settings_height_medium">中</string>
-    <string name="settings_height_high">高</string>
+    <string name="settings_height_description">キー1段の高さを52〜96 dpで調整します。英字配列も比率に沿って変わり、キーの高さは48 dp未満になりません。次にキーボードを表示したときから変わります。</string>
+    <string name="settings_height_value">キー1段: %1$d dp</string>
+    <string name="settings_height_input_description">キー1段の高さをdpで入力</string>
+    <string name="settings_height_unit">dp</string>
+    <string name="settings_height_reset">標準の高さに戻す</string>
     <string name="settings_key_preview">押したキーの拡大表示</string>
     <string name="settings_key_preview_description">パスワード欄では表示しません。</string>
     <string name="settings_vibration">振動</string>

@@ -19,7 +19,7 @@ data class KeyboardPreferences(
     val qwertyRowHeightDp: Float
         get() = rowHeightDp * KeyboardDimens.QWERTY_ROW_HEIGHT_DP / KeyboardDimens.ROW_HEIGHT_DP
 
-    /** キーボードの高さの段階。設定画面の「低・中・高」に当たる。 */
+    /** 旧設定の高さ。保存済みの「低・中・高」をdp値へ移すために残す。 */
     enum class Height(val rowHeightDp: Float) {
         /** 変更前のUzumiと同じ高さ。 */
         LOW(52f),
@@ -27,5 +27,14 @@ data class KeyboardPreferences(
         MEDIUM(60f),
         /** Simejiと同じ高さ（既定）。 */
         HIGH(KeyboardDimens.ROW_HEIGHT_DP),
+    }
+
+    companion object {
+        /** 既存の「低」を維持し、キーの最小タップ領域を損なわない高さ調整の範囲。 */
+        const val MIN_ROW_HEIGHT_DP = 52
+        const val MAX_ROW_HEIGHT_DP = 96
+
+        /** 保存値や入力値を、調整画面とキーボードの共通範囲に収める。 */
+        fun normalizeRowHeightDp(value: Int): Int = value.coerceIn(MIN_ROW_HEIGHT_DP, MAX_ROW_HEIGHT_DP)
     }
 }
