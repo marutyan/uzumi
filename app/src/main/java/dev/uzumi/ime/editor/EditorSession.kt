@@ -785,9 +785,11 @@ class EditorSession(
     }
 
     /**
-     * Enterを改行またはeditor actionへ振り分ける。
+     * 未確定文字があればEnterは確定だけを行い、改行や送信は次のEnterで行う。
+     * 未確定文字がなければ改行またはeditor actionへ振り分ける。
      */
     fun handleEnter(): Boolean {
+        if (hasComposition) return commitComposition()
         if (liveCore != null) {
             val kind = if (EditorActionPolicy.shouldInsertNewline(policy)) {
                 EnterKind.Newline

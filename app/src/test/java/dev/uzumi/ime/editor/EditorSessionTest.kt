@@ -360,12 +360,16 @@ class EditorSessionTest {
         assertEquals(listOf("A"), connection.committedTexts)
     }
 
-    /** 単一行では確定後にeditor actionを一度だけ送る。 */
+    /** 未確定文字がある間のEnterは確定だけを行い、次のEnterでeditor actionを一度だけ送る。 */
     @Test
-    fun enterCommitsThenPerformsEditorActionOnce() {
+    fun enterCommitsFirstThenPerformsEditorActionOnSecondPress() {
         val connection = FakeEditorConnection()
         val session = EditorSession(connection, normalPolicy(imeAction = EditorInfo.IME_ACTION_SEND))
         session.inputText("あ")
+
+        assertTrue(session.handleEnter())
+        assertEquals(listOf("あ"), connection.committedTexts)
+        assertTrue(connection.editorActions.isEmpty())
 
         assertTrue(session.handleEnter())
         assertEquals(listOf("あ"), connection.committedTexts)
@@ -743,21 +747,25 @@ class EditorSessionTest {
         assertEquals("今日は天気がいいですね", connection.text)
     }
 
-    /** Enterは表示を確定してからEditor actionを一度だけ送り、改行欄では改行を一度だけ入れる。 */
+    /** ライブ変換でも1回目のEnterは表示を確定するだけで、2回目でEditor actionまたは改行を一度だけ行う。 */
     @Test
-    fun liveEnterCommitsThenActsOnce() {
+    fun liveEnterCommitsFirstThenActsOnSecondPress() {
         val sendConnection = FakeEditorConnection()
         val client = FakeLiveClient()
         val send = liveSession(sendConnection, client, normalPolicy(imeAction = EditorInfo.IME_ACTION_SEND))
         typeLive(send, client, "よい")
         assertTrue(send.handleEnter())
         assertEquals(listOf("良い"), sendConnection.committedTexts)
+        assertTrue(sendConnection.editorActions.isEmpty())
+        assertTrue(send.handleEnter())
         assertEquals(listOf(EditorInfo.IME_ACTION_SEND), sendConnection.editorActions)
 
         val newlineConnection = FakeEditorConnection()
         val newlineClient = FakeLiveClient()
         val newline = liveSession(newlineConnection, newlineClient, normalPolicy().copy(isMultiLine = true))
         typeLive(newline, newlineClient, "よい")
+        assertTrue(newline.handleEnter())
+        assertEquals(listOf("良い"), newlineConnection.committedTexts)
         assertTrue(newline.handleEnter())
         assertEquals(listOf("良い", "\n"), newlineConnection.committedTexts)
         assertTrue(newlineConnection.editorActions.isEmpty())
