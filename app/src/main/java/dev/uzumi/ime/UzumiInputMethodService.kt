@@ -15,6 +15,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InlineSuggestionsRequest
 import android.view.inputmethod.InlineSuggestionsResponse
@@ -96,6 +97,10 @@ class UzumiInputMethodService : InputMethodService() {
     // 入力Viewを作ったときのキーボード設定。設定画面で変わっていれば、次に表示するときに作り直す。
     private var builtPreferences: KeyboardPreferences? = null
     private var builtToolbarPreferences: ToolbarPreferences? = null
+
+    // 入力Viewで実際に受け取った下端Insets（px）と、入力Viewを作った時点の使える高さ（dp）。差が出たら作り直す。
+    private var observedBottomInsetPx = 0
+    private var builtAvailableHeightDp: Int? = null
     private var toolbarViews: ToolbarBarViews? = null
     // クリップボード本文はRecentClipboardの一時候補にだけ保持し、ログや設定へ保存しない。
     private var recentClipboard: RecentClipboard? = null
@@ -250,6 +255,7 @@ class UzumiInputMethodService : InputMethodService() {
         val keyboardArea = FrameLayout(this)
         val preferences = UzumiSettings.keyboardPreferences(this)
         builtPreferences = preferences
+        builtAvailableHeightDp = availableInputHeightDp()
         val rowBudget = maximumBarRows()
         val reservedBarRows = minOf(toolbarPreferences.toolbarRows + toolbarPreferences.candidateRows, rowBudget)
         val displayPreferences = displayKeyboardPreferences(preferences, reservedBarRows)
@@ -282,8 +288,30 @@ class UzumiInputMethodService : InputMethodService() {
                 WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
             )
             targetView.setPadding(systemInsets.left, 0, systemInsets.right, systemInsets.bottom)
+            // IMEのナビゲーション領域は端末全体の推定より高い場合があるため、実測値が変わったら段数と行高を計算し直す
+            if (systemInsets.bottom != observedBottomInsetPx) {
+                observedBottomInsetPx = systemInsets.bottom
+                if (builtAvailableHeightDp != null && builtAvailableHeightDp != availableInputHeightDp()) {
+                    targetView.post { setInputView(onCreateInputView()) }
+                }
+            }
             insets
         }
+    }
+
+    /**
+     * 入力Viewが使える高さ（dp）を、画面全体からステータスバー・カットアウトと下端の操作領域を除いて求める。
+     * 下端は端末全体の推定と、入力Viewで実際に受け取ったInsetsの大きい方を使う。
+     */
+    private fun availableInputHeightDp(): Int {
+        val density = resources.displayMetrics.density
+        val metrics = getSystemService(WindowManager::class.java)?.maximumWindowMetrics
+            ?: return resources.configuration.screenHeightDp
+        val insets = metrics.windowInsets.getInsetsIgnoringVisibility(
+            WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+        )
+        val heightPx = metrics.bounds.height() - insets.top - maxOf(insets.bottom, observedBottomInsetPx)
+        return (heightPx / density).toInt().coerceAtLeast(0)
     }
 
     /** フィールドごとに旧接続を破棄し、新しい編集セッションを開始する。 */
@@ -635,7 +663,7 @@ class UzumiInputMethodService : InputMethodService() {
 
     /** 設定値を変えず、キーボード最小高を残した画面内のバー段数上限を返す。 */
     private fun maximumBarRows(): Int {
-        val availableHeight = (resources.configuration.screenHeightDp - SYSTEM_RESERVED_HEIGHT_DP).coerceAtLeast(0)
+        val availableHeight = availableInputHeightDp()
         val minimumKeyboardHeight = maxOf(
             KeyboardPreferences.MIN_ROW_HEIGHT_DP * KANA_KEYBOARD_ROW_COUNT,
             MIN_KEY_TOUCH_DP * QWERTY_KEYBOARD_ROW_COUNT,
@@ -649,7 +677,7 @@ class UzumiInputMethodService : InputMethodService() {
         configured: KeyboardPreferences,
         reservedBarRows: Int,
     ): KeyboardPreferences {
-        val availableHeight = (resources.configuration.screenHeightDp - SYSTEM_RESERVED_HEIGHT_DP).coerceAtLeast(0)
+        val availableHeight = availableInputHeightDp()
         val barsHeight = reservedBarRows * BAR_ROW_HEIGHT_WITH_DIVIDER_DP + KEYBOARD_PANEL_PADDING_DP
         val keyboardHeight = (availableHeight - barsHeight).coerceAtLeast(0)
         val qwertyHeightPerRow = KeyboardDimens.QWERTY_ROW_HEIGHT_DP / KeyboardDimens.ROW_HEIGHT_DP
@@ -1096,8 +1124,7 @@ class UzumiInputMethodService : InputMethodService() {
         const val QWERTY_KEYBOARD_ROW_COUNT = 5
         const val KANA_KEYBOARD_ROW_COUNT = 4
 
-        /** 端末のナビゲーション領域とキーボードパネル外周（dp）。 */
-        const val SYSTEM_RESERVED_HEIGHT_DP = 24
+        /** キーボードパネル外周（dp）。 */
         const val KEYBOARD_PANEL_PADDING_DP = 4
 
         /** 設定時は両バー最大6段。表示時は画面高に応じて制限する。 */
