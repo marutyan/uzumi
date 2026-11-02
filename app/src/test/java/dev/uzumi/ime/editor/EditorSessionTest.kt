@@ -75,6 +75,56 @@ class EditorSessionTest {
         assertEquals("ありがとうあ", connection.text)
     }
 
+    /** 入力全体の候補から、本文に表示中のライブ変換の表記と注目segmentの候補と同じ表記を除く。全部重なれば0件にする。 */
+    @Test
+    fun livePredictionsExcludeDisplayedValueAndRegularCandidates() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val liveClient = FakeLiveClient()
+        val predictionClient = FakePredictionClient()
+        val session = EditorSession(
+            connection = connection,
+            policy = normalPolicy(),
+            sessionEpoch = 7,
+            liveCore = LiveConversionCore(),
+            liveClient = liveClient,
+            predictionClient = predictionClient,
+        )
+        assertTrue(session.inputText("きょうは"))
+        liveClient.deliverLatest(session)
+        assertEquals("今日は", connection.text)
+        assertTrue(session.refreshPredictions())
+        val request = predictionClient.requests.single()
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(
+            PredictionCandidate(1, "今日は"),
+            PredictionCandidate(2, "京は"),
+            PredictionCandidate(3, "今日はいい天気"),
+            PredictionCandidate(4, "キョウハ"),
+        ))))
+
+        assertEquals(listOf("今日はいい天気", "キョウハ"), session.predictionResult()!!.candidates.map { it.value })
+        // 除いた候補が無くても、残った候補は元の候補IDで選べる。
+        assertTrue(session.selectPrediction(request, candidateId = 3))
+        assertEquals("今日はいい天気", connection.text)
+    }
+
+    /** 変換前の入力では、表示中の読みと基本候補（カタカナ）と同じ表記を除き、重複だけなら予測を0件にする。 */
+    @Test
+    fun predictionsExcludeBasicCandidatesBeforeConversion() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), sessionEpoch = 8, predictionClient = client)
+        assertTrue(session.inputText("ありがと"))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(
+            PredictionCandidate(1, "ありがと"),
+            PredictionCandidate(2, "アリガト"),
+        ))))
+
+        assertTrue(session.predictionResult()!!.candidates.isEmpty())
+        assertTrue(session.predictionCandidates().isEmpty())
+    }
+
     /** ライブ変換の読みとsegmentを予測語の確定後に捨て、二重確定と旧segment学習を防ぐ。 */
     @Test
     fun livePredictionClearsCoreWithoutLearningOldSegments() {

@@ -205,8 +205,20 @@ class EditorSession(
         return predictionResult()?.candidates.orEmpty()
     }
 
-    /** 現在の入力状態に一致する予測結果を、候補IDの確定操作と一緒に返す。 */
-    fun predictionResult(): PredictionResult? = appliedPrediction?.takeIf { isCurrentPredictionRequest(it.request) }
+    /**
+     * 現在の入力状態に一致する予測結果を、候補IDの確定操作と一緒に返す。本文に表示中の未確定の表記と、
+     * その右に並ぶ通常の候補（注目文節の候補）と同じ表記は、同じ語が候補バーに二度並ばないよう除く。
+     */
+    fun predictionResult(): PredictionResult? {
+        val result = appliedPrediction?.takeIf { isCurrentPredictionRequest(it.request) } ?: return null
+        val shown = regularCandidateValues().toMutableSet()
+        if (hasComposition) shown += ownedDisplay
+        return result.copy(candidates = result.candidates.filterNot { it.value in shown })
+    }
+
+    /** 予測の右に並ぶ通常の候補の表記。ライブ変換では注目segmentの候補、それ以外は明示変換・基本候補。 */
+    private fun regularCandidateValues(): List<String> =
+        liveCandidateState()?.choices?.map { it.value } ?: candidateOptions().map { it.value }
 
     /** workerの予測結果を要求世代・読み・ゼロクエリ文脈が一致するときだけ反映する。 */
     fun applyPredictionResult(result: PredictionResult): Boolean {
