@@ -349,6 +349,57 @@ class EditorSessionTest {
         assertEquals("abcde", right.textBeforeCursor(10))
     }
 
+    /**
+     * 未確定文字の先頭にカーソルがあるBackspaceは、直前の確定済みの一書記素を消し、未確定はそのまま残す。
+     * ずれたcompositionの選択通知を外部の変更と誤らず、続けて入力できる。
+     */
+    @Test
+    fun backspaceAtCompositionStartDeletesCommittedTextBefore() {
+        val connection = ModelEditorConnection(text = "漢字", selectionStart = 2, selectionEnd = 2)
+        val session = EditorSession(connection, normalPolicy(), 2, 2)
+        assertTrue(session.inputText("あ"))
+        assertTrue(session.inputText("い"))
+        assertTrue(session.moveCursor(-2))
+
+        assertTrue(session.deleteBackward())
+        assertEquals("漢あい", connection.text)
+        assertEquals("あい", session.compositionSnapshot().reading)
+        assertFalse(session.canUndoDeletion)
+        session.updateSelection(2, 2, 1, 1, 1, 3)
+        assertTrue(session.hasComposition)
+
+        assertTrue(session.inputText("か"))
+        assertEquals("漢かあい", connection.text)
+        assertTrue(session.commitComposition())
+        assertEquals("漢かあい", connection.text)
+    }
+
+    /** ライブ変換でも、未確定文字の先頭でのBackspaceは前の確定済み文字を消し、未確定の表示を保つ。 */
+    @Test
+    fun liveBackspaceAtCompositionStartDeletesCommittedTextBefore() {
+        val connection = ModelEditorConnection(text = "漢", selectionStart = 1, selectionEnd = 1)
+        val client = FakeLiveClient()
+        val session = EditorSession(
+            connection = connection,
+            policy = normalPolicy(),
+            initialSelectionStart = 1,
+            initialSelectionEnd = 1,
+            liveCore = LiveConversionCore(),
+            liveClient = client,
+        )
+        typeLive(session, client, "よい")
+        val displayed = connection.text.substring(1)
+        assertTrue(session.moveCursor(-2))
+
+        assertTrue(session.deleteBackward())
+        assertEquals(displayed, connection.text)
+        session.updateSelection(1, 1, 0, 0, 0, displayed.length)
+        assertTrue(session.hasComposition)
+
+        assertTrue(session.commitComposition())
+        assertEquals(displayed, connection.text)
+    }
+
     /** composition中の左移動、直前削除、挿入が残った文字の前に反映される。 */
     @Test
     fun insertsBeforeRemainingCompositionAfterCursorMoveAndDelete() {
@@ -1819,6 +1870,13 @@ private class ModelEditorConnection(
         val start = (selectionStart - beforeLength).coerceAtLeast(0)
         val end = (selectionEnd + afterLength).coerceAtMost(text.length)
         replace(start, end, "")
+        // BaseInputConnectionと同じく、カーソル位置から始まるcomposing spanは消さず、削除幅だけ左へずらす。
+        val spanStart = composingStart
+        if (spanStart != null && afterLength == 0 && spanStart >= selectionStart) {
+            val removed = selectionStart - start
+            composingStart = spanStart - removed
+            composingEnd = composingEnd?.minus(removed)
+        }
         selectionStart = start
         selectionEnd = start
         return true

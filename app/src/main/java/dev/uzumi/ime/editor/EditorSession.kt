@@ -189,6 +189,7 @@ class EditorSession(
         val previous = activeBackspaceDeletion()
         liveCore?.let { core ->
             if (core.display.isNotEmpty()) {
+                if (core.inputCursor == 0) return deleteBeforeComposition()
                 if (policy.isSensitive) {
                     val accepted = performLive { it.deleteBackward() } ?: false
                     if (accepted) deletionUndo = null
@@ -209,6 +210,7 @@ class EditorSession(
             return deleteOutsideComposition(previous)
         }
         if (!buffer.isEmpty) {
+            if (buffer.cursorCluster == 0 && !buffer.hasSelection) return deleteBeforeComposition()
             val snapshot = if (policy.isSensitive) null else previous?.explicitComposition ?: buffer.snapshot()
             val conversion = if (policy.isSensitive) null else previous?.explicitConversion ?: currentConversion()
             val conversionCommitRequest = if (policy.isSensitive) null else {
@@ -236,6 +238,25 @@ class EditorSession(
             return true
         }
         return deleteOutsideComposition(previous)
+    }
+
+    /**
+     * 未確定文字の先頭にカーソルがあるときのBackspace。compositionは残し、その直前の確定済みの一書記素を消す。
+     * Editorではcomposing spanが削除幅だけ左へずれるため、開始位置・選択位置・期待する選択通知を同じだけずらす。
+     * 未確定を残したまま前の確定文字だけを戻す経路はないため、「元に戻す」の記録は捨てる。
+     */
+    private fun deleteBeforeComposition(): Boolean {
+        deletionUndo = null
+        val beforeCursor = connection.textBeforeCursor(64)?.toString() ?: return false
+        val deleteLength = GraphemeClusters.previousUtf16Length(beforeCursor)
+        if (deleteLength == 0) return false
+        if (!connection.deleteSurroundingText(deleteLength, 0)) return false
+        val shiftedStart = compositionStart?.let { (it - deleteLength).coerceAtLeast(0) }
+        compositionStart = shiftedStart
+        selectionStart = shiftedStart
+        selectionEnd = shiftedStart
+        recordExpectedComposition(CompositionGeometry(shiftedStart, ownedDisplay.length, cursorOffset = 0))
+        return true
     }
 
     /**
