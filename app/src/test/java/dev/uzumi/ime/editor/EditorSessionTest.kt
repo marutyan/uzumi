@@ -360,6 +360,37 @@ class EditorSessionTest {
         assertEquals(listOf("A"), connection.committedTexts)
     }
 
+    /**
+     * パスワード・数値の欄ではcompositionを作らず一文字ずつ確定し、最初のEnterでeditor actionを送る。
+     * パスワード欄で入力した文字を消しても、「元に戻す」のために本文を覚えない。
+     */
+    @Test
+    fun passwordAndNumericFieldsCommitDirectlyAndEnterActsOnce() {
+        listOf(
+            normalPolicy(imeAction = EditorInfo.IME_ACTION_DONE).copy(isPassword = true),
+            normalPolicy(imeAction = EditorInfo.IME_ACTION_NEXT).copy(isNumeric = true),
+        ).forEach { policy ->
+            val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+            val session = EditorSession(connection, policy, initialSelectionStart = 0)
+
+            assertTrue(session.inputText("1"))
+            assertTrue(session.inputText("2"))
+            assertFalse(session.hasComposition)
+            assertEquals("12", connection.text)
+
+            assertTrue(session.deleteBackward())
+            assertEquals("1", connection.text)
+            assertEquals(policy.isPassword, !session.canUndoDeletion)
+
+            val actions = FakeEditorConnection()
+            val enterSession = EditorSession(actions, policy)
+            assertTrue(enterSession.inputText("1"))
+            assertTrue(enterSession.handleEnter())
+            assertEquals(listOf("1"), actions.committedTexts)
+            assertEquals(listOf(policy.imeAction), actions.editorActions)
+        }
+    }
+
     /** 未確定文字がある間のEnterは確定だけを行い、次のEnterでeditor actionを一度だけ送る。 */
     @Test
     fun enterCommitsFirstThenPerformsEditorActionOnSecondPress() {
