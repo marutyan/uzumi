@@ -742,7 +742,7 @@ class EditorSessionTest {
     }
 
     /** テスト対象に必要な通常欄の方針を作る。 */
-    /** 変換は結果を待たずに依頼し、一致する応答だけを表示と候補へ反映して確定する。 */
+    /** 変換は結果を待たずに依頼し、候補選択後も全文節を未確定のまま保って確定する。 */
     @Test
     fun conversionResultIsAppliedAndCommitted() {
         val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
@@ -759,11 +759,72 @@ class EditorSessionTest {
         assertEquals("漢字", connection.text)
         val options = session.candidateOptions()
         assertEquals(listOf("漢字", "感じ"), options.map(CandidateOption::value))
+        assertTrue(options.first().selected)
 
         assertTrue(session.selectConversionCandidate(options[1].conversionChoice!!))
         assertEquals("感じ", connection.text)
+        assertEquals("かんじ", session.compositionSnapshot().reading)
+        assertTrue(session.commitComposition())
         assertTrue(session.compositionSnapshot().reading.isEmpty())
-        assertEquals(listOf(request to 1), client.committedCandidates)
+        assertEquals(listOf(request), client.committedAll)
+        assertEquals(listOf("感じ"), client.committedAllSegments.single().second.map(ConversionSegment::value))
+    }
+
+    /** 変換キーを押すたび注目文節の候補を循環し、候補バーの選択表示も追従する。 */
+    @Test
+    fun explicitConvertCyclesCandidatesAndWrapsWithoutCommitting() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("かんじ")
+        session.convert()
+        val request = client.requests.single()
+        assertTrue(session.applyConversionOutcome(converted(request, "漢字", "感じ")))
+
+        assertTrue(session.candidateOptions().first().selected)
+        assertTrue(session.convert())
+        assertEquals("感じ", session.compositionSnapshot().display)
+        assertTrue(session.candidateOptions().last().selected)
+        assertTrue(session.convert())
+        assertEquals("漢字", session.compositionSnapshot().display)
+        assertTrue(session.candidateOptions().first().selected)
+        assertEquals("かんじ", session.compositionSnapshot().reading)
+        assertTrue(client.committedAll.isEmpty())
+    }
+
+    /** 候補選択で表示幅が変わった後に旧compositionの遅延通知が届いても、現在の変換を保つ。 */
+    @Test
+    fun delayedSelectionForPreviousConversionDisplayDoesNotDiscardCurrentChoices() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("きょうはてんき")
+        session.convert()
+        val request = client.requests.single()
+        val head = listOf(ConversionCandidate(0, "今日は", "きょうは"), ConversionCandidate(1, "京", "きょうは"))
+        val tail = listOf(ConversionCandidate(2, "天気", "てんき"))
+        assertTrue(
+            session.applyConversionOutcome(
+                ConversionOutcome.Converted(
+                    ConversionResult(
+                        request,
+                        listOf(
+                            ConversionSegment("きょうは", "今日は", candidates = head),
+                            ConversionSegment("てんき", "天気", candidates = tail),
+                        ),
+                        head,
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(session.selectConversionCandidate(session.candidateOptions().last().conversionChoice!!))
+        assertEquals("京天気", connection.text)
+        session.updateSelection(0, 0, 5, 5, 0, 5)
+
+        assertTrue(session.hasExplicitConversion)
+        assertEquals("きょうはてんき", session.compositionSnapshot().reading)
+        assertTrue(session.candidateOptions().first { it.value == "京" }.selected)
     }
 
     /** 応答の前に読みが変わったら、古い応答で新しい入力を上書きしない。 */
@@ -868,75 +929,82 @@ class EditorSessionTest {
         assertEquals("かんじを", connection.composingTexts.last())
     }
 
-    /** 先頭文節の候補を選ぶと、その文節だけ確定し、残りの読みを新しい要求として変換する。 */
+    /** 先頭文節の候補を選ぶとその表示だけ差し替わり、全文節の読みをcompositionに残す。 */
     @Test
-    fun selectingHeadCandidateKeepsRemainingReading() {
+    fun selectingHeadCandidateKeepsWholeCompositionUncommitted() {
         val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
         val client = FakeConversionClient()
         val session = EditorSession(connection, normalPolicy(), 0, 0, conversionClient = client)
         session.inputText("きょうはてんき")
         session.convert()
         val first = client.requests.single()
+        val firstCandidates = listOf(ConversionCandidate(0, "今日は", "きょうは"), ConversionCandidate(1, "京は", "きょうは"))
+        val secondCandidates = listOf(ConversionCandidate(2, "天気", "てんき"), ConversionCandidate(3, "転機", "てんき"))
         val result = ConversionResult(
             first,
-            listOf(ConversionSegment("きょうは", "今日は"), ConversionSegment("てんき", "天気")),
-            listOf(ConversionCandidate(0, "今日は", "きょうは"), ConversionCandidate(1, "京は", "きょうは")),
+            listOf(
+                ConversionSegment("きょうは", "今日は", candidates = firstCandidates),
+                ConversionSegment("てんき", "天気", candidates = secondCandidates),
+            ),
+            firstCandidates,
         )
         assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(result)))
         assertEquals("今日は天気", connection.text)
 
-        assertTrue(session.selectConversionCandidate(ConversionChoice(first, 1)))
+        assertTrue(session.selectConversionCandidate(session.candidateOptions()[1].conversionChoice!!))
 
-        assertEquals("京はてんき", connection.text)
-        assertEquals("てんき", session.compositionSnapshot().reading)
-        val second = client.requests.last()
-        assertEquals("てんき", second.reading)
-        assertTrue(session.applyConversionOutcome(converted(second, "天気")))
         assertEquals("京は天気", connection.text)
+        assertEquals("きょうはてんき", session.compositionSnapshot().reading)
+        assertEquals(1, client.requests.size)
+        assertTrue(client.committedAll.isEmpty())
+        assertTrue(session.commitComposition())
+        assertEquals(listOf(first), client.committedAll)
+        assertEquals(listOf("京は", "天気"), client.committedAllSegments.single().second.map(ConversionSegment::value))
     }
 
-    /** 複数の文節をまとめる候補を選ぶと、その候補が覆う読みを確定し、残りだけを再入力する。 */
+    /** 左右で注目文節を移し、候補タップはその文節だけを置き換え、境界候補は表示しない。 */
     @Test
-    fun selectingMultiSegmentCandidateDoesNotDuplicateReading() {
+    fun explicitArrowFocusAndCandidateSelectionStayWithinSegment() {
         val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
         val client = FakeConversionClient()
         val session = EditorSession(connection, normalPolicy(), 0, 0, conversionClient = client)
         session.inputText("きょうはいいてんき")
         session.convert()
         val first = client.requests.single()
+        val head = listOf(ConversionCandidate(0, "今日は", "きょうは"), ConversionCandidate(1, "京は", "きょうは"))
+        val middle = listOf(ConversionCandidate(2, "いい", "いい"), ConversionCandidate(3, "良い", "いい"))
+        val tail = listOf(ConversionCandidate(4, "天気", "てんき"), ConversionCandidate(5, "転機", "てんき"))
         val result = ConversionResult(
             first,
             listOf(
-                ConversionSegment("きょうは", "今日は"),
-                ConversionSegment("いい", "いい"),
-                ConversionSegment("てんき", "天気"),
+                ConversionSegment("きょうは", "今日は", candidates = head),
+                ConversionSegment("いい", "いい", candidates = middle),
+                ConversionSegment("てんき", "天気", candidates = tail),
             ),
-            listOf(
-                ConversionCandidate(0, "今日は", "きょうは"),
-                ConversionCandidate(5, "今日はいい", "きょうはいい"),
-                ConversionCandidate(6, "今日はいい天気", "きょうはいいてんき"),
-            ),
+            head,
         )
         assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(result)))
 
-        assertTrue(session.selectConversionCandidate(ConversionChoice(first, 5)))
-        assertEquals("今日はいいてんき", connection.text)
-        assertEquals("てんき", client.requests.last().reading)
-        assertTrue(session.applyConversionOutcome(converted(client.requests.last(), "天気")))
+        val staleHeadChoice = session.candidateOptions().first().conversionChoice!!
+        assertTrue(session.moveConversionFocus(1))
+        assertEquals(listOf("いい", "良い"), session.candidateOptions().map(CandidateOption::value))
+        assertFalse(session.selectConversionCandidate(staleHeadChoice))
+        val middleChoice = session.candidateOptions().last().conversionChoice!!
+        assertTrue(session.selectConversionCandidate(middleChoice))
+        assertEquals("今日は良い天気", connection.text)
+        assertEquals("きょうはいいてんき", session.compositionSnapshot().reading)
+        assertTrue(session.moveConversionFocus(1))
+        assertEquals(listOf("天気", "転機"), session.candidateOptions().map(CandidateOption::value))
+        assertTrue(session.selectConversionCandidate(session.candidateOptions().last().conversionChoice!!))
+        assertEquals("今日は良い転機", connection.text)
+        assertTrue(session.moveConversionFocus(-1))
+        assertTrue(session.candidateOptions().first { it.value == "良い" }.selected)
+        assertTrue(session.moveConversionFocus(1))
+        assertFalse(session.moveConversionFocus(1))
         assertTrue(session.commitComposition())
-        assertEquals("今日はいい天気", connection.text)
-
-        session.inputText("きょうはいいてんき")
-        session.convert()
-        val full = client.requests.last()
-        assertTrue(
-            session.applyConversionOutcome(
-                ConversionOutcome.Converted(result.copy(request = full)),
-            ),
-        )
-        assertTrue(session.selectConversionCandidate(ConversionChoice(full, 6)))
-        assertEquals("今日はいい天気今日はいい天気", connection.text)
+        assertEquals("今日は良い転機", connection.text)
         assertTrue(session.compositionSnapshot().reading.isEmpty())
+        assertEquals(listOf(first), client.committedAll)
     }
 
     /** 変換結果の表示中に次の文字を入力すると、表示中の変換を確定して新しい読みを始める。 */
@@ -970,6 +1038,9 @@ class EditorSessionTest {
         session.applyConversionOutcome(converted(first, "漢字", "感じ"))
         val staleChoice = session.candidateOptions()[1].conversionChoice!!
         session.deleteBackward()
+        assertEquals("かんじ", session.compositionSnapshot().reading)
+        session.deleteBackward()
+        assertEquals("かん", session.compositionSnapshot().reading)
         session.inputText("じ")
         session.convert()
         session.applyConversionOutcome(converted(client.requests.last(), "漢字", "幹事"))
@@ -1066,6 +1137,22 @@ class EditorSessionTest {
         assertTrue(session.inputText("え"))
 
         assertEquals("あいえう", connection.text)
+    }
+
+    /** 明示変換の循環処理を加えても、ライブ変換キーは候補バーの候補を従来どおり循環する。 */
+    @Test
+    fun liveConvertKeyStillCyclesFocusedCandidates() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+        typeLive(session, client, "よい")
+
+        assertEquals("良い", session.liveCandidateState()!!.currentValue)
+        assertTrue(session.convert())
+        assertEquals("酔い", session.liveCandidateState()!!.currentValue)
+        assertTrue(session.convert())
+        assertEquals("よい", session.liveCandidateState()!!.currentValue)
+        assertFalse(session.hasExplicitConversion)
     }
 
     /** 変換済み表示の内部をEditorでタップすると、そのsegmentを候補バーの対象にする。 */
@@ -1183,7 +1270,7 @@ class EditorSessionTest {
         assertEquals(0, live.stableOverwrites + live.chosenOverwrites)
     }
 
-    /** 明示変換で登録語の候補を確定しても、エンジンの候補ではないため確定を通知しない。 */
+    /** 明示変換で登録語の候補を選んでもcompositionに残し、Mozcへ確定を通知しない。 */
     @Test
     fun explicitUserDictionaryCandidateIsNotReportedToEngine() {
         val connection = FakeEditorConnection()
@@ -1205,16 +1292,17 @@ class EditorSessionTest {
         val option = session.candidateOptions().first()
         assertEquals("幹事", option.value)
         assertTrue(session.selectConversionCandidate(option.conversionChoice!!))
+        assertEquals("幹事", connection.composingTexts.last())
+        assertEquals("かんじ", session.compositionSnapshot().reading)
+        assertTrue(connection.committedTexts.isEmpty())
+        assertTrue(session.commitComposition())
         assertEquals(listOf("幹事"), connection.committedTexts)
-        assertTrue(client.committedCandidates.isEmpty())
+        assertTrue(client.committedAll.isEmpty())
     }
 
-    /**
-     * 明示変換の表示中に削除すると読みへ戻り、自動では再変換しない。続けて入力しても、
-     * 削除前の変換や別の変換結果を確定せず、読みへ文字を足す（「良い」→削除→「よ」→「る」で「よる」）。
-     */
+    /** 明示変換中の一回目Backspaceは読みへ戻し、二回目は一字削除して読みをUndo可能にする。 */
     @Test
-    fun explicitDeleteDuringConversionReturnsToReadingWithoutReconverting() {
+    fun explicitBackspaceCancelsThenDeletesAndAllowsReconversion() {
         val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
         val client = FakeConversionClient()
         val session = EditorSession(connection, normalPolicy(), 0, 0, conversionClient = client)
@@ -1224,13 +1312,63 @@ class EditorSessionTest {
         assertEquals("良い", connection.text)
 
         assertTrue(session.deleteBackward())
+        assertEquals("よい", connection.text)
+        assertEquals("よい", session.compositionSnapshot().reading)
+        assertFalse(session.canUndoDeletion)
+
+        assertTrue(session.deleteBackward())
         assertEquals("よ", connection.text)
+        assertTrue(session.canUndoDeletion)
+        assertTrue(session.undoDeletion())
+        assertEquals("よい", connection.text)
+        assertEquals("よい", session.compositionSnapshot().reading)
         assertEquals(1, client.requests.size)
 
-        assertTrue(session.inputText("る"))
-        assertEquals("よる", connection.text)
-        assertEquals("よる", session.compositionSnapshot().reading)
+        assertTrue(session.convert())
+        val nextRequest = client.requests.last()
+        assertTrue(nextRequest.revision > client.requests.first().revision)
+        assertFalse(session.applyConversionOutcome(converted(client.requests.first(), "古い")))
+        assertTrue(session.applyConversionOutcome(converted(nextRequest, "夜")))
+        assertEquals("夜", session.compositionSnapshot().display)
         assertTrue(client.committedAll.isEmpty())
+    }
+
+    /** 変換表記が読みと同じ場合も、最初のBackspaceでは読みを消さず変換状態だけを解除する。 */
+    @Test
+    fun backspaceCancelsSameValueExplicitConversionBeforeDeleting() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("かんじ")
+        session.convert()
+        assertTrue(session.applyConversionOutcome(converted(client.requests.single(), "かんじ")))
+        assertTrue(session.hasExplicitConversion)
+
+        assertTrue(session.deleteBackward())
+        assertEquals("かんじ", connection.text)
+        assertEquals("かんじ", session.compositionSnapshot().reading)
+        assertFalse(session.hasExplicitConversion)
+        assertFalse(session.canUndoDeletion)
+        assertTrue(session.deleteBackward())
+        assertEquals("かん", session.compositionSnapshot().reading)
+    }
+
+    /** エンジンなしの変換キーで出したカタカナも、一回目は読みへ戻し、次で一字を削除する。 */
+    @Test
+    fun backspaceCancelsKatakanaFallbackBeforeDeleting() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy())
+        assertTrue(session.inputText("よい"))
+        assertTrue(session.convert())
+        assertEquals("ヨイ", session.compositionSnapshot().display)
+
+        assertTrue(session.deleteBackward())
+        assertEquals("よい", connection.text)
+        assertEquals("よい", session.compositionSnapshot().reading)
+        assertFalse(session.canUndoDeletion)
+        assertTrue(session.deleteBackward())
+        assertEquals("よ", session.compositionSnapshot().reading)
+        assertTrue(session.canUndoDeletion)
     }
 
     /** 明示変換で読み全体の登録語を表示したまま確定しても、エンジンへ確定を学習させない。 */
@@ -1470,7 +1608,7 @@ class EditorSessionTest {
         assertFalse(session.canUndoDeletion)
     }
 
-    /** 明示変換した表示を連続削除しても、Undoで読み・表記・候補を削除前へ戻す。 */
+    /** 明示変換を読みへ戻してから連続削除し、Undoで削除した読みだけを復元する。 */
     @Test
     fun consecutiveBackspacesRestoreExplicitConvertedComposition() {
         val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
@@ -1480,18 +1618,21 @@ class EditorSessionTest {
         assertTrue(session.convert())
         assertTrue(session.applyConversionOutcome(converted(client.requests.single(), "漢字", "感じ")))
 
+        assertTrue(session.deleteBackward())
+        assertEquals("かんじ", connection.text)
+        assertFalse(session.canUndoDeletion)
         repeat(3) { assertTrue(session.deleteBackward()) }
         assertEquals("", connection.text)
         assertTrue(session.undoDeletion())
 
-        assertEquals("漢字", connection.text)
+        assertEquals("かんじ", connection.text)
         assertEquals("かんじ", session.compositionSnapshot().reading)
-        assertEquals(listOf("漢字", "感じ"), session.candidateOptions().map(CandidateOption::value))
+        assertEquals(listOf("かんじ", "カンジ"), session.candidateOptions().map(CandidateOption::value))
     }
 
-    /** 変換候補をUndo後に確定しても、エンジンには最後に変換した要求を渡す。 */
+    /** 候補選択でUI revisionが進んでも、確定時は変換時の元要求と更新後の表記を使う。 */
     @Test
-    fun restoredExplicitConversionCommitsCandidateWithOriginalRequest() {
+    fun selectedExplicitCandidateCommitsWithOriginalRequest() {
         val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
         val client = FakeConversionClient()
         val session = EditorSession(connection, normalPolicy(), conversionClient = client)
@@ -1500,39 +1641,14 @@ class EditorSessionTest {
         val engineRequest = client.requests.single()
         assertTrue(session.applyConversionOutcome(converted(engineRequest, "漢字", "感じ")))
 
-        repeat(3) { assertTrue(session.deleteBackward()) }
-        assertTrue(session.undoDeletion())
-        repeat(3) { assertTrue(session.deleteBackward()) }
-        assertTrue(session.undoDeletion())
         val choice = session.candidateOptions().last().conversionChoice!!
-        assertTrue(choice.request.revision != engineRequest.revision)
-
         assertTrue(session.selectConversionCandidate(choice))
-
-        assertEquals("感じ", connection.text)
-        assertEquals(listOf(engineRequest to choice.candidateId), client.committedCandidates)
-    }
-
-    /** 変換結果をUndo後にそのまま確定しても、エンジンへ元の変換要求で通知する。 */
-    @Test
-    fun restoredExplicitConversionCommitsAllWithOriginalRequest() {
-        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
-        val client = FakeConversionClient()
-        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
-        assertTrue(session.inputText("かんじ"))
-        assertTrue(session.convert())
-        val engineRequest = client.requests.single()
-        assertTrue(session.applyConversionOutcome(converted(engineRequest, "漢字")))
-
-        repeat(3) { assertTrue(session.deleteBackward()) }
-        assertTrue(session.undoDeletion())
-        repeat(3) { assertTrue(session.deleteBackward()) }
-        assertTrue(session.undoDeletion())
-
+        assertTrue(session.candidateOptions().first { it.value == "感じ" }.conversionChoice!!.request.revision != engineRequest.revision)
         assertTrue(session.commitComposition())
 
-        assertEquals("漢字", connection.text)
+        assertEquals("感じ", connection.text)
         assertEquals(listOf(engineRequest), client.committedAll)
+        assertEquals(listOf("感じ"), client.committedAllSegments.single().second.map(ConversionSegment::value))
     }
 
     /** ライブ変換のBackspace undoはLiveCoreの履歴をまとめて戻し、変換済み表記を保つ。 */
@@ -1739,9 +1855,9 @@ class EditorSessionTest {
         assertEquals("今日は天気が", connection.text)
     }
 
-    /** 明示変換では、変換結果の表示中だけ先頭文節を伸縮でき、続けて押すと応答待ちの区切りから数える。 */
+    /** 明示変換では注目文節を伸縮でき、続けて押すと応答待ちの区切りから数える。 */
     @Test
-    fun explicitResizeRequestsConversionWithHeadLength() {
+    fun explicitResizeRequestsConversionWithSegmentLength() {
         val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
         val client = FakeConversionClient()
         val session = EditorSession(connection, normalPolicy(), 0, 0, sessionEpoch = 3, conversionClient = client)
@@ -1753,9 +1869,9 @@ class EditorSessionTest {
         assertTrue(session.canResizeSegment)
 
         assertTrue(session.resizeSegment(-1))
-        assertEquals(2, client.requests.last().headLength)
+        assertEquals(listOf(2), client.requests.last().segmentLengths)
         assertTrue(session.resizeSegment(-1))
-        assertEquals(1, client.requests.last().headLength)
+        assertEquals(listOf(1), client.requests.last().segmentLengths)
         assertFalse(session.resizeSegment(-1))
         assertFalse(session.resizeSegment(0))
 
@@ -2012,6 +2128,91 @@ class EditorSessionTest {
         text.forEach { assertTrue(session.inputRomajiText(it.toString())) }
     }
 
+    /**
+     * 明示変換の文節伸縮では、注目文節より前の区切りと伸縮後の長さを要求へ渡す。応答後も伸縮した文節を候補バーの対象に保ち、
+     * 前の文節で選んだ候補は引き継ぐ。複数文節の表示では注目文節をEditor上で強調する。
+     */
+    @Test
+    fun explicitResizeTargetsFocusedSegmentAndKeepsFocus() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val spans = mutableListOf<DisplaySpan?>()
+        val session = EditorSession(
+            connection,
+            normalPolicy(),
+            conversionClient = client,
+            compositionStyler = { text, span -> spans += span; text },
+        )
+        session.inputText("きょうはてんき")
+        session.convert()
+        val first = client.requests.single()
+        val head = listOf(ConversionCandidate(0, "今日は", "きょうは"), ConversionCandidate(1, "京は", "きょうは"))
+        val tail = listOf(ConversionCandidate(1, "天気", "てんき"))
+        val result = ConversionResult(
+            first,
+            listOf(
+                ConversionSegment("きょうは", "今日は", candidates = head),
+                ConversionSegment("てんき", "天気", candidates = tail),
+            ),
+            head,
+        )
+        assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(result)))
+        assertEquals(0 to 3, spans.last()!!.start to spans.last()!!.end)
+        assertTrue(session.convert())
+        assertEquals("京は天気", connection.text)
+        assertTrue(session.moveConversionFocus(1))
+        assertEquals(2 to 4, spans.last()!!.start to spans.last()!!.end)
+
+        assertTrue(session.resizeSegment(-1))
+        val resized = client.requests.last()
+        assertEquals(listOf(4, 2), resized.segmentLengths)
+        assertEquals(1, resized.focusedSegmentIndex)
+        assertTrue(
+            session.applyConversionOutcome(
+                ConversionOutcome.Converted(
+                    ConversionResult(
+                        resized,
+                        listOf(
+                            ConversionSegment("きょうは", "今日は", candidates = head),
+                            ConversionSegment("てん", "天", candidates = listOf(ConversionCandidate(2, "天", "てん"))),
+                            ConversionSegment("き", "き", candidates = listOf(ConversionCandidate(3, "き", "き"))),
+                        ),
+                        head,
+                    ),
+                ),
+            ),
+        )
+        assertEquals("京は天き", connection.text)
+        assertEquals(listOf("天"), session.candidateOptions().map(CandidateOption::value))
+        assertTrue(session.candidateOptions().single().selected)
+        assertEquals(2 to 3, spans.last()!!.start to spans.last()!!.end)
+
+        assertTrue(session.commitComposition())
+        assertEquals(listOf("京は", "天", "き"), client.committedAllSegments.single().second.map(ConversionSegment::value))
+        assertEquals(listOf(true, false, false), client.committedAllSegments.single().second.map(ConversionSegment::chosen))
+    }
+
+    /** 一文節だけの明示変換は、文節の区別が要らないため強調しない。 */
+    @Test
+    fun singleSegmentExplicitConversionIsNotHighlighted() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val spans = mutableListOf<DisplaySpan?>()
+        val session = EditorSession(
+            connection,
+            normalPolicy(),
+            conversionClient = client,
+            compositionStyler = { text, span -> spans += span; text },
+        )
+        session.inputText("かんじ")
+        session.convert()
+        assertTrue(session.applyConversionOutcome(converted(client.requests.single(), "漢字", "感じ")))
+        assertTrue(session.convert())
+
+        assertEquals("感じ", connection.text)
+        assertTrue(spans.isEmpty())
+    }
+
     /** ライブ変換の編集セッションを作る。変換要求はclientへ記録され、テストが結果を返す。 */
     private fun liveSession(
         connection: EditorConnectionPort,
@@ -2076,8 +2277,8 @@ private enum class CommitNotificationTiming {
 /** 変換要求と学習通知を記録するだけの、常に利用可能な偽の変換窓口。 */
 private class FakeConversionClient : ConversionClient {
     val requests = mutableListOf<ConversionRequest>()
-    val committedCandidates = mutableListOf<Pair<ConversionRequest, Int>>()
     val committedAll = mutableListOf<ConversionRequest>()
+    val committedAllSegments = mutableListOf<Pair<ConversionRequest, List<ConversionSegment>>>()
 
     override val isAvailable: Boolean = true
 
@@ -2085,12 +2286,9 @@ private class FakeConversionClient : ConversionClient {
         requests += request
     }
 
-    override fun commitCandidate(request: ConversionRequest, candidateId: Int) {
-        committedCandidates += request to candidateId
-    }
-
-    override fun commitAll(request: ConversionRequest) {
+    override fun commitAll(request: ConversionRequest, segments: List<ConversionSegment>) {
         committedAll += request
+        committedAllSegments += request to segments
     }
 }
 

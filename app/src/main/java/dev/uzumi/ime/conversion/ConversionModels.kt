@@ -11,9 +11,14 @@ data class ConversionRequest(
     val reading: String,
     // 学習・履歴の利用を止めるべき欄か。trueならエンジンへ変換を送る前にincognitoを指定する。
     val incognito: Boolean,
-    // 先頭文節の読みの書記素数。ユーザーが文節を伸縮したときだけ指定し、nullならエンジンの区切りのまま変換する。
-    val headLength: Int? = null,
-)
+    // 先頭から注目文節までの各文節の読みの書記素数。最後の値が伸縮後の注目文節の長さ。
+    // ユーザーが文節を伸縮したときだけ指定し、nullならエンジンの区切りのまま変換する。
+    val segmentLengths: List<Int>? = null,
+) {
+    /** 伸縮した注目文節の位置。応答を表示するとき、候補バーの対象をこの文節に保つ。 */
+    val focusedSegmentIndex: Int
+        get() = segmentLengths?.lastIndex ?: 0
+}
 
 /** 入力途中または入力後の予測要求。世代と読み、ゼロクエリ時の文脈を応答適用前に照合する。 */
 data class PredictionRequest(
@@ -34,18 +39,27 @@ data class PredictionCandidate(val id: Int, val value: String, val reading: Stri
 /** 要求の世代に結び付いた予測候補。 */
 data class PredictionResult(val request: PredictionRequest, val candidates: List<PredictionCandidate>)
 
-/** 変換結果の一文節。readingはその文節が占める読み、valueは現在の第一候補の表記。 */
+/** 変換結果の一文節。readingはその文節が占める読み、valueは表示表記、candidatesはその文節だけの候補。 */
 data class ConversionSegment(
     val reading: String,
     val value: String,
     // 表記がユーザー辞書の登録語か。エンジンの変換結果ではないため、確定してもエンジンへ学習させない。
     // エンジンの顔文字・絵文字を別の値へ差し替えた文節も、エンジンの選択と表記が違うためtrueにする。
     val fromUserDictionary: Boolean = false,
-)
+    // この文節の読みだけを置き換える候補。候補バーで注目したときに並べる。
+    val candidates: List<ConversionCandidate> = emptyList(),
+    // ユーザーが候補を選んだ文節か。選んだ文節だけを確定時にIME側の学習へ記録する。
+    val chosen: Boolean = false,
+    // IME側の学習語だけから作った候補を表示しているなら、その学習語の読み。エンジンはこの表記を知らない。
+    val learnedReading: String? = null,
+) {
+    /** 表示中の表記がエンジンの候補か。falseの文節を含む確定は、エンジンへ区切りと表記を学習させない。 */
+    val engineCandidate: Boolean
+        get() = !fromUserDictionary && learnedReading == null
+}
 
 /**
- * 先頭文節の候補。idはエンジン内部の候補識別子で、確定時の学習通知にだけ使う。
- * readingはこの候補を選んだときに確定される読みで、複数の文節をまとめる候補では先頭文節より長い。
+ * 一文節の候補。idは候補欄の選択を識別し、readingはその候補が置き換える文節の読み。
  */
 data class ConversionCandidate(
     val id: Int,
@@ -55,7 +69,12 @@ data class ConversionCandidate(
     val fromUserDictionary: Boolean = false,
     // IME側の学習語だけから作った候補なら、その学習語の読み。エンジンの候補ではないため、確定時はエンジンへ送らない。
     val learnedReading: String? = null,
-)
+) {
+    companion object {
+        /** エンジンの候補一覧に無い、表示中の表記そのものを候補にするときのID。エンジン・登録語・学習語のIDと重ならない。 */
+        const val DISPLAYED_VALUE_ID = Int.MAX_VALUE
+    }
+}
 
 /**
  * ライブ変換でエンジンが返す一文節。readingは文節の読み、valueは第一候補、
@@ -77,7 +96,10 @@ data class LearnedSegment(
     val chosen: Boolean = false,
 )
 
-/** エンジンが返した文節と先頭文節の候補。要求の世代とは独立した生の結果。 */
+/**
+ * エンジンが返した文節と先頭文節の候補。要求の世代とは独立した生の結果。
+ * 各文節の候補はConversionSegment.candidatesに入り、headCandidatesは先頭文節の候補と同じ並びを持つ。
+ */
 data class EngineConversion(
     val segments: List<ConversionSegment>,
     val headCandidates: List<ConversionCandidate>,
@@ -92,15 +114,19 @@ data class ConversionResult(
     val headCandidates: List<ConversionCandidate>,
 ) {
     /**
-     * 文節の読みを連結したものが要求した読み全体と一致し、候補が一つ以上あり、
-     * 各候補が確定する読みが要求した読みの空でない接頭辞であるかを返す。
+     * 文節の読みを連結したものが要求した読み全体と一致し、各候補がその文節だけを置き換えるかを返す。
      */
     val isConsistent: Boolean
         get() = segments.isNotEmpty() &&
             headCandidates.isNotEmpty() &&
             segments.all { it.reading.isNotEmpty() && it.value.isNotEmpty() } &&
             segments.joinToString(separator = "") { it.reading } == request.reading &&
-            headCandidates.all { it.reading.isNotEmpty() && request.reading.startsWith(it.reading) }
+            headCandidates.all { it.reading.isNotEmpty() && it.reading == segments.first().reading } &&
+            segments.all { segment ->
+                segment.candidates.isEmpty() || segment.candidates.all { candidate ->
+                    candidate.reading == segment.reading && candidate.value.isNotEmpty()
+                }
+            }
 
     /** 全文節の第一候補を連結した、compositionへ表示する文字列。 */
     val display: String

@@ -111,7 +111,7 @@ class ConversionWorkerTest {
         fixture.engine.calls.clear()
         fixture.worker.commitPrediction(prediction, candidateId = 14)
         fixture.executor.runAll()
-        assertEquals(listOf("setIncognito(false)", "commitCandidate(2,14)"), fixture.engine.calls)
+        assertEquals(listOf("setIncognito(false)", "commitPrediction(2,14)"), fixture.engine.calls)
         assertEquals(listOf("助かります"), learning.exactMatches("たすかります").map { it.surface })
     }
 
@@ -129,7 +129,7 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
 
         assertTrue(fixture.engine.calls.indexOf("setIncognito(true)") < fixture.engine.calls.indexOf("suggest(1,ひみつ)"))
-        assertFalse(fixture.engine.calls.any { it.startsWith("commitCandidate") })
+        assertFalse(fixture.engine.calls.any { it.startsWith("commitPrediction") })
     }
 
     /** incognitoの指定に失敗した予測要求は、本文を送らず空候補として返す。 */
@@ -202,14 +202,97 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
         fixture.engine.calls.clear()
 
-        fixture.worker.commitCandidate(first, 7)
-        fixture.worker.commitCandidate(second.copy(incognito = true), 7)
-        fixture.worker.commitCandidate(second, 7)
-        fixture.worker.commitAll(second)
+        val segments = listOf(ConversionSegment("かんじ", "漢字"))
+        fixture.worker.commitAll(first, segments)
+        fixture.worker.commitAll(second.copy(incognito = true), segments)
+        fixture.worker.commitAll(second, segments)
+        fixture.worker.commitAll(second, segments)
         fixture.executor.runAll()
 
-        assertEquals(listOf("commitCandidate(1,7)"), fixture.engine.calls)
+        assertEquals(listOf("commitAll(1)"), fixture.engine.calls)
     }
+
+    /** 候補選択後の確定は元要求を照合し、更新後の全文節表記を再現してから学習させる。 */
+    @Test
+    fun selectedExplicitSegmentsCommitUsingOriginalConversionRequest() {
+        val fixture = Fixture()
+        fixture.startReady()
+        val request = request(reading = "かんじ")
+        fixture.worker.requestConversion(request)
+        fixture.executor.runAll()
+        fixture.engine.calls.clear()
+
+        fixture.worker.commitAll(
+            request,
+            listOf(ConversionSegment("かんじ", "感じ", chosen = true)),
+        )
+        fixture.executor.runAll()
+
+        assertEquals(listOf("learnSegments(1,かんじ=感じ)"), fixture.engine.calls)
+    }
+
+    /**
+     * 複数文節の明示変換では、各文節の候補をその文節の読みだけで学習語・登録語と統合する。
+     * 読みを延ばす予測はその文節を置き換えられないため、途中の文節には出さない。
+     */
+    @Test
+    fun explicitConversionMergesCandidatesPerSegment() {
+        val learning = learningStore().apply {
+            record("てんき", "転機")
+            record("きょうはく", "脅迫")
+        }
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.explicitSegmentsFor = { twoSegments() }
+
+        fixture.worker.requestConversion(request(reading = "きょうはてんき"))
+        fixture.executor.runAll()
+
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        assertTrue(result.isConsistent)
+        assertEquals("今日は天気", result.display)
+        assertEquals(listOf("今日は", "京は"), result.segments[0].candidates.map { it.value })
+        assertEquals(listOf("転機", "天気"), result.segments[1].candidates.map { it.value })
+        assertEquals(result.segments[0].candidates, result.headCandidates)
+    }
+
+    /**
+     * 読み全体に一致する登録語があれば、エンジンが複数文節に分けても一文節にまとめて登録語を表示し、
+     * エンジンの表記の連結も候補に残す。利用者が区切りを伸縮した要求ではまとめない。
+     */
+    @Test
+    fun explicitConversionShowsWholeReadingUserWordAsOneSegment() {
+        val fixture = Fixture(dictionary = FakeLookup("きょうはてんき" to "今日晴天"))
+        fixture.startReady()
+        fixture.engine.explicitSegmentsFor = { twoSegments() }
+
+        fixture.worker.requestConversion(request(reading = "きょうはてんき"))
+        fixture.executor.runAll()
+        fixture.worker.requestConversion(request(revision = 2, reading = "きょうはてんき").copy(segmentLengths = listOf(4)))
+        fixture.executor.runAll()
+
+        val whole = (fixture.outcomes[0] as ConversionOutcome.Converted).result
+        assertEquals(listOf("きょうはてんき"), whole.segments.map { it.reading })
+        assertEquals("今日晴天", whole.display)
+        assertTrue(whole.segments.single().fromUserDictionary)
+        assertEquals(listOf("今日晴天", "今日は天気"), whole.headCandidates.map { it.value })
+        val resized = (fixture.outcomes[1] as ConversionOutcome.Converted).result
+        assertEquals(listOf("きょうは", "てんき"), resized.segments.map { it.reading })
+    }
+
+    /** 文節ごとの候補を持つ「きょうは|てんき」の二文節。 */
+    private fun twoSegments(): List<ConversionSegment> = listOf(
+        ConversionSegment(
+            "きょうは",
+            "今日は",
+            candidates = listOf(ConversionCandidate(0, "今日は", "きょうは"), ConversionCandidate(1, "京は", "きょうは")),
+        ),
+        ConversionSegment(
+            "てんき",
+            "天気",
+            candidates = listOf(ConversionCandidate(0, "天気", "てんき"), ConversionCandidate(1, "転機", "てんき")),
+        ),
+    )
 
     /** data versionが正常でも既知の変換例に漢字が無ければ、辞書なしとして扱い変換を送らない。 */
     @Test
@@ -345,17 +428,17 @@ class ConversionWorkerTest {
         assertEquals(ResultSegment("さんじに", "三時に", listOf("三時に", "3時に"), candidatesComplete = true), fixed)
     }
 
-    /** 明示変換の文節の伸縮は、先頭文節の書記素数をエンジンへ渡して変換し直す。 */
+    /** 明示変換の文節の伸縮は、先頭から注目文節までの各文節の書記素数をエンジンへ渡して変換し直す。 */
     @Test
-    fun explicitConversionPassesHeadLength() {
+    fun explicitConversionPassesSegmentLengths() {
         val fixture = Fixture()
         fixture.startReady()
         fixture.engine.calls.clear()
 
-        fixture.worker.requestConversion(request(reading = "かんじ").copy(headLength = 2))
+        fixture.worker.requestConversion(request(reading = "かんじ").copy(segmentLengths = listOf(2)))
         fixture.executor.runAll()
 
-        assertEquals(listOf("convert(1,かんじ,2)"), fixture.engine.calls.filter { it.startsWith("convert") })
+        assertEquals(listOf("convert(1,かんじ,[2])"), fixture.engine.calls.filter { it.startsWith("convert") })
     }
 
     /** ASCIIだけの文節と、終了した編集セッションの要求はエンジンへ送らない。 */
@@ -527,9 +610,9 @@ class ConversionWorkerTest {
         assertEquals("かんじる", prediction.learnedReading)
 
         fixture.engine.calls.clear()
-        fixture.worker.commitCandidate(conversion, prediction.id)
+        fixture.worker.commitAll(conversion, chooseSegment(result, prediction))
         fixture.executor.runAll()
-        assertFalse(fixture.engine.calls.any { it.startsWith("commitCandidate") })
+        assertTrue(fixture.engine.calls.isEmpty())
         assertEquals(2, learning.exactMatches("かんじる").single().useCount)
     }
 
@@ -544,10 +627,11 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
         fixture.engine.calls.clear()
 
-        fixture.worker.commitCandidate(conversion, 1)
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        fixture.worker.commitAll(conversion, chooseSegment(result, result.headCandidates.first { it.id == 1 }))
         fixture.executor.runAll()
 
-        assertEquals(listOf("commitCandidate(1,1)"), fixture.engine.calls)
+        assertEquals(listOf("learnSegments(1,かんじ=感じ)"), fixture.engine.calls)
         assertEquals(listOf("感じ"), learning.exactMatches("かんじ").map { it.surface })
     }
 
@@ -561,10 +645,10 @@ class ConversionWorkerTest {
 
         fixture.worker.requestConversion(conversion)
         fixture.executor.runAll()
-        fixture.worker.commitCandidate(conversion, 1)
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        fixture.worker.commitAll(conversion, chooseSegment(result, result.headCandidates.first { it.id == 1 }))
         fixture.executor.runAll()
 
-        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
         assertEquals(listOf("漢字", "感じ"), result.headCandidates.map { it.value })
         assertNull(learning.exactMatches("かんじ").firstOrNull { it.surface == "感じ" })
     }
@@ -883,7 +967,7 @@ class ConversionWorkerTest {
             // エンジンの第一候補（絵文字）から表示を差し替えたため、全文確定をエンジンへ学習させない印が付く。
             assertTrue(result.segments.single().fromUserDictionary)
             if (value != null) {
-                fixture.worker.commitCandidate(request, result.headCandidates.first { it.value == value }.id)
+                fixture.worker.commitAll(request, chooseSegment(result, result.headCandidates.first { it.value == value }))
                 fixture.executor.runAll()
             }
             return result.headCandidates
@@ -1106,6 +1190,17 @@ class ConversionWorkerTest {
         incognito: Boolean = false,
     ) = ConversionRequest(epoch, revision, reading, incognito)
 
+    /** 一文節の変換結果で候補を選んだときに編集セッションが確定へ渡す文節列を作る。 */
+    private fun chooseSegment(result: ConversionResult, candidate: ConversionCandidate): List<ConversionSegment> =
+        listOf(
+            result.segments.single().copy(
+                value = candidate.value,
+                fromUserDictionary = candidate.fromUserDictionary,
+                chosen = true,
+                learnedReading = candidate.learnedReading,
+            ),
+        )
+
     /** テストごとのworker、偽エンジン、手動executorの組。 */
     private class Fixture(dictionary: FakeLookup? = null, learning: LearningStore? = null) {
         val engine = FakeConversionEngine()
@@ -1217,8 +1312,14 @@ private class FakeConversionEngine : ConversionEngine {
         return incognitoAccepted
     }
 
-    override fun convert(sessionId: Long, reading: String, headLength: Int?): EngineConversion {
-        calls += if (headLength == null) "convert($sessionId,$reading)" else "convert($sessionId,$reading,$headLength)"
+    // 明示変換で複数文節を返す場合の文節。nullなら読み全体（またはsegmentReadingOverride）を一文節として返す。
+    var explicitSegmentsFor: (String) -> List<ConversionSegment>? = { null }
+
+    override fun convert(sessionId: Long, reading: String, segmentLengths: List<Int>?): EngineConversion {
+        calls += if (segmentLengths == null) "convert($sessionId,$reading)" else "convert($sessionId,$reading,$segmentLengths)"
+        explicitSegmentsFor(reading)?.let { segments ->
+            return EngineConversion(segments = segments, headCandidates = segments.first().candidates)
+        }
         val values = convertValuesFor(reading)
         val segmentReading = segmentReadingOverride ?: reading
         return EngineConversion(
@@ -1239,8 +1340,8 @@ private class FakeConversionEngine : ConversionEngine {
         return nextWordPredictions
     }
 
-    override fun commitCandidate(sessionId: Long, candidateId: Int): Boolean {
-        calls += "commitCandidate($sessionId,$candidateId)"
+    override fun commitPrediction(sessionId: Long, candidateId: Int): Boolean {
+        calls += "commitPrediction($sessionId,$candidateId)"
         return true
     }
 

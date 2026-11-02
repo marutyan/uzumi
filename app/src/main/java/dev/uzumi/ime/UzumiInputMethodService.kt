@@ -591,8 +591,10 @@ class UzumiInputMethodService : InputMethodService() {
             is KeyboardAction.MoveCursor -> when {
                 // 12キーの連続タップの途中の→は、次のタップを新しい文字にする区切りとして使い、カーソルは動かさない。
                 action.delta > 0 && current.endKanaToggle(SystemClock.uptimeMillis()) -> Unit
-                // ライブ変換の入力中は、←→で候補バーの対象の文節を前後へ移す（Simejiの変換中の←→に当たる操作）
+                // ライブ変換の入力中は、←→で候補バーの対象の文節を前後へ移す（Simejiの変換中の←→に当たる操作）。
                 current.isLiveMode && current.hasComposition -> current.moveLiveFocus(action.delta)
+                // 明示変換の結果の表示中も、←→で注目文節を移す（Gboardの変換中の←→に当たる操作）。
+                current.hasExplicitConversion -> current.moveConversionFocus(action.delta)
                 else -> current.moveCursor(action.delta)
             }
             // Space・変換キーの横ドラッグは、ライブ変換中も文節焦点ではなく実カーソルを動かす。
@@ -1141,7 +1143,7 @@ class UzumiInputMethodService : InputMethodService() {
         return current.candidateOptions().map { option ->
             val choice = option.conversionChoice
             val label = if (choice != null) option.value else getString(R.string.candidate_button_label, option.value, option.label)
-            CandidateEntry(label, selected = choice != null && option.value == snapshot.display) {
+            CandidateEntry(label, selected = choice != null && option.selected) {
                 if (choice != null) {
                     current.selectConversionCandidate(choice)
                     scheduleConversionTimeout(current)

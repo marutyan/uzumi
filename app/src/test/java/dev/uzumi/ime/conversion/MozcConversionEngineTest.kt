@@ -96,6 +96,19 @@ class MozcConversionEngineTest {
         assertFalse(requests.last().mixedConversion)
     }
 
+    /** 予測の選択はSUBMIT_CANDIDATEに予測候補のIDを付けて送り、Mozcの履歴へ学習させる。 */
+    @Test
+    fun commitPredictionSendsCandidateId() {
+        val native = FakeMozcNative()
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        assertTrue(engine.commitPrediction(sessionId = 5, candidateId = 3))
+
+        val command = native.inputs.single().command
+        assertEquals(SessionCommand.CommandType.SUBMIT_CANDIDATE, command.type)
+        assertEquals(3, command.id)
+    }
+
     /** libmozc.soが無いビルドでは、辞書を探さずにUnavailableを返す。 */
     @Test
     fun missingNativeLibraryIsUnavailable() {
@@ -130,12 +143,13 @@ class MozcConversionEngineTest {
     }
 
     /**
-     * 変換は読みの各文字をAS_ISで送りSPACEで変換する。各候補を一時的に選んで確定する読みを求め、
-     * 最後に元の候補へ選択を戻す。新しいsessionでは学習を消さないようREVERTを送らない。
+     * 変換は読みの各文字をAS_ISで送りSPACEで変換する。focusを右へ動かして各文節の候補を集め、候補は選ばない。
+     * 新しいsessionでは学習を消さないようREVERTを送らない。
      */
     @Test
     fun convertRebuildsCompositionFromReading() {
-        val native = FakeMozcNative().apply { respond = ::scriptedMozc }
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
         val engine = MozcConversionEngine(native, { File("profile") }, { null })
 
         val conversion = engine.convert(sessionId = 5, reading = "きょうはいい")!!
@@ -146,78 +160,41 @@ class MozcConversionEngineTest {
         assertEquals(listOf("き", "ょ", "う", "は", "い", "い"), characters.map { it.key.keyString })
         assertTrue(characters.all { it.key.inputStyle == KeyEvent.InputStyle.AS_IS })
         assertTrue(inputs.any { it.key.specialKey == KeyEvent.SpecialKey.SPACE })
-        val last = inputs.last().command
-        assertEquals(SessionCommand.CommandType.SELECT_CANDIDATE, last.type)
-        assertEquals(0, last.id)
+        assertEquals(1, inputs.count { it.key.specialKey == KeyEvent.SpecialKey.RIGHT && it.key.modifierKeysCount == 0 })
+        assertFalse(inputs.any { it.command.type == SessionCommand.CommandType.SELECT_CANDIDATE })
         assertTrue(inputs.all { it.id == 5L })
-        assertEquals(
-            listOf(ConversionSegment("きょうは", "今日は"), ConversionSegment("いい", "いい")),
-            conversion.segments,
-        )
+        assertEquals(listOf("きょうは" to "今日は", "いい" to "いい"), conversion.segments.map { it.reading to it.value })
         assertEquals(
             listOf(
                 ConversionCandidate(0, "今日は", "きょうは"),
-                ConversionCandidate(3, "京は", "きょうは"),
-                ConversionCandidate(8, "今日はいい", "きょうはいい"),
+                ConversionCandidate(1, "京は", "きょうは"),
             ),
             conversion.headCandidates,
         )
+        assertEquals(conversion.headCandidates, conversion.segments[0].candidates)
+        assertEquals(
+            listOf(ConversionCandidate(0, "いい", "いい"), ConversionCandidate(1, "良い", "いい")),
+            conversion.segments[1].candidates,
+        )
+        assertTrue(mozc.submitted.isEmpty())
     }
 
     /** REVERTはpreeditが残るときだけ送り、確定で待機状態へ戻った後の次の変換では送らない。 */
     @Test
     fun revertIsSentOnlyWhilePreeditRemains() {
-        val native = FakeMozcNative().apply { respond = ::scriptedMozc }
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
         val engine = MozcConversionEngine(native, { File("profile") }, { null })
-        engine.convert(sessionId = 5, reading = "きょうはいい")
+        assertTrue(engine.convert(sessionId = 5, reading = "きょうはいい") != null)
 
         native.inputs.clear()
-        engine.convert(sessionId = 5, reading = "きょうはいい")
+        assertTrue(engine.convert(sessionId = 5, reading = "きょうはいい") != null)
         assertEquals(SessionCommand.CommandType.REVERT, native.inputs.first().command.type)
 
         assertTrue(engine.commitAll(sessionId = 5))
         native.inputs.clear()
-        engine.convert(sessionId = 5, reading = "きょうはいい")
+        assertTrue(engine.convert(sessionId = 5, reading = "きょうはいい") != null)
         assertFalse(native.inputs.any { it.command.type == SessionCommand.CommandType.REVERT })
-
-        assertTrue(engine.commitCandidate(sessionId = 5, candidateId = 3))
-        native.inputs.clear()
-        engine.convert(sessionId = 5, reading = "きょうはいい")
-        assertEquals(SessionCommand.CommandType.REVERT, native.inputs.first().command.type)
-    }
-
-    /**
-     * 「きょうは|いい」を変換する最小のMozcの振る舞い。候補8は二つの文節をまとめる。
-     * SUBMITは全文節を確定してpreeditを消し、SUBMIT_CANDIDATEは先頭文節だけを確定して残りを残す。
-     */
-    private fun scriptedMozc(input: Input): Output {
-        val consumed = Output.newBuilder().setConsumed(true)
-        return when {
-            input.type == Input.CommandType.SEND_KEY && input.key.hasSpecialKey() -> conversionOutput()
-            input.type == Input.CommandType.SEND_KEY -> consumed.setPreedit(preedit("き" to "き")).build()
-            input.command.type == SessionCommand.CommandType.SELECT_CANDIDATE && input.command.id == 8 ->
-                consumed.setPreedit(preedit("きょうはいい" to "今日はいい")).build()
-            input.command.type == SessionCommand.CommandType.SELECT_CANDIDATE ->
-                consumed.setPreedit(preedit("きょうは" to "京は", "いい" to "いい")).build()
-            input.command.type == SessionCommand.CommandType.SUBMIT_CANDIDATE ->
-                consumed.setPreedit(preedit("いい" to "いい")).build()
-            else -> consumed.build()
-        }
-    }
-
-    /** 読みと表記の組からpreeditを作る。 */
-    private fun preedit(vararg segments: Pair<String, String>): Preedit {
-        val builder = Preedit.newBuilder().setCursor(0)
-        segments.forEach { (key, value) ->
-            builder.addSegment(
-                Preedit.Segment.newBuilder()
-                    .setAnnotation(Preedit.Segment.Annotation.UNDERLINE)
-                    .setKey(key)
-                    .setValue(value)
-                    .setValueLength(value.length),
-            )
-        }
-        return builder.build()
     }
 
     /** 候補ID・読み・表記を含むMozc応答を作り、JNIなしで候補抽出を確かめる。 */
@@ -264,35 +241,6 @@ class MozcConversionEngineTest {
         )
     }
 
-    /** 先頭文節の確定はSUBMIT_CANDIDATEに候補IDを付けて送る。 */
-    @Test
-    fun commitCandidateSendsCandidateId() {
-        val native = FakeMozcNative()
-        val engine = MozcConversionEngine(native, { File("profile") }, { null })
-
-        assertTrue(engine.commitCandidate(sessionId = 5, candidateId = 3))
-
-        val command = native.inputs.single().command
-        assertEquals(SessionCommand.CommandType.SUBMIT_CANDIDATE, command.type)
-        assertEquals(3, command.id)
-    }
-
-    /** SPACEによる変換直後の応答。候補4は候補0と同じ表記・同じ読みで、重複として除かれる。 */
-    private fun conversionOutput(): Output {
-        return Output.newBuilder()
-            .setConsumed(true)
-            .setPreedit(preedit("きょうは" to "今日は", "いい" to "いい"))
-            .setAllCandidateWords(
-                CandidateList.newBuilder()
-                    .setFocusedIndex(0)
-                    .addCandidates(CandidateWord.newBuilder().setId(0).setValue("今日は"))
-                    .addCandidates(CandidateWord.newBuilder().setId(3).setValue("京は"))
-                    .addCandidates(CandidateWord.newBuilder().setId(4).setValue("今日は"))
-                    .addCandidates(CandidateWord.newBuilder().setId(8).setValue("今日はいい")),
-            )
-            .build()
-    }
-
     /**
      * ライブ変換の変換は予測を求めずに読みを積んでSPACEで変換し、focusを右へ動かして各文節の候補を読む。
      * 読みの異なる予測候補と複数文節をまとめる候補は除き、確定しない。
@@ -335,8 +283,8 @@ class MozcConversionEngineTest {
     }
 
     /**
-     * 注目した文節の候補は、明示変換で同じ読みを先頭文節にしたときの候補と同じになる。
-     * どちらも各候補を一時的に選んで読みを確かめ、複数の文節をまとめる候補だけを除く。確定はしない。
+     * 明示変換の各文節の候補は、ライブ変換で全文節を変換したときの同じ文節の候補と同じ規則（読みを変えない候補だけ）で集める。
+     * 注目した文節の取り直しは各候補を一時的に選んで読みを確かめ、複数の文節をまとめる候補だけを除く。確定はしない。
      */
     @Test
     fun convertSegmentCollectsSameCandidatesAsExplicitConversion() {
@@ -344,13 +292,12 @@ class MozcConversionEngineTest {
         val native = FakeMozcNative().apply { respond = mozc::respond }
         val engine = MozcConversionEngine(native, { File("profile") }, { null })
 
-        for ((reading, following) in listOf("こうえんに" to "", "きょうは" to "いい")) {
-            val explicit = engine.convert(sessionId = 5, reading = reading + following)!!
-                .headCandidates.filter { it.reading == reading }.map { it.value }
-            val live = engine.convertSegment(sessionId = 5, preceding = "", reading = reading, following = following)!!
+        for (reading in listOf("こうえんに", "きょうはいい")) {
+            val explicit = engine.convert(sessionId = 5, reading = reading)!!.segments
+                .map { segment -> segment.candidates.map { it.value } }
+            val live = engine.convertSegments(sessionId = 5, reading = reading)!!.map { it.candidates }
 
-            assertEquals(explicit, live.candidates)
-            assertEquals(explicit.first(), live.value)
+            assertEquals(live, explicit)
         }
         val lecture = engine.convertSegment(sessionId = 5, preceding = "", reading = "こうえんに", following = "")!!
         assertEquals(listOf("公園に", "項園に", "講演に", "予測"), lecture.candidates)
@@ -384,17 +331,17 @@ class MozcConversionEngineTest {
      * 明示変換で先頭文節の書記素数を指定すると、Shift+左・右で先頭文節の幅を合わせてから候補を集める。
      */
     @Test
-    fun convertWithHeadLengthResizesHeadSegment() {
+    fun convertWithSegmentLengthsResizesHeadSegment() {
         val mozc = StatefulMozc()
         val native = FakeMozcNative().apply { respond = mozc::respond }
         val engine = MozcConversionEngine(native, { File("profile") }, { null })
 
-        val shrunk = engine.convert(sessionId = 5, reading = "きょうはいい", headLength = 3)!!
-        assertEquals(listOf(ConversionSegment("きょう", "今日"), ConversionSegment("はいい", "はいい")), shrunk.segments)
-        assertEquals(listOf("今日", "京", "予測"), shrunk.headCandidates.filter { it.reading == "きょう" }.map { it.value })
+        val shrunk = engine.convert(sessionId = 5, reading = "きょうはいい", segmentLengths = listOf(3))!!
+        assertEquals(listOf("きょう" to "今日", "はいい" to "はいい"), shrunk.segments.map { it.reading to it.value })
+        assertEquals(listOf("今日", "京"), shrunk.headCandidates.map { it.value })
 
         native.inputs.clear()
-        val expanded = engine.convert(sessionId = 5, reading = "きょうはいい", headLength = 5)!!
+        val expanded = engine.convert(sessionId = 5, reading = "きょうはいい", segmentLengths = listOf(5))!!
         assertEquals(listOf("きょうはい", "い"), expanded.segments.map { it.reading })
         assertEquals(
             1,
@@ -402,6 +349,31 @@ class MozcConversionEngineTest {
                 it.key.specialKey == KeyEvent.SpecialKey.RIGHT && KeyEvent.ModifierKey.SHIFT in it.key.modifierKeysList
             },
         )
+    }
+
+    /**
+     * 先頭以外の文節を伸縮するときは、前の文節から順に幅を合わせて利用者が決めた区切りを保ち、
+     * focusを先頭へ戻してから全文節の候補を集め直す。
+     */
+    @Test
+    fun convertWithSegmentLengthsKeepsPrecedingBoundaries() {
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        val resized = engine.convert(sessionId = 5, reading = "きょうはいい", segmentLengths = listOf(3, 2))!!
+
+        assertEquals(listOf("きょう", "はい", "い"), resized.segments.map(ConversionSegment::reading))
+        assertEquals(
+            2,
+            native.inputs.count {
+                it.key.specialKey == KeyEvent.SpecialKey.LEFT && KeyEvent.ModifierKey.SHIFT in it.key.modifierKeysList
+            },
+        )
+        assertEquals(1, native.inputs.count { it.key.specialKey == KeyEvent.SpecialKey.LEFT && it.key.modifierKeysCount == 0 })
+        assertEquals(listOf("今日", "京"), resized.segments[0].candidates.map(ConversionCandidate::value))
+        assertTrue(resized.segments.all { segment -> segment.candidates.all { it.reading == segment.reading } })
+        assertTrue(mozc.submitted.isEmpty())
     }
 
     /** 学習は区切りを文節の幅の伸縮で合わせ、表記を候補から選んでから全体を確定する。 */
@@ -533,6 +505,7 @@ private class StatefulMozc {
             }
 
             key.specialKey == KeyEvent.SpecialKey.RIGHT && !shift -> focus = (focus + 1) % keys.size
+            key.specialKey == KeyEvent.SpecialKey.LEFT && !shift -> focus = (focus - 1).coerceAtLeast(0)
             key.specialKey == KeyEvent.SpecialKey.RIGHT && shift && focus + 1 < keys.size -> {
                 keys[focus] = keys[focus] + keys[focus + 1].first()
                 keys[focus + 1] = keys[focus + 1].drop(1)

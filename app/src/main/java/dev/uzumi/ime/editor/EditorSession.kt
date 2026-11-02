@@ -1,9 +1,11 @@
 package dev.uzumi.ime.editor
 
+import dev.uzumi.ime.conversion.ConversionCandidate
 import dev.uzumi.ime.conversion.ConversionClient
 import dev.uzumi.ime.conversion.ConversionOutcome
 import dev.uzumi.ime.conversion.ConversionRequest
 import dev.uzumi.ime.conversion.ConversionResult
+import dev.uzumi.ime.conversion.ConversionSegment
 import dev.uzumi.ime.conversion.LiveConversionClient
 import dev.uzumi.ime.conversion.PredictionCandidate
 import dev.uzumi.ime.conversion.PredictionClient
@@ -27,6 +29,7 @@ import dev.uzumi.ime.live.LiveConversionRules
 import dev.uzumi.ime.live.LiveFieldPolicy
 import dev.uzumi.ime.live.LiveSegment
 import dev.uzumi.ime.live.LiveUpdate
+import dev.uzumi.ime.live.SegmentState
 import dev.uzumi.ime.live.ResultSegment
 import dev.uzumi.ime.live.ConversionRequest as LiveRequest
 import dev.uzumi.ime.live.ConversionResult as LiveResult
@@ -69,8 +72,10 @@ class EditorSession(
     private var pendingPrediction: PredictionRequest? = null
     private var appliedPrediction: PredictionResult? = null
     private var appliedConversion: ConversionResult? = null
-    // Undoで画面用revisionを更新しても、変換エンジンが保持する要求との一致を保つ。
+    // 候補の選択で画面用revisionを更新しても、変換エンジンが保持する要求との一致を保つ。
     private var appliedConversionCommitRequest: ConversionRequest? = null
+    // 明示変換の注目文節の位置。候補バー、変換キーによる候補の循環、文節の伸縮がこの文節を対象にする。
+    private var focusedConversionSegmentIndex = 0
     // 変換が失敗・時間超過したrevision。同じ読みでの再度の変換操作はカナ候補へ戻す。
     private var failedConversionRevision: Long? = null
     private var active = true
@@ -158,15 +163,18 @@ class EditorSession(
     val pendingConversionRequest: ConversionRequest?
         get() = pendingConversion
 
-    /** 変換結果を表示中なら変換候補、そうでなければ現在の読みから基本候補を作る。 */
+    /** 変換結果を表示中なら注目文節の変換候補、そうでなければ現在の読みから基本候補を作る。 */
     fun candidateOptions(): List<CandidateOption> {
         if (liveCore != null) return emptyList()
         currentConversion()?.let { conversion ->
-            return conversion.headCandidates.map { candidate ->
+            val segmentIndex = focusedConversionSegmentIndex
+            val segment = conversion.segments.getOrNull(segmentIndex) ?: return emptyList()
+            return segmentCandidates(conversion, segmentIndex).map { candidate ->
                 CandidateOption(
                     value = candidate.value,
                     label = "",
-                    conversionChoice = ConversionChoice(conversion.request, candidate.id),
+                    conversionChoice = ConversionChoice(conversion.request, candidate.id, segmentIndex),
+                    selected = candidate.value == segment.value,
                 )
             }
         }
@@ -287,6 +295,10 @@ class EditorSession(
 
     /** explicit/liveいずれの編集状態からも、現在のUI世代を予測要求へ渡す。 */
     private fun predictionRevision(): Long = liveCore?.revision ?: revision
+
+    /** 明示変換の結果を表示中か。キーボードの←→を、カーソル移動ではなく注目文節の移動へ割り当てるために使う。 */
+    val hasExplicitConversion: Boolean
+        get() = active && liveCore == null && currentConversion() != null
 
     /**
      * 文字入力をcompositionへ追加する。接続結果が不明なら同じ本文を再送しない。
@@ -446,10 +458,16 @@ class EditorSession(
         return liveCore?.inputCursor ?: buffer.cursorCluster
     }
 
-    /** 読み末尾または外部カーソル直前の書記素を削除する。連続した削除は一度のUndoにまとめる。 */
+    /**
+     * 読み末尾または外部カーソル直前の書記素を削除する。連続した削除は一度のUndoにまとめる。
+     * 明示変換の結果（エンジンなしで出したカタカナを含む）を表示中なら、文字は消さずに読みの表示へ戻す。
+     */
     fun deleteBackward(): Boolean {
         if (!active) return false
         kanaToggle.reset()
+        if (liveCore == null && (currentConversion() != null || buffer.display != buffer.reading)) {
+            return cancelExplicitConversion()
+        }
         val romajiPendingBefore = romajiComposer?.pendingText?.takeIf(String::isNotEmpty)
         if (romajiPendingBefore != null) romajiComposer?.deletePending()
         val previous = activeBackspaceDeletion()
@@ -486,10 +504,6 @@ class EditorSession(
         if (!buffer.isEmpty) {
             if (buffer.cursorCluster == 0 && !buffer.hasSelection) return deleteBeforeComposition()
             val snapshot = if (policy.isSensitive) null else previous?.explicitComposition ?: buffer.snapshot()
-            val conversion = if (policy.isSensitive) null else previous?.explicitConversion ?: currentConversion()
-            val conversionCommitRequest = if (policy.isSensitive) null else {
-                previous?.explicitConversionCommitRequest ?: appliedConversionCommitRequest ?: conversion?.request
-            }
             val originalStart = previous?.originalCompositionStart ?: compositionStart
             if (!buffer.deleteBackward()) {
                 romajiComposer?.restorePending(romajiPendingBefore.orEmpty())
@@ -506,8 +520,6 @@ class EditorSession(
                 rememberBackspaceDeletion(
                     previous = previous,
                     explicitComposition = snapshot,
-                    explicitConversion = conversion,
-                    explicitConversionCommitRequest = conversionCommitRequest,
                     liveUndoSteps = previous?.liveUndoSteps ?: 0,
                     originalCompositionStart = originalStart,
                     romajiPending = previous?.romajiPending ?: romajiPendingBefore,
@@ -516,6 +528,19 @@ class EditorSession(
             return true
         }
         return deleteOutsideComposition(previous)
+    }
+
+    /**
+     * 明示変換の表示を取り消して読み全体の表示へ戻す（Mozcの変換キャンセルに当たる）。文字は消さないため削除の記録は作らず、
+     * 直前の削除の記録も捨てる。続くBackspaceは読みの一字削除になり、その記録は読みだけを戻す。
+     */
+    private fun cancelExplicitConversion(): Boolean {
+        deletionUndo = null
+        buffer.setDisplay(buffer.reading)
+        markCompositionChanged()
+        if (synchronizeComposition()) return true
+        failClosed()
+        return false
     }
 
     /**
@@ -623,10 +648,6 @@ class EditorSession(
                 failClosed()
                 return false
             }
-            appliedConversion = record.explicitConversion?.copy(
-                request = record.explicitConversion.request.copy(revision = revision),
-            )
-            appliedConversionCommitRequest = record.explicitConversionCommitRequest
             romajiComposer?.restorePending(record.romajiPending.orEmpty())
             return true
         }
@@ -668,8 +689,6 @@ class EditorSession(
     private fun rememberBackspaceDeletion(
         previous: DeletionUndo?,
         explicitComposition: CompositionSnapshot?,
-        explicitConversion: ConversionResult? = previous?.explicitConversion,
-        explicitConversionCommitRequest: ConversionRequest? = previous?.explicitConversionCommitRequest,
         liveUndoSteps: Int,
         originalCompositionStart: Int?,
         removedExternal: String = previous?.removedExternal.orEmpty(),
@@ -687,8 +706,6 @@ class EditorSession(
             kind = DeletionUndoKind.BACKSPACE,
             removedExternal = removedExternal,
             explicitComposition = explicitComposition,
-            explicitConversion = explicitConversion,
-            explicitConversionCommitRequest = explicitConversionCommitRequest,
             liveUndoSteps = liveUndoSteps,
             originalCompositionStart = originalCompositionStart,
             romajiPending = romajiPending,
@@ -854,7 +871,6 @@ class EditorSession(
             rememberBackspaceDeletion(
                 previous = previous,
                 explicitComposition = previous?.explicitComposition,
-                explicitConversion = previous?.explicitConversion,
                 liveUndoSteps = previous?.liveUndoSteps ?: 0,
                 originalCompositionStart = previous?.originalCompositionStart,
                 removedExternal = removed + previous?.removedExternal.orEmpty(),
@@ -965,7 +981,7 @@ class EditorSession(
         if (!commitCompositionAs(buffer.display)) return false
         // 登録語を表示していた場合、エンジン側の変換とは表記が違うため、確定をエンジンへ学習させない。
         if (conversion?.segments?.none { it.fromUserDictionary } == true && commitRequest != null) {
-            conversionClient?.commitAll(commitRequest)
+            conversionClient?.commitAll(commitRequest, conversion.segments)
         }
         return true
     }
@@ -986,49 +1002,70 @@ class EditorSession(
     }
 
     /**
-     * 表示中の変換候補を選び、先頭文節をその候補で確定する。
-     * 残りの読みは新しいcompositionとして続けて変換を依頼する。表示元の要求が古ければ拒否する。
+     * 表示中の候補を注目文節だけへ反映する。composition全体は未確定のまま保ち、確定はEnterや次の入力で行う。
+     * 表示元の変換や注目文節が今と違う古い候補なら拒否する。
      */
     fun selectConversionCandidate(choice: ConversionChoice): Boolean {
         if (!active) return false
         abandonPendingInput()
         val conversion = currentConversion() ?: return false
-        if (conversion.request != choice.request) return false
-        val candidate = conversion.headCandidates.firstOrNull { it.id == choice.candidateId } ?: return false
-        val commitRequest = appliedConversionCommitRequest ?: conversion.request
-        // isConsistentにより、候補が確定する読みは現在の読みの接頭辞であることが保証されている。
-        // 複数の文節をまとめる候補では、その候補が覆う文節すべてが確定される。
-        val remainingReading = buffer.reading.substring(candidate.reading.length)
-        if (!commitCompositionAs(candidate.value)) return false
-        // 登録語はエンジンの候補ではないため、エンジンへ確定を通知しない。
-        if (!candidate.fromUserDictionary) conversionClient?.commitCandidate(commitRequest, candidate.id)
-        if (remainingReading.isEmpty()) return true
-        if (!inputText(remainingReading)) return false
-        return convert()
+        if (conversion.request != choice.request || choice.segmentIndex != focusedConversionSegmentIndex) return false
+        val segment = conversion.segments.getOrNull(choice.segmentIndex) ?: return false
+        val candidate = segmentCandidates(conversion, choice.segmentIndex)
+            .firstOrNull { it.id == choice.candidateId } ?: return false
+        deletionUndo = null
+        val updated = segment.copy(
+            value = candidate.value,
+            fromUserDictionary = candidate.fromUserDictionary,
+            chosen = true,
+            learnedReading = candidate.learnedReading,
+        )
+        return updateExplicitConversionSegment(conversion, choice.segmentIndex, updated)
     }
 
     /**
      * workerから届いた変換応答を、待機中の要求・revision・読みと一致する場合だけ反映する。
      * 失敗応答や不整合な結果では読みの表示を保ち、かな・カナ候補へ戻す。
+     * 文節を伸縮した応答では、伸縮した文節より前で利用者が選んだ候補を引き継ぎ、伸縮した文節を候補バーの対象に保つ。
      */
     fun applyConversionOutcome(outcome: ConversionOutcome): Boolean {
         val pending = pendingConversion ?: return false
         if (!active || outcome.request != pending) return false
         pendingConversion = null
         if (pending.revision != revision || pending.reading != buffer.reading) return false
-        val result = (outcome as? ConversionOutcome.Converted)?.result?.takeIf(ConversionResult::isConsistent)
-        if (result == null) {
+        val converted = (outcome as? ConversionOutcome.Converted)?.result?.takeIf(ConversionResult::isConsistent)
+        if (converted == null) {
             failedConversionRevision = revision
             return false
         }
+        val result = keepChosenPrecedingSegments(converted, previous = currentConversion())
+        val focus = pending.focusedSegmentIndex.coerceAtMost(result.segments.lastIndex)
         buffer.setDisplay(result.display)
-        if (!synchronizeComposition()) {
+        if (!synchronizeComposition(result, focus)) {
             failClosed()
             return false
         }
         appliedConversion = result
         appliedConversionCommitRequest = result.request
+        focusedConversionSegmentIndex = focus
         return true
+    }
+
+    /**
+     * 伸縮の応答で、伸縮した文節より前にあり読みが変わらない文節のうち、利用者が候補を選んだものを前の表示のまま残す。
+     * Mozcは伸縮した文節より前の区切りを保つため、同じ位置の文節は同じ読みになる。選んでいない文節はエンジンの表記を使う。
+     */
+    private fun keepChosenPrecedingSegments(result: ConversionResult, previous: ConversionResult?): ConversionResult {
+        if (previous == null || result.request.segmentLengths == null) return result
+        val segments = result.segments.mapIndexed { index, segment ->
+            val before = previous.segments.getOrNull(index)
+            if (index < result.request.focusedSegmentIndex && before != null && before.chosen && before.reading == segment.reading) {
+                before
+            } else {
+                segment
+            }
+        }
+        return result.copy(segments = segments)
     }
 
     /** 時間超過した要求を取り下げ、遅れて届いた応答を適用しないようにする。 */
@@ -1036,6 +1073,51 @@ class EditorSession(
         if (pendingConversion != request) return false
         pendingConversion = null
         failedConversionRevision = revision
+        return true
+    }
+
+    /**
+     * 明示変換の候補バーの対象（注目文節）を前後へ一つ移し、Editor上の強調も付け直す。
+     * 両端より外へは移らず、Editorの実カーソルも動かさない。応答待ちの伸縮は取り下げる。
+     */
+    fun moveConversionFocus(delta: Int): Boolean {
+        if (!active || delta == 0) return false
+        val conversion = currentConversion() ?: return false
+        val target = focusedConversionSegmentIndex + if (delta < 0) -1 else 1
+        if (target !in conversion.segments.indices) return false
+        pendingConversion = null
+        focusedConversionSegmentIndex = target
+        if (synchronizeComposition(conversion, target)) return true
+        failClosed()
+        return false
+    }
+
+    /**
+     * 候補を選んだ文節を変換結果へ反映し、表示を更新する。表示元の照合のためにUI用のrevisionを進めるが、
+     * 確定時にエンジンへ渡す要求は、エンジンが変換状態を持つ元の要求のまま保つ。
+     */
+    private fun updateExplicitConversionSegment(
+        conversion: ConversionResult,
+        segmentIndex: Int,
+        segment: ConversionSegment,
+    ): Boolean {
+        val commitRequest = appliedConversionCommitRequest ?: conversion.request
+        val segments = conversion.segments.toMutableList().also { it[segmentIndex] = segment }
+        val nextRevision = revision + 1
+        val updated = conversion.copy(
+            request = conversion.request.copy(revision = nextRevision),
+            segments = segments,
+        )
+        buffer.setDisplay(updated.display)
+        revision = nextRevision
+        pendingConversion = null
+        failedConversionRevision = null
+        if (!synchronizeComposition(updated, segmentIndex)) {
+            failClosed()
+            return false
+        }
+        appliedConversion = updated
+        appliedConversionCommitRequest = commitRequest
         return true
     }
 
@@ -1102,7 +1184,8 @@ class EditorSession(
     fun convert(): Boolean {
         if (!finishPendingInput()) return false
         if (liveCore != null) return selectNextLiveCandidate()
-        if (active && !buffer.isEmpty && (pendingConversion != null || currentConversion() != null)) return true
+        if (currentConversion() != null) return selectNextExplicitCandidate()
+        if (active && !buffer.isEmpty && pendingConversion != null) return true
         val client = conversionClient
         if (active && !buffer.isEmpty && client != null && client.isAvailable &&
             !policy.suppressSuggestions && failedConversionRevision != revision
@@ -1357,14 +1440,14 @@ class EditorSession(
         get() = active && if (liveCore != null) hasComposition else currentConversion() != null
 
     /**
-     * 文節の区切りを一書記素縮める（delta<0）か伸ばす（delta>0）。ライブ変換では候補バーの対象の文節、
-     * 明示変換では候補を出している先頭の文節を対象にする。伸縮できなければfalse。
+     * 文節の区切りを一書記素縮める（delta<0）か伸ばす（delta>0）。ライブ変換と明示変換の両方で、
+     * 候補バーが注目している文節を対象にする。伸縮できなければfalse。
      */
     fun resizeSegment(delta: Int): Boolean {
         if (!active || delta == 0) return false
         if (!finishPendingInput()) return false
         if (liveCore != null) return performLive { it.resizeFocusedSegment(delta) } ?: false
-        return resizeConversionHead(delta)
+        return resizeConversionSegment(delta)
     }
 
     /** 候補バーの対象を末尾入力位置のsegmentへ戻す。 */
@@ -1509,24 +1592,30 @@ class EditorSession(
     }
 
     /**
-     * 明示変換の表示中に、先頭文節の区切りを一書記素伸縮した変換をエンジンへ依頼する。
+     * 明示変換の表示中に、注目文節の区切りを一書記素伸縮した変換をエンジンへ依頼する。
      * 伸縮を続けて押した場合は、応答を待っている要求の区切りから数える。結果は通常の変換応答として届く。
      */
-    private fun resizeConversionHead(delta: Int): Boolean {
+    private fun resizeConversionSegment(delta: Int): Boolean {
         val conversion = currentConversion() ?: return false
         val client = conversionClient ?: return false
         if (!client.isAvailable || policy.suppressSuggestions) return false
-        val total = GraphemeClusters.split(buffer.reading).size
-        val current = pendingConversion?.headLength
-            ?: GraphemeClusters.split(conversion.segments.first().reading).size
+        val focus = focusedConversionSegmentIndex
+        val segment = conversion.segments.getOrNull(focus) ?: return false
+        // 注目文節より前の区切りは、表示中の変換のまま保つようエンジンへ渡す。
+        val precedingLengths = conversion.segments.take(focus).map { GraphemeClusters.split(it.reading).size }
+        val remainingLength = GraphemeClusters.split(buffer.reading).size - precedingLengths.sum()
+        val current = pendingConversion
+            ?.takeIf { it.segmentLengths != null && it.focusedSegmentIndex == focus }
+            ?.segmentLengths?.last()
+            ?: GraphemeClusters.split(segment.reading).size
         val length = current + if (delta < 0) -1 else 1
-        if (length < 1 || length > total) return false
+        if (length < 1 || length > remainingLength) return false
         val request = ConversionRequest(
             sessionEpoch = sessionEpoch,
             revision = revision,
             reading = buffer.reading,
             incognito = policy.suppressLearning,
-            headLength = length,
+            segmentLengths = precedingLengths + length,
         )
         pendingConversion = request
         client.requestConversion(request)
@@ -1544,6 +1633,27 @@ class EditorSession(
 
     /** 候補バーの対象にできるsegmentか。読点だけのsegmentは訂正の対象にしない。 */
     private fun isFocusTarget(segment: LiveSegment): Boolean = segment.reading != LiveConversionRules.SOFT_BOUNDARY
+
+    /**
+     * 明示変換の表示中に変換キーを押したとき、注目文節で表示中の次の候補を選ぶ（確定はしない）。最後の次は先頭へ戻る。
+     */
+    private fun selectNextExplicitCandidate(): Boolean {
+        val conversion = currentConversion() ?: return false
+        val index = focusedConversionSegmentIndex
+        val segment = conversion.segments.getOrNull(index) ?: return false
+        val candidates = segmentCandidates(conversion, index)
+        if (candidates.isEmpty()) return false
+        val current = candidates.indexOfFirst { it.value == segment.value }
+        val next = candidates[(current + 1) % candidates.size]
+        if (next.value == segment.value) return true
+        return selectConversionCandidate(ConversionChoice(conversion.request, next.id, index))
+    }
+
+    /** 明示変換のindex番目の文節の候補。エンジンが文節ごとの候補を返さなかった先頭文節は、先頭文節の候補を使う。 */
+    private fun segmentCandidates(conversion: ConversionResult, index: Int): List<ConversionCandidate> {
+        val segment = conversion.segments.getOrNull(index) ?: return emptyList()
+        return segment.candidates.ifEmpty { if (index == 0) conversion.headCandidates else emptyList() }
+    }
 
     /** 変換キーでは、対象segmentの次の候補を選ぶ（最後の候補の次は先頭へ戻る）。 */
     private fun selectNextLiveCandidate(): Boolean {
@@ -1601,6 +1711,7 @@ class EditorSession(
         pendingConversion = null
         appliedConversion = null
         appliedConversionCommitRequest = null
+        focusedConversionSegmentIndex = 0
     }
 
     /** 表示中の変換結果が現在のrevisionと読みに一致する場合だけ返す。 */
@@ -1610,14 +1721,28 @@ class EditorSession(
         return conversion
     }
 
-    /** 明示変換のcompositionをEditorへ送る。未変換なら読みのカーソル、変換表示中なら末尾へカーソルを置く。 */
-    private fun synchronizeComposition(): Boolean {
+    /**
+     * 明示変換のcompositionをEditorへ送る。未変換なら読みのカーソル、変換表示中なら末尾へカーソルを置く。
+     * 複数文節の変換結果を渡すと、focusIndexの文節（候補バーの対象）を強調する。
+     */
+    private fun synchronizeComposition(conversion: ConversionResult? = null, focusIndex: Int = 0): Boolean {
         val cursorOffset = if (buffer.display == buffer.reading) {
             buffer.cursorUtf16Offset()
         } else {
             buffer.display.length
         }
-        return writeComposition(buffer.display, cursorOffset)
+        return writeComposition(styleExplicitComposition(conversion, focusIndex), cursorOffset)
+    }
+
+    /** 複数文節の明示変換を表示中なら、注目文節の表示範囲を強調した文字列を返す。ライブ変換と同じ強調を使う。 */
+    private fun styleExplicitComposition(conversion: ConversionResult?, focusIndex: Int): CharSequence {
+        val text = buffer.display
+        if (conversion == null || conversion.segments.size < 2 || conversion.display != text) return text
+        val segment = conversion.segments.getOrNull(focusIndex) ?: return text
+        val start = conversion.segments.take(focusIndex).sumOf { it.value.length }
+        val state = if (segment.chosen) SegmentState.CHOSEN else SegmentState.PROVISIONAL
+        val span = DisplaySpan(focusIndex.toLong(), start, start + segment.value.length, state, converted = true, focused = true)
+        return compositionStyler(text, span)
     }
 
     /**
@@ -1906,8 +2031,6 @@ private data class DeletionUndo(
     val removedExternal: String = "",
     val lineText: String = "",
     val explicitComposition: CompositionSnapshot? = null,
-    val explicitConversion: ConversionResult? = null,
-    val explicitConversionCommitRequest: ConversionRequest? = null,
     val liveUndoSteps: Int = 0,
     val originalCompositionStart: Int? = null,
     val cursor: Int,

@@ -23,11 +23,11 @@ interface ConversionClient {
     /** 変換を依頼する。結果はworkerの配送経路で後から届く。 */
     fun requestConversion(request: ConversionRequest)
 
-    /** requestの変換で表示した先頭文節の候補をユーザーが確定したことを伝える。 */
-    fun commitCandidate(request: ConversionRequest, candidateId: Int)
-
-    /** requestの変換結果を全文節そのまま確定したことを伝える。 */
-    fun commitAll(request: ConversionRequest)
+    /**
+     * requestの変換結果を、segmentsの区切りと表記で確定したことを伝える。
+     * segmentsは候補選択を反映した表示中の文節で、ユーザーが選んだ文節にはchosenが付く。
+     */
+    fun commitAll(request: ConversionRequest, segments: List<ConversionSegment>)
 }
 
 /**
@@ -124,8 +124,6 @@ class ConversionWorker(
     private val lastPredictionCandidates = mutableMapOf<Long, List<PredictionCandidate>>()
     // sessionEpochごとに、エンジン側sessionの状態を作った直前の要求。学習通知の照合に使う。
     private val lastConverted = mutableMapOf<Long, ConversionRequest>()
-    // sessionEpochごとに、直前の明示変換で表示した先頭文節の候補。確定した候補の読みと表記を引くために使う。
-    private val lastHeadCandidates = mutableMapOf<Long, List<ConversionCandidate>>()
 
     /** 最新の初期化状態。UI threadから読んでよい。 */
     val health: EngineHealth
@@ -198,7 +196,7 @@ class ConversionWorker(
     }
 
     /**
-     * 対応する予測要求がまだ最新なら、明示変換の候補確定と同じく、選択した候補をIME側の学習へ記録し、
+     * 対応する予測要求がまだ最新なら、選択した候補をIME側の学習へ記録し、
      * Mozcの予測sessionへも確定して履歴を学習させる。
      */
     override fun commitPrediction(request: PredictionRequest, candidateId: Int) {
@@ -210,7 +208,7 @@ class ConversionWorker(
             candidate.reading?.let { reading -> lookupLearningStore()?.record(reading, candidate.value) }
             val sessionId = predictionSessions[request.sessionEpoch] ?: return@execute
             if (!runCatching { engine.setIncognito(false) }.getOrDefault(false)) return@execute
-            runCatching { engine.commitCandidate(sessionId, candidateId) }
+            runCatching { engine.commitPrediction(sessionId, candidateId) }
             lastPredictionRequests.remove(request.sessionEpoch)
             lastPredictionCandidates.remove(request.sessionEpoch)
         }
@@ -275,25 +273,26 @@ class ConversionWorker(
     }
 
     /**
-     * 明示的に選んだ候補の確定を、IME側の学習へ記録し、エンジンの候補ならエンジンへも通知する。
-     * 学習語だけから作った候補はエンジンが知らないため、エンジンへは送らない。
+     * 明示変換の確定を、ユーザーが候補を選んだ文節だけIME側の学習へ記録する。エンジンへは、選んだ文節が無ければ
+     * 変換したまま確定させ、あれば同じ区切りと表記を再現して学習させる。登録語・学習語だけの表記を含む場合は
+     * エンジンが表記を再現できないため送らない。学習禁止欄では何も記録しない。
      */
-    override fun commitCandidate(request: ConversionRequest, candidateId: Int) {
+    override fun commitAll(request: ConversionRequest, segments: List<ConversionSegment>) {
         if (request.incognito) return
         executor.execute {
             val sessionId = sessionForCommit(request) ?: return@execute
-            val candidate = lastHeadCandidates[request.sessionEpoch]?.firstOrNull { it.id == candidateId }
-            candidate?.let { lookupLearningStore()?.record(it.learnedReading ?: it.reading, it.value) }
-            if (candidate?.learnedReading == null) runCatching { engine.commitCandidate(sessionId, candidateId) }
-            lastConverted.remove(request.sessionEpoch)
-        }
-    }
-
-    override fun commitAll(request: ConversionRequest) {
-        if (request.incognito) return
-        executor.execute {
-            val sessionId = sessionForCommit(request) ?: return@execute
-            runCatching { engine.commitAll(sessionId) }
+            val chosen = segments.filter { it.chosen && !it.fromUserDictionary }
+            lookupLearningStore()?.let { store ->
+                chosen.forEach { store.record(it.learnedReading ?: it.reading, it.value) }
+            }
+            if (segments.all(ConversionSegment::engineCandidate)) {
+                if (chosen.isEmpty()) {
+                    runCatching { engine.commitAll(sessionId) }
+                } else {
+                    val learned = segments.map { LearnedSegment(it.reading, it.value, chosen = it.chosen) }
+                    runCatching { engine.learnSegments(sessionId, learned) }
+                }
+            }
             lastConverted.remove(request.sessionEpoch)
         }
     }
@@ -306,7 +305,6 @@ class ConversionWorker(
         endedThroughEpoch.accumulateAndGet(sessionEpoch, ::maxOf)
         executor.execute {
             lastConverted.remove(sessionEpoch)
-            lastHeadCandidates.remove(sessionEpoch)
             lastPredictionRequests.remove(sessionEpoch)
             lastPredictionCandidates.remove(sessionEpoch)
             // 学習は打鍵ごとではなく、入力欄の終了時にまとめて保存する。
@@ -332,25 +330,72 @@ class ConversionWorker(
             return
         }
         lastConverted.remove(request.sessionEpoch)
-        val conversion = runCatching { engine.convert(sessionId, request.reading, request.headLength) }.getOrNull()
-        if (conversion == null) {
+        val conversion = runCatching { engine.convert(sessionId, request.reading, request.segmentLengths) }.getOrNull()
+        if (conversion == null || conversion.segments.isEmpty()) {
             onOutcome(ConversionOutcome.Failed(request))
             return
         }
         lastConverted[request.sessionEpoch] = request
-        // 並びは「ユーザー辞書 → 学習 → エンジン」。学習禁止欄では学習語を参照しない。
-        val learned = LearnedCandidates.mergeExplicit(
-            request.reading,
-            conversion,
-            lookupLearningStore().takeUnless { request.incognito },
-        )
-        val withUser = UserDictionaryCandidates.mergeExplicit(request.reading, learned, lookupUserDictionary())
-        // 顔文字・絵文字は先頭へ置かず、表示する文節の値にも使わない。昇格には学習の回数を使う。
-        val merged = EmoticonCandidates.arrangeExplicit(withUser, emoticonJudge(learningAllowed = !request.incognito))
-        lastHeadCandidates[request.sessionEpoch] = merged.headCandidates
-        val result = ConversionResult(request, merged.segments, merged.headCandidates)
+        val segments = mergeExplicitSegments(request, conversion)
+        val result = ConversionResult(request, segments, segments.first().candidates)
         onOutcome(
             if (result.isConsistent) ConversionOutcome.Converted(result) else ConversionOutcome.Failed(request),
+        )
+    }
+
+    /**
+     * 明示変換の各文節へ、候補の統合規則（並びは「ユーザー辞書 → 学習 → エンジン」、顔文字・絵文字は後ろ）を適用する。
+     * 各文節の候補はその文節の読みだけを置き換えるため、候補を選んでも他の文節は変わらない。
+     * 読み全体に一致する登録語があり、利用者が区切りを指定していなければ、読み全体を一文節にまとめて登録語を表示する。
+     */
+    private fun mergeExplicitSegments(request: ConversionRequest, conversion: EngineConversion): List<ConversionSegment> {
+        val store = lookupLearningStore().takeUnless { request.incognito }
+        val dictionary = lookupUserDictionary()
+        val emoticons = emoticonJudge(learningAllowed = !request.incognito)
+        val source = wholeReadingSegment(request, conversion, dictionary)?.let(::listOf)
+            ?: conversion.segments.mapIndexed { index, segment ->
+                // 先頭文節の候補はheadCandidatesでも受け取れる。読みが文節と同じものだけを使う。
+                val engineCandidates = segment.candidates.ifEmpty {
+                    if (index == 0) conversion.headCandidates.filter { it.reading == segment.reading } else emptyList()
+                }
+                segment.copy(candidates = engineCandidates)
+            }
+        return source.map { segment ->
+            val engineCandidates = segment.candidates.ifEmpty {
+                listOf(ConversionCandidate(ConversionCandidate.DISPLAYED_VALUE_ID, segment.value, segment.reading))
+            }
+            val single = EngineConversion(segments = listOf(segment), headCandidates = engineCandidates)
+            val learned = LearnedCandidates.mergeExplicit(segment.reading, single, store).let { merged ->
+                // 前方一致の予測は入力した読み全体を置き換える候補なので、複数文節の途中の文節には出さない。
+                if (source.size == 1) {
+                    merged
+                } else {
+                    merged.copy(headCandidates = merged.headCandidates.filter { it.learnedReading in setOf(null, segment.reading) })
+                }
+            }
+            val withUser = UserDictionaryCandidates.mergeExplicit(segment.reading, learned, dictionary)
+            val arranged = EmoticonCandidates.arrangeExplicit(withUser, emoticons)
+            arranged.segments.single().copy(candidates = arranged.headCandidates)
+        }
+    }
+
+    /**
+     * 読み全体に一致する登録語を一文節として表示すべきなら、その文節を返す。候補はエンジンの文節の表記を連結したもので、
+     * 登録語は後段の統合で先頭へ加わる。表示に使える登録語かは、登録語の統合規則の判定をそのまま使う。
+     */
+    private fun wholeReadingSegment(
+        request: ConversionRequest,
+        conversion: EngineConversion,
+        dictionary: UserDictionaryLookup?,
+    ): ConversionSegment? {
+        if (conversion.segments.size < 2 || request.segmentLengths != null) return null
+        val merged = UserDictionaryCandidates.mergeExplicit(request.reading, conversion, dictionary)
+        if (merged.segments.size != 1) return null
+        val joined = conversion.segments.joinToString(separator = "") { it.value }
+        return ConversionSegment(
+            reading = request.reading,
+            value = joined,
+            candidates = listOf(ConversionCandidate(ConversionCandidate.DISPLAYED_VALUE_ID, joined, request.reading)),
         )
     }
 

@@ -79,13 +79,39 @@ class MozcConversionEngine(
         return true
     }
 
-    override fun convert(sessionId: Long, reading: String, headLength: Int?): EngineConversion? {
+    /**
+     * 明示変換する。segmentLengthsがあれば先頭から順に各文節の幅を合わせ、利用者が伸縮した区切りを再現する。
+     * 最後に各文節へfocusを移して、その文節の読みだけを置き換える候補を集める。
+     */
+    override fun convert(sessionId: Long, reading: String, segmentLengths: List<Int>?): EngineConversion? {
         var output = composeAndConvert(sessionId, reading, requestSuggestion = true) ?: return null
-        if (headLength != null) {
-            val head = GraphemeClusters.split(reading).take(headLength).joinToString(separator = "")
-            output = alignFocusedSegment(sessionId, output, 0, head) ?: return null
+        if (segmentLengths != null) output = alignSegments(sessionId, output, reading, segmentLengths) ?: return null
+        if (!output.hasPreedit()) return null
+        val candidates = collectSegmentCandidates(sessionId, output) ?: return null
+        val segments = output.preedit.segmentList.mapIndexed { index, segment ->
+            ConversionSegment(reading = segment.key, value = segment.value, candidates = candidates[index])
         }
-        return toConversion(sessionId, output)
+        return EngineConversion(segments = segments, headCandidates = segments.first().candidates)
+    }
+
+    /**
+     * 変換直後（先頭文節にfocus）の状態から、先頭からi番目の文節の読みをlengths[i]書記素へ順に合わせる。
+     * Mozcは伸縮した文節より後ろだけを区切り直すため、前の文節から順に合わせれば先に合わせた区切りは保たれる。
+     */
+    private fun alignSegments(sessionId: Long, start: Output, reading: String, lengths: List<Int>): Output? {
+        val clusters = GraphemeClusters.split(reading)
+        var output = start
+        var offset = 0
+        for ((index, length) in lengths.withIndex()) {
+            if (length < 1 || offset + length > clusters.size) return null
+            if (index > 0) {
+                output = sendKey(sessionId, KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.RIGHT)) ?: return null
+            }
+            val target = clusters.subList(offset, offset + length).joinToString(separator = "")
+            output = alignFocusedSegment(sessionId, output, index, target) ?: return null
+            offset += length
+        }
+        return output
     }
 
     /**
@@ -305,6 +331,34 @@ class MozcConversionEngine(
     ) != null
 
     /**
+     * focusを先頭文節へ戻してから右へ一つずつ動かし、各文節の読みだけを置き換える候補を集める。
+     * focusの移動は文節を仮に固定するだけで確定しないため、学習は起きない。候補が無い文節は表示中の表記だけにする。
+     */
+    private fun collectSegmentCandidates(sessionId: Long, start: Output): List<List<ConversionCandidate>>? {
+        val segmentCount = start.preedit.segmentCount
+        var output = start
+        // 戻す回数は文節数を上限にし、Mozcがfocusを動かさない場合も止まるようにする。
+        repeat(segmentCount) {
+            if (focusedSegmentIndex(output) <= 0) return@repeat
+            output = sendKey(sessionId, KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.LEFT)) ?: return null
+        }
+        val candidates = mutableListOf<List<ConversionCandidate>>()
+        for (index in 0 until segmentCount) {
+            if (index > 0) {
+                output = sendKey(sessionId, KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.RIGHT)) ?: return null
+            }
+            if (focusedSegmentIndex(output) != index) return null
+            val segment = output.preedit.getSegment(index)
+            val words = output.allCandidateWords.candidatesList
+                .filter { it.hasValue() && it.value.isNotEmpty() && replacesOnlySegment(it, segment.key) }
+                .map { ConversionCandidate(id = it.id, value = it.value, reading = segment.key) }
+                .distinctBy { it.value }
+            candidates += words.ifEmpty { listOf(ConversionCandidate(ConversionCandidate.DISPLAYED_VALUE_ID, segment.value, segment.key)) }
+        }
+        return candidates
+    }
+
+    /**
      * 候補が文節の読みだけを置き換えるかを、候補の情報だけで安く判定する。
      * Mozcは候補の自立語部分の読み（content_key、「講演に」なら「こうえん」）が文節の読みと違うとkeyへ入れる
      * （engine/engine_output.ccのFillCandidateWord）。そのためkeyは普通の変換候補でも付き、文節の読みの接頭辞になる。
@@ -323,38 +377,14 @@ class MozcConversionEngine(
         return history && prediction
     }
 
-    override fun commitCandidate(sessionId: Long, candidateId: Int): Boolean {
-        val output = sendCommand(sessionId, SessionCommand.CommandType.SUBMIT_CANDIDATE, candidateId)
-        return output?.consumed == true
-    }
-
     override fun commitAll(sessionId: Long): Boolean {
         return sendCommand(sessionId, SessionCommand.CommandType.SUBMIT)?.consumed == true
     }
 
-    /**
-     * 変換状態のOutputから文節と先頭文節の候補を取り出す。変換状態でなければnullを返す。
-     * 候補には複数の文節をまとめて置き換えるもの（全文候補など）が混ざり、候補の情報だけでは
-     * 覆う読みを確実に判別できない。そこで各候補を一時的に選び、preeditの先頭文節の読みを
-     * その候補が確定する読みとして記録し、最後に元の候補へ選択を戻す。
-     */
-    private fun toConversion(sessionId: Long, output: Output): EngineConversion? {
-        if (!output.hasPreedit() || !output.hasAllCandidateWords()) return null
-        val segments = output.preedit.segmentList.map { ConversionSegment(reading = it.key, value = it.value) }
-        val words = output.allCandidateWords.candidatesList
-            .filter { it.hasValue() && it.value.isNotEmpty() }
-        val focusedId = output.allCandidateWords.candidatesList
-            .getOrNull(output.allCandidateWords.focusedIndex)
-            ?.id
-        val candidates = words.mapNotNull { word ->
-            val selected = sendCommand(sessionId, SessionCommand.CommandType.SELECT_CANDIDATE, word.id)
-            val headReading = selected?.preedit?.segmentList?.firstOrNull()?.key
-            headReading?.let { ConversionCandidate(id = word.id, value = word.value, reading = it) }
-        }.distinctBy { it.value to it.reading }
-        if (focusedId != null) {
-            sendCommand(sessionId, SessionCommand.CommandType.SELECT_CANDIDATE, focusedId) ?: return null
-        }
-        return EngineConversion(segments = segments, headCandidates = candidates)
+    /** 予測sessionの候補窓にある予測候補をSUBMIT_CANDIDATEで確定し、Mozcの履歴へ学習させる。 */
+    override fun commitPrediction(sessionId: Long, candidateId: Int): Boolean {
+        val output = sendCommand(sessionId, SessionCommand.CommandType.SUBMIT_CANDIDATE, candidateId)
+        return output?.consumed == true
     }
 
     /** 指定sessionへキー入力を一つ送る。requestSuggestionがfalseなら入力途中の予測を求めない。 */
