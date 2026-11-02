@@ -53,6 +53,28 @@ class EditorSessionTest {
         assertEquals(listOf(request to 2), client.committed)
     }
 
+    /** 入力途中のローマ字は予測の読みへ含めず、予測を選ぶと保留ごと未確定全体を置き換える。 */
+    @Test
+    fun predictionExcludesPendingRomajiAndDiscardsItOnSelection() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client, romajiInputEnabled = true)
+        typeRomaji(session, "arigak")
+        assertEquals("ありがk", connection.text)
+
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        assertEquals("ありが", request.reading)
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(PredictionCandidate(5, "ありがとう")))))
+        assertTrue(session.selectPrediction(request, candidateId = 5))
+
+        assertEquals("ありがとう", connection.text)
+        assertFalse(session.hasComposition)
+        // 捨てた保留が次の入力へ残らない。
+        typeRomaji(session, "a")
+        assertEquals("ありがとうあ", connection.text)
+    }
+
     /** ライブ変換の読みとsegmentを予測語の確定後に捨て、二重確定と旧segment学習を防ぐ。 */
     @Test
     fun livePredictionClearsCoreWithoutLearningOldSegments() {

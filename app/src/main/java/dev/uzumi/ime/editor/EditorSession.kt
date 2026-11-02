@@ -222,6 +222,8 @@ class EditorSession(
         val result = appliedPrediction ?: return false
         if (result.request != request || !isCurrentPredictionRequest(request)) return false
         val candidate = result.candidates.firstOrNull { it.id == candidateId } ?: return false
+        // 予測は未確定全体を置き換えるため、入力途中のローマ字と連続タップは確定せずに捨てる。
+        abandonPendingInput()
         deletionUndo = null
         if (request.isZeroQuery) {
             val start = knownSelectionStart()
@@ -244,8 +246,7 @@ class EditorSession(
     private fun currentPredictionRequest(): PredictionRequest? {
         if (!active || policy.suppressSuggestions || commitsDirectly) return null
         if (hasComposition) {
-            val reading = liveCore?.reading ?: buffer.reading
-            if (reading.isEmpty()) return null
+            val reading = predictionReading() ?: return null
             return PredictionRequest(
                 sessionEpoch = sessionEpoch,
                 revision = predictionRevision(),
@@ -267,6 +268,17 @@ class EditorSession(
             revision = predictionRevision(),
             precedingText = preceding,
         )
+    }
+
+    /**
+     * 予測へ渡す読み。入力途中のローマ字（「かんk」の「k」）はかなではないためMozcへ送らず、末尾から除く。
+     * 保留が末尾に無い（読みの途中へ入力している）場合や、除くと空になる場合は予測しない。
+     */
+    private fun predictionReading(): String? {
+        val reading = liveCore?.reading ?: buffer.reading
+        val pending = romajiComposer?.pendingText.orEmpty()
+        if (pending.isNotEmpty() && !reading.endsWith(pending)) return null
+        return reading.removeSuffix(pending).ifEmpty { null }
     }
 
     /** 予測要求が今のcomposition・selection・確定文脈に一致するかを確かめる。 */
