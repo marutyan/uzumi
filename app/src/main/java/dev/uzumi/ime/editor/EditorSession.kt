@@ -5,6 +5,10 @@ import dev.uzumi.ime.conversion.ConversionOutcome
 import dev.uzumi.ime.conversion.ConversionRequest
 import dev.uzumi.ime.conversion.ConversionResult
 import dev.uzumi.ime.conversion.LiveConversionClient
+import dev.uzumi.ime.conversion.PredictionCandidate
+import dev.uzumi.ime.conversion.PredictionClient
+import dev.uzumi.ime.conversion.PredictionRequest
+import dev.uzumi.ime.conversion.PredictionResult
 import dev.uzumi.ime.conversion.SegmentedLiveConverter
 import dev.uzumi.ime.conversion.liveLearningUnits
 import dev.uzumi.ime.evaluation.ConversionProgress
@@ -54,11 +58,16 @@ class EditorSession(
     private val correctness: CorrectnessJudge? = null,
     // 英字配列のローマ字をかなにするか。欄ごとの可否はInputFieldPolicy.usesRomajiInputで呼び出し側が決める。
     romajiInputEnabled: Boolean = false,
+    // 予測要求・結果と候補確定を、変換とは別のMozc sessionへ送る。
+    private val predictionClient: PredictionClient? = null,
 ) {
     private val buffer = CompositionBuffer()
     // compositionの内容が変わるたびに増える番号。変換応答が現在の読みに対するものかを照合する。
     private var revision = 0L
     private var pendingConversion: ConversionRequest? = null
+    // 予測も入力世代とsession epochが一致する場合だけ候補へ表示する。
+    private var pendingPrediction: PredictionRequest? = null
+    private var appliedPrediction: PredictionResult? = null
     private var appliedConversion: ConversionResult? = null
     // Undoで画面用revisionを更新しても、変換エンジンが保持する要求との一致を保つ。
     private var appliedConversionCommitRequest: ConversionRequest? = null
@@ -163,6 +172,109 @@ class EditorSession(
         }
         return BasicCandidateProvider.candidates(buffer.reading, policy.suppressSuggestions)
     }
+
+    /** 現在の読みまたは直前の確定文字列に対するMozc予測を依頼し、古い候補を直ちに外す。 */
+    fun refreshPredictions(): Boolean {
+        val client = predictionClient
+        if (!active || client?.isPredictionAvailable != true) {
+            clearPredictions()
+            return false
+        }
+        val request = currentPredictionRequest()
+        if (request == null) {
+            clearPredictions()
+            return false
+        }
+        if (pendingPrediction == request || appliedPrediction?.request == request) return false
+        pendingPrediction = request
+        appliedPrediction = null
+        client.requestPrediction(request)
+        return true
+    }
+
+    /** 現在の入力状態と世代が一致する予測候補だけを返す。 */
+    fun predictionCandidates(): List<PredictionCandidate> {
+        return predictionResult()?.candidates.orEmpty()
+    }
+
+    /** 現在の入力状態に一致する予測結果を、候補IDの確定操作と一緒に返す。 */
+    fun predictionResult(): PredictionResult? = appliedPrediction?.takeIf { isCurrentPredictionRequest(it.request) }
+
+    /** workerの予測結果を要求世代・読み・ゼロクエリ文脈が一致するときだけ反映する。 */
+    fun applyPredictionResult(result: PredictionResult): Boolean {
+        if (!active || pendingPrediction != result.request || !isCurrentPredictionRequest(result.request)) return false
+        pendingPrediction = null
+        appliedPrediction = result
+        return true
+    }
+
+    /** 読みの変更や入力欄の終了後、保留・表示中の予測候補を無効化する。 */
+    fun clearPredictions() {
+        pendingPrediction = null
+        appliedPrediction = null
+    }
+
+    /**
+     * 予測候補を選び、未確定全体（次の語の予測ではカーソル位置）をその語で確定する。
+     * ライブ変換の表示中の文節は確定しないため学習へ送らず、予測語の確定だけを予測の窓口へ伝える。
+     */
+    fun selectPrediction(request: PredictionRequest, candidateId: Int): Boolean {
+        val result = appliedPrediction ?: return false
+        if (result.request != request || !isCurrentPredictionRequest(request)) return false
+        val candidate = result.candidates.firstOrNull { it.id == candidateId } ?: return false
+        deletionUndo = null
+        if (request.isZeroQuery) {
+            val start = knownSelectionStart()
+            if (!connection.commitText(candidate.value, 1)) {
+                failClosed()
+                return false
+            }
+            updateExternalSelectionAfterCommit(candidate.value, start)
+        } else {
+            liveCore?.discardComposition()
+            liveCursorUtf16 = 0
+            if (!commitCompositionAs(candidate.value)) return false
+        }
+        predictionClient?.commitPrediction(request, candidate.id)
+        clearPredictions()
+        return true
+    }
+
+    /** 現在のcompositionまたは許可された待機文脈から、Mozcへ送る予測要求を作る。 */
+    private fun currentPredictionRequest(): PredictionRequest? {
+        if (!active || policy.suppressSuggestions || commitsDirectly) return null
+        if (hasComposition) {
+            val reading = liveCore?.reading ?: buffer.reading
+            if (reading.isEmpty()) return null
+            return PredictionRequest(
+                sessionEpoch = sessionEpoch,
+                revision = predictionRevision(),
+                reading = reading,
+                incognito = policy.suppressLearning,
+            )
+        }
+        // 次の語の予測は確定済みの本文を読むため、学習禁止欄・URLやメールの欄・範囲選択中には読まない。
+        if (policy.suppressLearning || policy.isAddressLike || selectionStart == null || selectionStart != selectionEnd) {
+            return null
+        }
+        val preceding = connection.textBeforeCursor(PREDICTION_CONTEXT_MAX_CHARS)?.toString()
+            // 上限で切った先頭がサロゲートペアの後半なら、壊れた文字をMozcへ送らないよう落とす。
+            ?.let { text -> if (text.firstOrNull()?.isLowSurrogate() == true) text.substring(1) else text }
+            ?: return null
+        if (preceding.isBlank()) return null
+        return PredictionRequest(
+            sessionEpoch = sessionEpoch,
+            revision = predictionRevision(),
+            precedingText = preceding,
+        )
+    }
+
+    /** 予測要求が今のcomposition・selection・確定文脈に一致するかを確かめる。 */
+    private fun isCurrentPredictionRequest(request: PredictionRequest): Boolean =
+        request.sessionEpoch == sessionEpoch && currentPredictionRequest() == request
+
+    /** explicit/liveいずれの編集状態からも、現在のUI世代を予測要求へ渡す。 */
+    private fun predictionRevision(): Long = liveCore?.revision ?: revision
 
     /**
      * 文字入力をcompositionへ追加する。接続結果が不明なら同じ本文を再送しない。
@@ -1134,6 +1246,7 @@ class EditorSession(
         if (!active) return
         resetInputSequences()
         active = false
+        clearPredictions()
         deletionUndo = null
         buffer.clear()
         liveCore?.finishField()
@@ -1710,6 +1823,9 @@ class EditorSession(
     private companion object {
         /** 左ドラッグで行頭を探すときに読む、カーソル前の最大文字数。これより長い行はこの長さだけ消す。 */
         const val LINE_DELETE_MAX_CHARS = 1_000
+
+        /** 次の語を予測するMozcへ渡す確定文脈の最大UTF-16長。本文全体を送らないために制限する。 */
+        private const val PREDICTION_CONTEXT_MAX_CHARS = 64
 
         /** 正→誤の遷移の判定で読む、カーソル前の最大文字数。課題文（長文でも50文字未満）が収まる長さにする。 */
         const val EVALUATION_PREFIX_MAX_CHARS = 200

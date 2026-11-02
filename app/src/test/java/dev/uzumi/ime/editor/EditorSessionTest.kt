@@ -9,6 +9,10 @@ import dev.uzumi.ime.conversion.ConversionResult
 import dev.uzumi.ime.conversion.ConversionSegment
 import dev.uzumi.ime.conversion.LearnedSegment
 import dev.uzumi.ime.conversion.LiveConversionClient
+import dev.uzumi.ime.conversion.PredictionCandidate
+import dev.uzumi.ime.conversion.PredictionClient
+import dev.uzumi.ime.conversion.PredictionRequest
+import dev.uzumi.ime.conversion.PredictionResult
 import dev.uzumi.ime.evaluation.EvaluationCounter
 import dev.uzumi.ime.live.CandidateRequest
 import dev.uzumi.ime.live.CandidateResult
@@ -24,6 +28,117 @@ import org.junit.Test
 
 /** InputConnectionの成功・失敗と編集状態の同期境界を検証する。 */
 class EditorSessionTest {
+    /** 予測応答は読みの世代が一致するときだけ表示し、選択すると未確定全体を確定する。 */
+    @Test
+    fun typedPredictionReplacesWholeCompositionAndRejectsStaleResponse() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), sessionEpoch = 4, predictionClient = client)
+        assertTrue(session.inputText("ありがと"))
+
+        assertTrue(session.refreshPredictions())
+        val oldRequest = client.requests.single()
+        assertEquals("ありがと", oldRequest.reading)
+        assertTrue(session.inputText("う"))
+        assertFalse(session.applyPredictionResult(PredictionResult(oldRequest, listOf(PredictionCandidate(1, "ありがとう")))))
+        assertTrue(session.predictionCandidates().isEmpty())
+
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.last()
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(PredictionCandidate(2, "ありがとうございます")))))
+        assertTrue(session.selectPrediction(request, candidateId = 2))
+
+        assertEquals("ありがとうございます", connection.text)
+        assertFalse(session.hasComposition)
+        assertEquals(listOf(request to 2), client.committed)
+    }
+
+    /** ライブ変換の読みとsegmentを予測語の確定後に捨て、二重確定と旧segment学習を防ぐ。 */
+    @Test
+    fun livePredictionClearsCoreWithoutLearningOldSegments() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val liveClient = FakeLiveClient()
+        val predictionClient = FakePredictionClient()
+        val core = LiveConversionCore()
+        val session = EditorSession(
+            connection = connection,
+            policy = normalPolicy(),
+            sessionEpoch = 6,
+            liveCore = core,
+            liveClient = liveClient,
+            predictionClient = predictionClient,
+        )
+        assertTrue(session.inputText("ありがと"))
+        assertTrue(session.refreshPredictions())
+        val request = predictionClient.requests.single()
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(PredictionCandidate(4, "ありがとう")))))
+
+        assertTrue(session.selectPrediction(request, candidateId = 4))
+
+        assertEquals("ありがとう", connection.text)
+        assertEquals("", core.display)
+        assertFalse(session.hasComposition)
+        assertTrue(liveClient.learned.isEmpty())
+        assertEquals(listOf(request to 4), predictionClient.committed)
+    }
+
+    /** ゼロクエリは直前の確定文脈だけを使い、選択語をカーソル位置へ直接確定する。 */
+    @Test
+    fun zeroQueryPredictionUsesCommittedContextAndCommitsAtCursor() {
+        val connection = ModelEditorConnection(text = "きょうは晴れ", selectionStart = 4, selectionEnd = 4)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), initialSelectionStart = 4, sessionEpoch = 5, predictionClient = client)
+
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        assertTrue(request.isZeroQuery)
+        assertEquals("きょうは", request.precedingText)
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(PredictionCandidate(3, "天気")))))
+        assertTrue(session.selectPrediction(request, candidateId = 3))
+
+        assertEquals("きょうは天気晴れ", connection.text)
+        assertEquals(listOf(request to 3), client.committed)
+    }
+
+    /** ゼロクエリは機密・学習禁止・数値・URLやメールの欄、または選択範囲がある状態から本文を読まずに抑止する。 */
+    @Test
+    fun zeroQueryPredictionDoesNotReadProtectedOrSelectedText() {
+        val policies = listOf(
+            normalPolicy().copy(isPassword = true),
+            normalPolicy().copy(noPersonalizedLearning = true),
+            normalPolicy().copy(learningDisabledBySetting = true),
+            normalPolicy().copy(isNumeric = true),
+            normalPolicy().copy(isTypeNull = true),
+            normalPolicy().copy(isAddressLike = true),
+        )
+        policies.forEach { policy ->
+            val client = FakePredictionClient()
+            val connection = ModelEditorConnection(text = "secret", selectionStart = 6, selectionEnd = 6)
+            val session = EditorSession(
+                connection,
+                policy,
+                initialSelectionStart = 6,
+                predictionClient = client,
+            )
+            assertFalse(session.refreshPredictions())
+            assertTrue(client.requests.isEmpty())
+            assertEquals(0, connection.textBeforeCursorCalls)
+        }
+
+        val selectedClient = FakePredictionClient()
+        val selectedConnection = ModelEditorConnection(text = "本文", selectionStart = 0, selectionEnd = 2)
+        val selected = EditorSession(
+            selectedConnection,
+            normalPolicy(),
+            initialSelectionStart = 0,
+            initialSelectionEnd = 2,
+            predictionClient = selectedClient,
+        )
+        assertFalse(selected.refreshPredictions())
+        assertTrue(selectedClient.requests.isEmpty())
+        assertEquals(0, selectedConnection.textBeforeCursorCalls)
+    }
+
     /** かな入力、カナ候補、確定を同じcompositionとして送る。 */
     @Test
     fun composesCandidateAndCommit() {
@@ -1957,6 +2072,24 @@ private class FakeConversionClient : ConversionClient {
     }
 }
 
+/** 予測要求と、選んだ候補の確定を記録する偽の窓口。 */
+private class FakePredictionClient : PredictionClient {
+    val requests = mutableListOf<PredictionRequest>()
+    val committed = mutableListOf<Pair<PredictionRequest, Int>>()
+
+    override val isPredictionAvailable: Boolean = true
+
+    /** 予測要求を記録し、世代と文脈の検証に使う。 */
+    override fun requestPrediction(request: PredictionRequest) {
+        requests += request
+    }
+
+    /** 選択候補の確定通知を記録する。 */
+    override fun commitPrediction(request: PredictionRequest, candidateId: Int) {
+        committed += request to candidateId
+    }
+}
+
 /** ライブ変換の要求と学習を記録し、試験用の語彙で結果を作る偽の窓口。 */
 private class FakeLiveClient : LiveConversionClient {
     var available = true
@@ -2080,6 +2213,8 @@ private class ModelEditorConnection(
         private set
     var finishComposingCalls = 0
         private set
+    var textBeforeCursorCalls = 0
+        private set
     private var selectionStart = selectionStart
     private var selectionEnd = selectionEnd
     private var composingStart: Int? = null
@@ -2165,6 +2300,7 @@ private class ModelEditorConnection(
     override fun sendDeleteKey(): Boolean = active
 
     override fun textBeforeCursor(maxChars: Int): CharSequence? {
+        textBeforeCursorCalls += 1
         if (!active) return null
         val end = minOf(selectionStart, selectionEnd)
         return text.substring((end - maxChars).coerceAtLeast(0), end)

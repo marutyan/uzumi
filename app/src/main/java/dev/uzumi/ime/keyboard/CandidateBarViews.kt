@@ -133,8 +133,8 @@ class CandidateGridView(context: Context) : ScrollView(context) {
         visibility = View.GONE
     }
 
-    /** 候補[values]を並べて表示する。[selected]番目を選択中として示し、押された候補の番号を[onPick]へ渡す。 */
-    fun show(values: List<String>, selected: Int, onPick: (Int) -> Unit) {
+    /** 候補[values]を並べ、[dividerIndex]の前に区切りを入れる。[selected]を示し、押された元indexを[onPick]へ渡す。 */
+    fun show(values: List<String>, selected: Int, dividerIndex: Int? = null, onPick: (Int) -> Unit) {
         rows.removeAllViews()
         values.chunked(COLUMNS).forEachIndexed { rowIndex, chunk ->
             val row = LinearLayout(context).apply {
@@ -143,6 +143,7 @@ class CandidateGridView(context: Context) : ScrollView(context) {
             }
             chunk.forEachIndexed { column, value ->
                 val index = rowIndex * COLUMNS + column
+                if (index == dividerIndex) row.addView(views.divider())
                 row.addView(views.item(value, index == selected) { onPick(index) }.apply {
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
                     maxLines = 1

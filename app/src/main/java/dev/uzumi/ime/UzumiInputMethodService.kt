@@ -38,6 +38,8 @@ import dev.uzumi.ime.conversion.JniMozcNativeBridge
 import dev.uzumi.ime.conversion.MozcConversionEngine
 import dev.uzumi.ime.conversion.MozcDataInstaller
 import dev.uzumi.ime.conversion.NeuralModelSpec
+import dev.uzumi.ime.conversion.PredictionCandidate
+import dev.uzumi.ime.conversion.PredictionResult
 import dev.uzumi.ime.dictionary.UserDictionaries
 import dev.uzumi.ime.clipboard.RecentClipboard
 import dev.uzumi.ime.editor.AndroidInputConnectionPort
@@ -190,6 +192,7 @@ class UzumiInputMethodService : InputMethodService() {
             // 評価用の報告は評価モードの間だけ作る。計数器の状態はworkerのthreadからも読める。
             evaluationActive = { evaluation.isRecording },
             onCandidateResult = { sessionEpoch, result -> mainHandler.post { deliverCandidateResult(sessionEpoch, result) } },
+            onPredictionResult = { result -> mainHandler.post { deliverPredictionResult(result) } },
             userDictionary = { UserDictionaries.get(this) },
             learningStore = { LearningStores.get(this) },
         )
@@ -263,12 +266,12 @@ class UzumiInputMethodService : InputMethodService() {
         val match = LinearLayout.LayoutParams.MATCH_PARENT
         val wrap = LinearLayout.LayoutParams.WRAP_CONTENT
         bar.addView(leading, LinearLayout.LayoutParams(wrap, match))
-        bar.addView(candidates, LinearLayout.LayoutParams(0, match, 1f))
         inlineHost = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             visibility = View.GONE
         }.also { host -> bar.addView(host, LinearLayout.LayoutParams(0, match, 0f)) }
+        bar.addView(candidates, LinearLayout.LayoutParams(0, match, 1f))
         inlineHostItems = null
         bar.addView(trailing, LinearLayout.LayoutParams(wrap, match))
         root.addView(bar, LinearLayout.LayoutParams(match, (CandidateBarViews.BAR_HEIGHT_DP * density).toInt()))
@@ -389,6 +392,7 @@ class UzumiInputMethodService : InputMethodService() {
             // 変換結果の世代はモデルごとに変え、モデルを切り替えた前後の結果を混ぜない。
             liveCore = if (live) LiveConversionCore(initialConverterGeneration = neuralSpec?.generation ?: 0L) else null,
             liveClient = conversionWorker,
+            predictionClient = conversionWorker,
             compositionStyler = ::highlightSegment,
             evaluation = evaluation,
             correctness = CorrectnessJudge.shared,
@@ -678,6 +682,13 @@ class UzumiInputMethodService : InputMethodService() {
         if (current.applyLiveCandidates(result)) refreshCandidates()
     }
 
+    /** 予測応答を現在のsessionとrevisionが受け入れた場合だけ候補バーへ反映する。 */
+    private fun deliverPredictionResult(result: PredictionResult) {
+        val current = session ?: return
+        if (current.sessionEpoch != result.request.sessionEpoch) return
+        if (current.applyPredictionResult(result)) refreshCandidates()
+    }
+
     /** 訂正中のsegmentの表示範囲へ背景色を付け、どのsegmentを直しているかをEditor上で示す。 */
     private fun highlightSegment(text: String, span: DisplaySpan?): CharSequence {
         if (span == null || span.start >= span.end || span.end > text.length) return text
@@ -793,6 +804,10 @@ class UzumiInputMethodService : InputMethodService() {
         leading.removeAllViews()
         trailing.removeAllViews()
         val current = session
+        // 評価の記録中は予測を出さず、操作数を予測導入前と同じ条件で数える。
+        val predictionsShown = !evaluation.isRecording
+        if (predictionsShown) current?.refreshPredictions()
+        if (current?.hasComposition != true) addClipboardSuggestion(current, leading)
         if (current?.canUndoDeletion == true) {
             leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.line_delete_undo_description), true) {
                 evaluation.record(OperationKind.CORRECTION)
@@ -800,8 +815,20 @@ class UzumiInputMethodService : InputMethodService() {
                 refreshCandidates()
             })
         }
-        val entries = if (current?.isLiveMode == true) liveEntries(current, leading, trailing) else explicitEntries(current)
-        updateInlineHost(entries.isEmpty() && current != null && InlineAutofillPolicy.shouldShow(
+        val predictions = current?.predictionResult()?.takeIf { predictionsShown }?.let { result ->
+            result.candidates.map { candidate -> predictionEntry(current, result, candidate) }
+        }.orEmpty()
+        val regularEntries = if (current?.isLiveMode == true) liveEntries(current, leading, trailing) else explicitEntries(current)
+        val entries = predictions + regularEntries.mapIndexed { index, entry ->
+            CandidateEntry(
+                label = entry.label,
+                selected = entry.selected,
+                sectionBreakBefore = predictions.isNotEmpty() && index == 0,
+                onPick = entry.onPick,
+            )
+        }
+        // 次の語の予測はInline候補の右に並べるため、Inline候補の表示条件には通常候補だけを使う。
+        updateInlineHost(regularEntries.isEmpty() && current != null && InlineAutofillPolicy.shouldShow(
             hasComposition = current.hasComposition,
             hasRegularCandidates = false,
             inlineCount = inlineSuggestions.size,
@@ -841,6 +868,7 @@ class UzumiInputMethodService : InputMethodService() {
             }
             indexes.forEach { index ->
                 val entry = entries[index]
+                if (entry.sectionBreakBefore && index != indexes.first()) candidateLine.addView(views.divider())
                 candidateLine.addView(views.item(entry.label, entry.selected) { pickCandidate(current, entry, index) }.apply {
                     maxLines = 1
                 })
@@ -864,6 +892,17 @@ class UzumiInputMethodService : InputMethodService() {
         }
         // 縦線は右端の固定ボタン（末尾・∨）すべての手前に置き、候補の列がそこで終わることを示す
         trailing.addView(views.divider(), 0)
+        if (regularEntries.isEmpty() && current?.hasComposition != true) {
+            // 確定後の次の語の予測だけを並べている間は、待機中と同じくキーボードを閉じる操作を残す。
+            grid?.hide()
+            trailing.addView(views.symbolButton("⌄", getString(R.string.close_keyboard)) {
+                evaluation.record(OperationKind.OTHER)
+                requestHideSelf(0)
+            })
+            addToolbarEntry(trailing, current)
+            resizeCandidateBar(effectiveRows.second)
+            return
+        }
         trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
             evaluation.record(OperationKind.OTHER)
             toolbarPanel?.hide()
@@ -1032,7 +1071,11 @@ class UzumiInputMethodService : InputMethodService() {
     /** 候補一覧を開く。候補を選ぶと一覧を閉じる。 */
     private fun showCandidateGrid(current: EditorSession?, entries: List<CandidateEntry>) {
         val grid = candidateGrid ?: return
-        grid.show(entries.map { it.label }, entries.indexOfFirst { it.selected }) { index ->
+        grid.show(
+            values = entries.map { it.label },
+            selected = entries.indexOfFirst { it.selected },
+            dividerIndex = entries.indexOfFirst { it.sectionBreakBefore }.takeIf { it >= 0 },
+        ) { index ->
             grid.hide()
             pickCandidate(current, entries[index], index)
         }
@@ -1047,7 +1090,40 @@ class UzumiInputMethodService : InputMethodService() {
     )
 
     /** 候補バーの一項目。押したときの操作を持つ。 */
-    private class CandidateEntry(val label: String, val selected: Boolean, val onPick: () -> Unit)
+    private class CandidateEntry(
+        val label: String,
+        val selected: Boolean,
+        val sectionBreakBefore: Boolean = false,
+        val onPick: () -> Unit,
+    )
+
+    /** 予測候補を、選ぶと未確定全体（待機中はカーソル位置）をその語で確定する候補バーの項目にする。 */
+    private fun predictionEntry(
+        current: EditorSession,
+        result: PredictionResult,
+        candidate: PredictionCandidate,
+    ): CandidateEntry = CandidateEntry(candidate.value, selected = false) {
+        current.selectPrediction(result.request, candidate.id)
+    }
+
+    /** 待機中のクリップボード提案を予測候補より左へ置き、本文貼付と提案解除を別々に押せるようにする。 */
+    private fun addClipboardSuggestion(current: EditorSession?, leading: LinearLayout) {
+        val views = barViews ?: return
+        val suggestion = clipboardSuggestion?.takeIf { hasCurrentClipboardSuggestion(current) } ?: return
+        leading.addView(views.chip(getString(R.string.clipboard_suggestion_label, suggestion.label),
+            getString(R.string.clipboard_suggestion_description), true) {
+            evaluation.record(OperationKind.OTHER)
+            pasteFromClipboard()
+        }.apply {
+            // 長い本文でもInline候補の幅を残すため、提案は画面幅の半分までに抑えて末尾を省略する。
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            maxWidth = resources.displayMetrics.widthPixels / 2
+        })
+        leading.addView(views.symbolButton("✕", getString(R.string.clipboard_suggestion_dismiss)) {
+            dismissClipboardSuggestion()
+        })
+    }
 
     /** [index]番目の候補を選ぶ。表示したときと別の編集セッションになっていれば何もしない。 */
     private fun pickCandidate(shown: EditorSession?, entry: CandidateEntry, index: Int) {
@@ -1120,25 +1196,8 @@ class UzumiInputMethodService : InputMethodService() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        // コピー直後は先頭に本文の冒頭を見せた貼り付けボタンと、提案を閉じて通常のバーへ戻す✕を置く。
-        val suggestion = clipboardSuggestion?.takeIf { hasCurrentClipboardSuggestion(current) }
-        if (suggestion != null) {
-            line.addView(views.chip(getString(R.string.clipboard_suggestion_label, suggestion.label),
-                getString(R.string.clipboard_suggestion_description), true) {
-                evaluation.record(OperationKind.OTHER)
-                pasteFromClipboard()
-            }.apply {
-                // 長い本文でも✕とInline候補の幅を残すため、提案は画面幅の半分までに抑えて末尾を省略する。
-                maxLines = 1
-                ellipsize = TextUtils.TruncateAt.END
-                maxWidth = resources.displayMetrics.widthPixels / 2
-            })
-            line.addView(views.symbolButton("✕", getString(R.string.clipboard_suggestion_dismiss)) {
-                dismissClipboardSuggestion()
-            })
-        }
         // Inline候補は常設の枠（updateInlineHost）に出すため、ここでは候補がない場合の案内だけを置く。
-        if (!showInline && suggestion == null) {
+        if (!showInline && !hasCurrentClipboardSuggestion(current)) {
             line.addView(views.hint(hintText(current?.policy, current?.isLiveMode == true)))
         }
         row.addView(line, LinearLayout.LayoutParams(
