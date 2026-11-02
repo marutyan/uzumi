@@ -601,8 +601,22 @@ class EditorSession(
         return moveOutsideComposition(delta)
     }
 
-    /** compositionが無いときのカーソル移動。周辺文字列の書記素幅だけ外部selectionを動かす。 */
+    /**
+     * compositionが無いときのカーソル移動。範囲選択中はAndroid標準（Selection.moveLeft/moveRight）と同じく
+     * ←で選択の開始、→で終了へ畳む。選択が無いときだけ、周辺文字列の書記素幅だけ外部selectionを動かす。
+     */
     private fun moveOutsideComposition(delta: Int): Boolean {
+        val selectedStart = selectionStart
+        val selectedEnd = selectionEnd
+        if (selectedStart != null && selectedEnd != null && selectedStart != selectedEnd) {
+            val collapsed = if (delta < 0) selectedStart else selectedEnd
+            val accepted = connection.setSelection(collapsed, collapsed)
+            if (accepted) {
+                selectionStart = collapsed
+                selectionEnd = collapsed
+            }
+            return accepted
+        }
         val context = if (delta < 0) {
             connection.textBeforeCursor(64)?.toString() ?: return false
         } else {

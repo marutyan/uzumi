@@ -329,6 +329,26 @@ class EditorSessionTest {
         assertEquals(listOf(3 to 3), moveConnection.selectionCalls)
     }
 
+    /** 範囲選択中の←→は、Android標準と同じく←で選択の開始、→で終了へ畳む。全選択でも動く。 */
+    @Test
+    fun arrowsCollapseExternalSelectionToItsEdge() {
+        val left = ModelEditorConnection(text = "abcdef", selectionStart = 0, selectionEnd = 6)
+        val leftSession = EditorSession(left, normalPolicy(), 0, 6)
+        assertTrue(leftSession.moveCursor(-1))
+        assertEquals("", left.selectedText())
+        assertEquals("", left.textBeforeCursor(10))
+
+        val right = ModelEditorConnection(text = "abcdef", selectionStart = 2, selectionEnd = 4)
+        val rightSession = EditorSession(right, normalPolicy(), 2, 4)
+        assertTrue(rightSession.moveCursor(1))
+        assertEquals("abcd", right.textBeforeCursor(10))
+        assertEquals("", right.selectedText())
+
+        // 畳んだ後は、通常の書記素単位の移動に戻る。
+        assertTrue(rightSession.moveCursor(1))
+        assertEquals("abcde", right.textBeforeCursor(10))
+    }
+
     /** composition中の左移動、直前削除、挿入が残った文字の前に反映される。 */
     @Test
     fun insertsBeforeRemainingCompositionAfterCursorMoveAndDelete() {
