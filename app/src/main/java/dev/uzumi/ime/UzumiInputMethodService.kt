@@ -87,6 +87,11 @@ class UzumiInputMethodService : InputMethodService() {
     private var keyboardPanel: KeyboardPanel? = null
     private var candidateRow: LinearLayout? = null
     private var candidateBar: LinearLayout? = null
+
+    // Inline候補を置く常設の枠と、いま枠に入っている候補の一覧。候補が同じ間は付け外ししない。
+    // 部品を外すと別プロセスの描画面が作り直され、カーソル移動のたびに候補が一瞬消えるため。
+    private var inlineHost: LinearLayout? = null
+    private var inlineHostItems: List<InlineSuggestionItem>? = null
     private var toolbarRow: LinearLayout? = null
     // 候補バーの左端（元に戻す・読みの札）と右端（末尾へ戻る・候補一覧の開閉）の置き場。
     private var barLeading: LinearLayout? = null
@@ -250,6 +255,12 @@ class UzumiInputMethodService : InputMethodService() {
         val wrap = LinearLayout.LayoutParams.WRAP_CONTENT
         bar.addView(leading, LinearLayout.LayoutParams(wrap, match))
         bar.addView(candidates, LinearLayout.LayoutParams(0, match, 1f))
+        inlineHost = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+        }.also { host -> bar.addView(host, LinearLayout.LayoutParams(0, match, 0f)) }
+        inlineHostItems = null
         bar.addView(trailing, LinearLayout.LayoutParams(wrap, match))
         root.addView(bar, LinearLayout.LayoutParams(match, (CandidateBarViews.BAR_HEIGHT_DP * density).toInt()))
 
@@ -515,6 +526,8 @@ class UzumiInputMethodService : InputMethodService() {
         inlineResponseGeneration += 1
         detachInlineViews()
         inlineSuggestions = emptyList()
+        inlineHost?.removeAllViews()
+        inlineHostItems = null
     }
 
     /** 表示中のInline候補の部品を親から外す。同じ部品を別の親へ付け直す前と、破棄する前に呼ぶ。 */
@@ -728,6 +741,11 @@ class UzumiInputMethodService : InputMethodService() {
             })
         }
         val entries = if (current?.isLiveMode == true) liveEntries(current, leading, trailing) else explicitEntries(current)
+        updateInlineHost(entries.isEmpty() && current != null && InlineAutofillPolicy.shouldShow(
+            hasComposition = current.hasComposition,
+            hasRegularCandidates = false,
+            inlineCount = inlineSuggestions.size,
+        ))
         val grid = candidateGrid
         val preferences = UzumiSettings.toolbarPreferences(this)
         val visibleActions = availableToolbarActions(current)
@@ -1059,9 +1077,9 @@ class UzumiInputMethodService : InputMethodService() {
                 dismissClipboardSuggestion()
             })
         }
-        when {
-            showInline -> addInlineSuggestions(line)
-            suggestion == null -> line.addView(views.hint(hintText(current?.policy, current?.isLiveMode == true)))
+        // Inline候補は常設の枠（updateInlineHost）に出すため、ここでは候補がない場合の案内だけを置く。
+        if (!showInline && suggestion == null) {
+            line.addView(views.hint(hintText(current?.policy, current?.isLiveMode == true)))
         }
         row.addView(line, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1073,37 +1091,55 @@ class UzumiInputMethodService : InputMethodService() {
         })
     }
 
-    /** Inline候補を待機中のバーへ横に並べる。pinnedの候補は横スクロールの外の右端に固定する。 */
-    private fun addInlineSuggestions(row: LinearLayout) {
-        val density = resources.displayMetrics.density
-        val wrap = LinearLayout.LayoutParams.WRAP_CONTENT
-        val match = LinearLayout.LayoutParams.MATCH_PARENT
-        val margin = (INLINE_MARGIN_DP * density).toInt()
-        val (pinned, regular) = inlineSuggestions.partition { it.pinned }
-        // 候補の部品はrefreshCandidatesのたびに付け直すため、前の親から外してから加える。
-        detachInlineViews()
-        // 候補の中身は別プロセスのSurfaceで描かれ、部品自身は大きさを測れないため、展開時の寸法をそのまま使う。
-        val inlineParams = { item: InlineSuggestionItem ->
-            LinearLayout.LayoutParams(item.width, item.height).apply {
-                gravity = Gravity.CENTER_VERTICAL
-                setMargins(margin, 0, margin, 0)
+    /**
+     * 待機中だけInline候補の常設枠を表示する。枠の中身は候補の一覧が変わったときだけ作り直し、
+     * 候補バーの再構築では部品を付け外ししない。pinnedの候補は横スクロールの外の右端に固定する。
+     */
+    private fun updateInlineHost(show: Boolean) {
+        val host = inlineHost ?: return
+        val row = candidateRow ?: return
+        if (show && inlineHostItems !== inlineSuggestions) {
+            val density = resources.displayMetrics.density
+            val wrap = LinearLayout.LayoutParams.WRAP_CONTENT
+            val match = LinearLayout.LayoutParams.MATCH_PARENT
+            val margin = (INLINE_MARGIN_DP * density).toInt()
+            val (pinned, regular) = inlineSuggestions.partition { it.pinned }
+            detachInlineViews()
+            host.removeAllViews()
+            // 候補の中身は別プロセスのSurfaceで描かれ、部品自身は大きさを測れないため、展開時の寸法をそのまま使う。
+            val inlineParams = { item: InlineSuggestionItem ->
+                LinearLayout.LayoutParams(item.width, item.height).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    setMargins(margin, 0, margin, 0)
+                }
             }
-        }
-        val scrolling = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            regular.forEach { addView(it.view, inlineParams(it)) }
-        }
-        val line = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(HorizontalScrollView(this@UzumiInputMethodService).apply {
+            val scrolling = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                regular.forEach { addView(it.view, inlineParams(it)) }
+            }
+            host.addView(HorizontalScrollView(this).apply {
                 isHorizontalScrollBarEnabled = false
                 addView(scrolling, FrameLayout.LayoutParams(wrap, match))
             }, LinearLayout.LayoutParams(0, match, 1f))
-            pinned.forEach { addView(it.view, inlineParams(it)) }
+            pinned.forEach { host.addView(it.view, inlineParams(it)) }
+            inlineHostItems = inlineSuggestions
         }
-        row.addView(line, LinearLayout.LayoutParams(0, match, 1f))
+        // 表示中は候補行を内容の幅にして残りを枠へ回し、非表示中は候補行が残り幅を使う。
+        setBarWeight(row, if (show) 0f else 1f)
+        setBarWeight(host, if (show) 1f else 0f)
+        val visibility = if (show) View.VISIBLE else View.GONE
+        if (host.visibility != visibility) host.visibility = visibility
+    }
+
+    /** 候補バー内の子の横幅の配分を、変わる場合だけ更新する。 */
+    private fun setBarWeight(view: View, weight: Float) {
+        val params = view.layoutParams as? LinearLayout.LayoutParams ?: return
+        val width = if (weight > 0f) 0 else LinearLayout.LayoutParams.WRAP_CONTENT
+        if (params.weight == weight && params.width == width) return
+        params.weight = weight
+        params.width = width
+        view.layoutParams = params
     }
 
     /** 設定画面を開く。IMEから開くため新しいtaskで起動する。 */
