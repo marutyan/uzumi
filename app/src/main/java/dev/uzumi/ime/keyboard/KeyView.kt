@@ -123,6 +123,9 @@ class KeyView(context: Context) : View(context) {
     )
     private var cursorDragActionSent = false
 
+    // 同じキーボードの全キーで共有する押下順。後から押したキーより先に、古い文字キーを確定するために使う。
+    private var pressOrder: KeyPressOrder<KeyView>? = null
+
     // 設定画面で選んだ反応。振動・キー音・削除の左ドラッグを使うか。
     private var vibrationEnabled = true
     private var keySoundEnabled = false
@@ -226,6 +229,11 @@ class KeyView(context: Context) : View(context) {
         }
     }
 
+    /** キーボード全体で共有する押下順を設定する。設定しなければキーごとに離した順で確定する。 */
+    fun setPressOrder(order: KeyPressOrder<KeyView>) {
+        pressOrder = order
+    }
+
     /**
      * 設定画面で選んだ振動・キー音・削除の左ドラッグの有無を反映する。
      */
@@ -278,6 +286,7 @@ class KeyView(context: Context) : View(context) {
      * 保留中のタッチ入力、長押し、連続実行を直ちに中断する。
      */
     fun cancelPendingInput() {
+        pressOrder?.release(this)
         repeatHandler.removeCallbacksAndMessages(null)
         removeCallbacks(longPressRunnable)
         spaceCursorDrag.reset()
@@ -368,6 +377,9 @@ class KeyView(context: Context) : View(context) {
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                // 別のキーを押したままの指があれば、このキーの処理より先にその文字を確定して押した順を保つ。
+                pressOrder?.press(this, isModifier = spec is KeySpec.Shift, isTextKey = KeyView::isTextKeyPressed)
+                    ?.forEach(KeyView::commitBeforeNewerKey)
                 activePointerId = event.getPointerId(0)
                 gesture.down(event.x, event.y)
                 spaceCursorDrag.reset()
@@ -459,7 +471,7 @@ class KeyView(context: Context) : View(context) {
                         cancelPendingInput()
                     } else {
                         // アクティブポインタが離脱した場合、そのポインタの座標で入力を確定
-                        handleActivePointerUp(event, actionIndex)
+                        handleActivePointerUp(event.getX(actionIndex), event.getY(actionIndex))
                     }
                 }
                 return true
@@ -469,7 +481,7 @@ class KeyView(context: Context) : View(context) {
                 val actionIndex = event.actionIndex
                 val pointerId = event.getPointerId(actionIndex)
                 if (pointerId == activePointerId) {
-                    handleActivePointerUp(event, actionIndex)
+                    handleActivePointerUp(event.getX(actionIndex), event.getY(actionIndex))
                 } else {
                     // 別ポインタのUPでは確定せず、安全にリセット
                     cancelPendingInput()
@@ -486,13 +498,30 @@ class KeyView(context: Context) : View(context) {
         }
     }
 
+    /** 文字を入力するキー（文字・かな）が押下中かどうか。後から押したキーより先に確定する対象を選ぶ。 */
+    private fun isTextKeyPressed(): Boolean =
+        gesture.isPressed && (spec is KeySpec.SimpleText || spec is KeySpec.Kana)
+
+    /**
+     * 後から別のキーが押されたため、指を離す前に最後の指の位置で文字を確定する。フリック中のかなキーは
+     * その時点の向きの文字、長押し成立後は長押し文字を入力する。この指が後で離れても何も送らない。
+     */
+    private fun commitBeforeNewerKey() {
+        if (!isTextKeyPressed()) return
+        handleActivePointerUp(gesture.lastX, gesture.lastY)
+    }
+
     /**
      * アクティブポインタの離脱時に文字確定またはアクション実行を行う。
      *
      * 高速なDOWN→UPでMOVEイベントが届かない場合でもUP座標から方向を再計算し、
      * タッチ経路ではperformClickによる重複送信を防ぎつつAccessibilityEventを通知する。
+     *
+     * @param upX 指を離した位置のX座標（キー内の座標）
+     * @param upY 指を離した位置のY座標（キー内の座標）
      */
-    private fun handleActivePointerUp(event: MotionEvent, pointerIndex: Int) {
+    private fun handleActivePointerUp(upX: Float, upY: Float) {
+        pressOrder?.release(this)
         repeatHandler.removeCallbacksAndMessages(null)
         removeCallbacks(longPressRunnable)
         onPreview?.invoke(this, null)
@@ -502,7 +531,7 @@ class KeyView(context: Context) : View(context) {
             supportsSpaceCursorDrag(finalSpecBeforeRelease.action) &&
             spaceCursorDrag.isTracking
         ) {
-            spaceCursorDrag.move(event.getX(pointerIndex), event.getY(pointerIndex))
+            spaceCursorDrag.move(upX, upY)
         } else {
             0
         }
@@ -528,8 +557,6 @@ class KeyView(context: Context) : View(context) {
 
         if (!wasPressed || finalSpec == null) return
 
-        val upX = event.getX(pointerIndex)
-        val upY = event.getY(pointerIndex)
         val isInside = upX in 0f..width.toFloat() && upY in 0f..height.toFloat()
 
         when (finalSpec) {

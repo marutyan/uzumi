@@ -15,6 +15,14 @@ class KeyGestureState(private val slopPx: Float) {
     var startY = 0f
         private set
 
+    /** 最後に受け取った指のX座標。後から押した指の都合で先に確定するとき、離した位置の代わりに使う。 */
+    var lastX = 0f
+        private set
+
+    /** 最後に受け取った指のY座標。[lastX]と同じ用途に使う。 */
+    var lastY = 0f
+        private set
+
     /** キーが押下中かどうか。 */
     var isPressed = false
         private set
@@ -31,6 +39,8 @@ class KeyGestureState(private val slopPx: Float) {
     fun down(x: Float, y: Float) {
         startX = x
         startY = y
+        lastX = x
+        lastY = y
         isPressed = true
         hasMovedBeyondSlop = false
         isLongPressActive = false
@@ -38,7 +48,10 @@ class KeyGestureState(private val slopPx: Float) {
 
     /** 指の移動を記録する。長押し成立後の移動は長押しを取り消さない。 */
     fun move(x: Float, y: Float) {
-        if (!isPressed || isLongPressActive) return
+        if (!isPressed) return
+        lastX = x
+        lastY = y
+        if (isLongPressActive) return
         val dx = x - startX
         val dy = y - startY
         if (dx * dx + dy * dy >= slopPx * slopPx) {
@@ -60,6 +73,35 @@ class KeyGestureState(private val slopPx: Float) {
         isPressed = false
         hasMovedBeyondSlop = false
         isLongPressActive = false
+    }
+}
+
+/**
+ * 別々のキーを押している指を押した順に覚え、新しいキーを押したときに先に確定すべき古い文字キーを返す。
+ * 各キーが指を離した順に文字を送ると、二本指で続けて打ったときに文字順が逆になるため、
+ * 標準のキーボードと同じく新しいキーの処理より前に古い文字キーを確定し、押した順を保つ。
+ * Viewに依存しない形にしてJVMテストで守る。
+ */
+class KeyPressOrder<K> {
+    // 押下中のキー。先頭ほど古い。
+    private val pressed = ArrayList<K>()
+
+    /**
+     * [key]の押下を登録し、先に確定すべき古いキーを押した順に返す。返したキーは確定済みとして一覧から外す。
+     * [isModifier]のキー（Shift）は後の文字に作用するため、古いキーを確定させない。
+     * [isTextKey]は、押下中のキーが文字を入力するキー（フリック中を含む）かどうかを返す。
+     */
+    fun press(key: K, isModifier: Boolean, isTextKey: (K) -> Boolean): List<K> {
+        pressed.remove(key)
+        val older = if (isModifier) emptyList() else pressed.filter(isTextKey)
+        pressed.removeAll(older.toSet())
+        pressed.add(key)
+        return older
+    }
+
+    /** 指を離した、または押下を取り消したキーを外す。 */
+    fun release(key: K) {
+        pressed.remove(key)
     }
 }
 

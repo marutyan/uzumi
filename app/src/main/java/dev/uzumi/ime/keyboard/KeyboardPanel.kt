@@ -37,6 +37,9 @@ class KeyboardPanel(
     private var isPasswordField = false
 
     private val allKeyViews = mutableListOf<KeyView>()
+
+    // 全キーで共有する押下順。二本指で続けて打っても押した順に文字を確定するために使う。
+    private val pressOrder = KeyPressOrder<KeyView>()
     private val enterKeyViews = mutableListOf<KeyView>()
     private val qwertyKeyViews = mutableListOf<KeyView>()
     private val shiftKeyViews = mutableListOf<KeyView>()
@@ -588,6 +591,7 @@ class KeyboardPanel(
             )
         }
         keyView.applyPreferences(preferences)
+        keyView.setPressOrder(pressOrder)
         allKeyViews.add(keyView)
         return keyView
     }
