@@ -14,8 +14,11 @@ interface ConversionEngine {
     /** エンジン側のsessionを破棄する。 */
     fun deleteSession(sessionId: Long)
 
-    /** 以後の変換で学習・履歴を使うかを切り替える。変換を送る前に呼ぶ。 */
-    fun setIncognito(incognito: Boolean): Boolean
+    /**
+     * 以後の変換で学習・履歴を使うかと、小書き・濁点・半濁点の打ち分けを区別しない変換（表記ゆれ変換）を使うかを
+     * 切り替える。変換を送る前に呼ぶ。表記ゆれ変換は12キーだけで入れた読みに使う。
+     */
+    fun setIncognito(incognito: Boolean, kanaModifierInsensitive: Boolean = false): Boolean
 
     /**
      * sessionの状態を読みだけから作り直して変換し、文節と各文節の候補を返す。

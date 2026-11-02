@@ -178,8 +178,6 @@ class UzumiInputMethodService : InputMethodService() {
                 native = JniMozcNativeBridge(),
                 profileDirectory = installer::profileDirectory,
                 dataFile = installer::install,
-                // 評価の記録中は表記ゆれ変換を使わず、変換結果を評価の比較条件から変えない。
-                kanaModifierInsensitive = { !evaluation.isRecording },
             ),
             executor = countingExecutor,
             onHealthChanged = { health ->
@@ -191,7 +189,7 @@ class UzumiInputMethodService : InputMethodService() {
             onOutcome = { outcome -> mainHandler.post { deliverConversion(outcome) } },
             onLiveResult = { sessionEpoch, result -> mainHandler.post { deliverLiveResult(sessionEpoch, result) } },
             onLiveReport = { sessionEpoch, report -> mainHandler.post { deliverLiveReport(sessionEpoch, report) } },
-            // 評価用の報告は評価モードの間だけ作る。計数器の状態はworkerのthreadからも読める。
+            // 評価用の報告は評価モードの間だけ作り、表記ゆれ変換も使わない。計数器の状態はworkerのthreadからも読める。
             evaluationActive = { evaluation.isRecording },
             onCandidateResult = { sessionEpoch, result -> mainHandler.post { deliverCandidateResult(sessionEpoch, result) } },
             onPredictionResult = { result -> mainHandler.post { deliverPredictionResult(result) } },
@@ -585,7 +583,7 @@ class UzumiInputMethodService : InputMethodService() {
             is KeyboardAction.Text -> if (keyboardPanel?.isRomajiQwertyMode == true) {
                 current.inputRomajiText(action.value)
             } else {
-                current.inputText(action.value)
+                current.inputText(action.value, fromTwelveKey = keyboardPanel?.isKanaMode == true)
             }
             is KeyboardAction.KanaTap ->
                 current.inputKanaTap(KeyboardLayoutData.toggleChars(action.type), SystemClock.uptimeMillis())

@@ -74,6 +74,31 @@ class ConversionWorkerTest {
         assertTrue(incognitoIndex < convertIndex)
     }
 
+    /** 12キーだけで入れた読みの要求には表記ゆれ変換を指定し、評価の記録中は比較条件を変えないよう指定しない。 */
+    @Test
+    fun kanaModifierInsensitiveFollowsRequestAndEvaluation() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.kanaModifierInsensitiveCalls.clear()
+
+        fixture.worker.requestConversion(request(reading = "かんじ").copy(kanaModifierInsensitive = true))
+        fixture.executor.runAll()
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "かん").copy(kanaModifierInsensitive = true))
+        fixture.executor.runAll()
+        fixture.worker.requestConversion(request(revision = 2, reading = "かんじ"))
+        fixture.executor.runAll()
+        assertEquals(listOf(true, true, false), fixture.engine.kanaModifierInsensitiveCalls)
+
+        fixture.engine.kanaModifierInsensitiveCalls.clear()
+        fixture.evaluating = true
+        fixture.worker.requestConversion(request(revision = 3, reading = "かんじ").copy(kanaModifierInsensitive = true))
+        fixture.executor.runAll()
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 2, reading = "かん").copy(kanaModifierInsensitive = true))
+        fixture.executor.runAll()
+        assertTrue(fixture.engine.kanaModifierInsensitiveCalls.isNotEmpty())
+        assertTrue(fixture.engine.kanaModifierInsensitiveCalls.none { it })
+    }
+
     /** incognitoを指定できなければ、読みをエンジンへ送らず失敗として返す。 */
     @Test
     fun incognitoFailurePreventsConversion() {
@@ -1360,8 +1385,12 @@ private class FakeConversionEngine : ConversionEngine {
         calls += "deleteSession($sessionId)"
     }
 
-    override fun setIncognito(incognito: Boolean): Boolean {
+    // setIncognitoで受け取った表記ゆれ変換の有無。呼び出しの記録の形を変えないよう別に残す。
+    val kanaModifierInsensitiveCalls = mutableListOf<Boolean>()
+
+    override fun setIncognito(incognito: Boolean, kanaModifierInsensitive: Boolean): Boolean {
         calls += "setIncognito($incognito)"
+        kanaModifierInsensitiveCalls += kanaModifierInsensitive
         return incognitoAccepted
     }
 

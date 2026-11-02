@@ -36,6 +36,10 @@ class KeyboardPanel(
     val isRomajiQwertyMode: Boolean
         get() = currentMode == KeyboardMode.QWERTY && qwertyLayer.isRomaji
 
+    /** 12キー（かな配列）を表示中か。小書き・濁点を区別しない変換は、この配列で入れた読みだけに使う。 */
+    val isKanaMode: Boolean
+        get() = currentMode == KeyboardMode.KANA
+
     private val shiftState = QwertyShiftState()
 
     // 入力欄が求める大文字化の種類。ローマ字の層では小文字がかなになるため使わず、英字の層へ移ったときに改めて当てる。

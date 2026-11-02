@@ -14,6 +14,8 @@ data class ConversionRequest(
     // 先頭から注目文節までの各文節の読みの書記素数。最後の値が伸縮後の注目文節の長さ。
     // ユーザーが文節を伸縮したときだけ指定し、nullならエンジンの区切りのまま変換する。
     val segmentLengths: List<Int>? = null,
+    // 読みが12キーだけで入力されたか。trueなら小書き・濁点・半濁点の打ち分けを区別しない変換を使う。
+    val kanaModifierInsensitive: Boolean = false,
 ) {
     /** 伸縮した注目文節の位置。応答を表示するとき、候補バーの対象をこの文節に保つ。 */
     val focusedSegmentIndex: Int
@@ -27,6 +29,8 @@ data class PredictionRequest(
     val reading: String = "",
     val precedingText: String = "",
     val incognito: Boolean = false,
+    // 読みが12キーだけで入力されたか。trueなら小書き・濁点・半濁点の違いを除いて予測を照合する。
+    val kanaModifierInsensitive: Boolean = false,
 ) {
     /** compositionが無い状態で周辺文字列から次の語を求める要求か。 */
     val isZeroQuery: Boolean

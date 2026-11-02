@@ -108,6 +108,14 @@ class EditorSession(
     // 候補の取り直しを依頼して、まだ結果を受けていないか。
     private var candidatesOutstanding = false
 
+    // 今の未確定の読みが12キー（かな配列のフリック・トグル）だけで入力されたか。小書き・濁点・半濁点を
+    // 区別しない変換はこのときだけ使う（Gboardと同じ）。ライブ変換のコアにも同じ値を渡して要求へ写す。
+    private var twelveKeyOnlyComposition = false
+        set(value) {
+            field = value
+            liveCore?.kanaModifierInsensitive = value
+        }
+
     // 変換エンジンが使えない間のライブ変換の結果。部分範囲ごとに読みとカタカナを候補にする。
     private val kanaFallbackConverter = SegmentedLiveConverter(
         convertRange = { chunk, _ ->
@@ -272,6 +280,7 @@ class EditorSession(
                 revision = predictionRevision(),
                 reading = reading,
                 incognito = policy.suppressLearning,
+                kanaModifierInsensitive = twelveKeyOnlyComposition,
             )
         }
         // 次の語の予測は確定済みの本文を読むため、学習禁止欄・URLやメールの欄・範囲選択中には読まない。
@@ -315,12 +324,21 @@ class EditorSession(
     /**
      * 文字入力をcompositionへ追加する。接続結果が不明なら同じ本文を再送しない。
      * 12キーの連続タップとローマ字の入力途中は、別の文字が来た時点で区切る。
+     * fromTwelveKeyは12キー（かな配列）のフリック入力か。小書き・濁点を区別しない変換を使うかの判定に使う。
      */
-    fun inputText(value: String): Boolean {
+    fun inputText(value: String, fromTwelveKey: Boolean = false): Boolean {
         if (!active || value.isEmpty()) return false
         kanaToggle.reset()
         if (!finishRomajiInput()) return false
-        return inputTextDirect(value)
+        return inputTextDirect(value, fromTwelveKey)
+    }
+
+    /**
+     * 読みへ文字を加える直前に、その入力元を記録する。新しい未確定は入力元で決め、続く入力に12キー以外が
+     * 一度でも混ざれば、その未確定では小書き・濁点を区別しない変換を使わない（安全側）。
+     */
+    private fun noteInputSource(fromTwelveKey: Boolean) {
+        twelveKeyOnlyComposition = fromTwelveKey && (!hasComposition || twelveKeyOnlyComposition)
     }
 
     /**
@@ -329,6 +347,7 @@ class EditorSession(
      */
     fun inputRomajiText(value: String): Boolean {
         if (!active || value.isEmpty()) return false
+        noteInputSource(fromTwelveKey = false)
         if (romajiComposer == null || value.any { it.code !in ASCII_PRINTABLE }) return inputText(value)
         kanaToggle.reset()
         return value.all(::inputRomajiCharacter)
@@ -350,7 +369,12 @@ class EditorSession(
         if (liveCore == null && currentConversion() != null && !commitComposition()) return false
         val step = kanaToggle.next(values, nowMillis, compositionInputCursor())
         val previous = step.previous
-        val accepted = if (previous == null) inputTextDirect(step.value) else replaceCompositionTail(previous, step.value)
+        val accepted = if (previous == null) {
+            inputTextDirect(step.value, fromTwelveKey = true)
+        } else {
+            noteInputSource(fromTwelveKey = true)
+            replaceCompositionTail(previous, step.value)
+        }
         if (!accepted) {
             kanaToggle.reset()
             // 末尾が想定と違って差し替えられなかった場合は、タップを失わないよう新しい文字として入れ直す。
@@ -395,16 +419,20 @@ class EditorSession(
         get() = romajiComposer != null
 
     /** 文字入力をcompositionへ追加する共通本体。直接確定の欄では一文字ずつ確定する。 */
-    private fun inputTextDirect(value: String): Boolean {
+    private fun inputTextDirect(value: String, fromTwelveKey: Boolean = false): Boolean {
         if (commitsDirectly) {
             val accepted = connection.commitText(value, 1)
             if (accepted) updateExternalSelectionAfterCommit(value)
             return accepted
         }
-        if (liveCore != null) return performLive { it.inputText(value) } ?: false
+        if (liveCore != null) {
+            noteInputSource(fromTwelveKey)
+            return performLive { it.inputText(value) } ?: false
+        }
 
         // 変換結果の表示中に続けて入力した場合は、表示中の変換を確定してから新しい読みを始める。
         if (currentConversion() != null && !commitComposition()) return false
+        noteInputSource(fromTwelveKey)
         if (compositionStart == null && selectionStart != null && selectionEnd != null) {
             compositionStart = minOf(selectionStart!!, selectionEnd!!)
         }
@@ -1208,6 +1236,7 @@ class EditorSession(
                 revision = revision,
                 reading = buffer.reading,
                 incognito = policy.suppressLearning,
+                kanaModifierInsensitive = twelveKeyOnlyComposition,
             )
             pendingConversion = request
             client.requestConversion(request)
@@ -1629,6 +1658,7 @@ class EditorSession(
             reading = buffer.reading,
             incognito = policy.suppressLearning,
             segmentLengths = precedingLengths + length,
+            kanaModifierInsensitive = twelveKeyOnlyComposition,
         )
         pendingConversion = request
         client.requestConversion(request)
@@ -1641,7 +1671,7 @@ class EditorSession(
         val client = liveClient ?: return
         if (!client.isAvailable) return
         val units = liveLearningUnits(segments)
-        if (units.isNotEmpty()) client.learnCommitted(sessionEpoch, units)
+        if (units.isNotEmpty()) client.learnCommitted(sessionEpoch, units, twelveKeyOnlyComposition)
     }
 
     /** 候補バーの対象にできるsegmentか。読点だけのsegmentは訂正の対象にしない。 */

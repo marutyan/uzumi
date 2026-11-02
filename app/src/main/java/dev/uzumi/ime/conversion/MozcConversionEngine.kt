@@ -40,9 +40,6 @@ class MozcConversionEngine(
     private val profileDirectory: () -> File,
     // 辞書fileを用意して返す。APKに辞書が無ければnullを返す。
     private val dataFile: () -> File?,
-    // 小書き・濁点・半濁点の打ち分けを区別しない変換（表記ゆれ変換）を使うか。setIncognitoのたびに読む。
-    // 評価の記録中は変換結果を従来の条件から変えないためfalseを返す。
-    private val kanaModifierInsensitive: () -> Boolean = { true },
 ) : ConversionEngine {
     // 直前の応答にpreeditが残っていたsession。worker threadだけが読み書きする。
     private val sessionsWithPreedit = mutableSetOf<Long>()
@@ -94,13 +91,12 @@ class MozcConversionEngine(
 
     /**
      * 学習の有無と表記ゆれ変換の有無だけの要求へ戻し、予測用requestの全sessionへの残留を防ぐ。
-     * 表記ゆれ変換の有無はここで読み、次のsetIncognitoまでの変換・予測・復元で同じ値を使う。
+     * 表記ゆれ変換の有無は次のsetIncognitoまでの変換・予測・復元で同じ値を使う。
      */
-    override fun setIncognito(incognito: Boolean): Boolean {
-        val insensitive = kanaModifierInsensitive()
-        if (!setRequest(request(incognito, insensitive))) return false
+    override fun setIncognito(incognito: Boolean, kanaModifierInsensitive: Boolean): Boolean {
+        if (!setRequest(request(incognito, kanaModifierInsensitive))) return false
         incognitoMode = incognito
-        kanaModifierInsensitiveMode = insensitive
+        kanaModifierInsensitiveMode = kanaModifierInsensitive
         return true
     }
 

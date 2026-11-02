@@ -1949,6 +1949,59 @@ class EditorSessionTest {
         assertEquals(listOf("蚊", "か"), session.candidateOptions().map(CandidateOption::value))
     }
 
+    /**
+     * 小書き・濁点を区別しない変換は、12キー（フリック・トグル）だけで入れた読みの変換・予測要求にだけ付ける。
+     * 英字配列やローマ字が一度でも混ざった未確定では付けず、確定後の新しい未確定は入力元で決め直す。
+     */
+    @Test
+    fun kanaModifierInsensitiveFollowsTwelveKeyOnlyComposition() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val prediction = FakePredictionClient()
+        val session = EditorSession(
+            connection, normalPolicy(), conversionClient = client, predictionClient = prediction, romajiInputEnabled = true,
+        )
+        assertTrue(session.inputText("り", fromTwelveKey = true))
+        assertTrue(session.inputKanaTap(listOf("や", "ゆ", "よ"), 0))
+        assertTrue(session.refreshPredictions())
+        assertTrue(prediction.requests.last().kanaModifierInsensitive)
+        assertTrue(session.convert())
+        assertTrue(client.requests.last().kanaModifierInsensitive)
+        assertTrue(session.commitComposition())
+
+        // 英字配列から入れた読みには使わない。
+        assertTrue(session.inputText("か"))
+        assertTrue(session.convert())
+        assertFalse(client.requests.last().kanaModifierInsensitive)
+        assertTrue(session.commitComposition())
+
+        // 12キーで始めた未確定にローマ字が混ざれば、以後は使わない（安全側）。
+        assertTrue(session.inputText("か", fromTwelveKey = true))
+        typeRomaji(session, "ki")
+        assertTrue(session.inputText("く", fromTwelveKey = true))
+        assertTrue(session.convert())
+        assertFalse(client.requests.last().kanaModifierInsensitive)
+    }
+
+    /** ライブ変換でも、12キーだけで入れた読みの変換要求と確定時の学習に表記ゆれ変換の指定を付ける。 */
+    @Test
+    fun liveRequestsCarryTwelveKeyOnlySource() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val liveClient = FakeLiveClient()
+        val session = EditorSession(
+            connection = connection,
+            policy = normalPolicy(),
+            sessionEpoch = 9,
+            liveCore = LiveConversionCore(),
+            liveClient = liveClient,
+            romajiInputEnabled = true,
+        )
+        assertTrue(session.inputText("きょうは", fromTwelveKey = true))
+        assertTrue(liveClient.requests.last().second.kanaModifierInsensitive)
+        typeRomaji(session, "ka")
+        assertFalse(liveClient.requests.last().second.kanaModifierInsensitive)
+    }
+
     /** 明示変換で同じキーを続けてタップすると、末尾の一文字だけが行の次の文字へ替わり、一周すると戻る。 */
     @Test
     fun kanaTapTogglesLastCharacterWithinWindow() {
@@ -2387,7 +2440,7 @@ private class FakeLiveClient : LiveConversionClient {
         requests += sessionEpoch to request
     }
 
-    override fun learnCommitted(sessionEpoch: Long, units: List<List<LearnedSegment>>) {
+    override fun learnCommitted(sessionEpoch: Long, units: List<List<LearnedSegment>>, kanaModifierInsensitive: Boolean) {
         learned += units
     }
 

@@ -37,7 +37,7 @@ class MozcConversionEngineTest {
             }
         }
         val engine = MozcConversionEngine(native, { File("profile") }, { null })
-        assertTrue(engine.setIncognito(true))
+        assertTrue(engine.setIncognito(true, kanaModifierInsensitive = true))
         native.inputs.clear()
 
         assertEquals(
@@ -73,7 +73,7 @@ class MozcConversionEngineTest {
     fun suggestKeepsWholeReadingAndKanaVariantCandidates() {
         val native = kanaVariantPredictionNative()
         val engine = MozcConversionEngine(native, { File("profile") }, { null })
-        assertTrue(engine.setIncognito(false))
+        assertTrue(engine.setIncognito(false, kanaModifierInsensitive = true))
 
         assertEquals(
             listOf(
@@ -89,11 +89,11 @@ class MozcConversionEngineTest {
         )
     }
 
-    /** 評価の記録中など表記ゆれ変換を使わない間は、Requestで無効にし、読みの違う候補を従来どおり除く。 */
+    /** 12キー以外の入力や評価の記録中など表記ゆれ変換を使わない間は、Requestで無効にし、読みの違う候補を従来どおり除く。 */
     @Test
     fun suggestWithoutKanaModifierInsensitiveDropsVariantReadings() {
         val native = kanaVariantPredictionNative()
-        val engine = MozcConversionEngine(native, { File("profile") }, { null }, kanaModifierInsensitive = { false })
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
         assertTrue(engine.setIncognito(false))
 
         assertEquals(
@@ -153,14 +153,14 @@ class MozcConversionEngineTest {
             }
         }
         val enabled = MozcConversionEngine(FakeMozcNative().apply { this.respond = respond }, { File("profile") }, { null })
-        assertTrue(enabled.setIncognito(false))
+        assertTrue(enabled.setIncognito(false, kanaModifierInsensitive = true))
         assertEquals(
             listOf("了解しました", "利用開始ました"),
             enabled.convertSegments(sessionId = 5, reading = "りようかいしました")!!.single().candidates,
         )
 
         val disabled = MozcConversionEngine(
-            FakeMozcNative().apply { this.respond = respond }, { File("profile") }, { null }, kanaModifierInsensitive = { false },
+            FakeMozcNative().apply { this.respond = respond }, { File("profile") }, { null },
         )
         assertTrue(disabled.setIncognito(false))
         assertEquals(
@@ -352,7 +352,7 @@ class MozcConversionEngineTest {
         val native = FakeMozcNative()
         val engine = MozcConversionEngine(native, { File("profile") }, { null })
 
-        assertTrue(engine.setIncognito(true))
+        assertTrue(engine.setIncognito(true, kanaModifierInsensitive = true))
 
         val input = native.inputs.single()
         assertEquals(Input.CommandType.SET_REQUEST, input.type)

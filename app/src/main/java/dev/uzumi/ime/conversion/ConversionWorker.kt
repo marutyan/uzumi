@@ -41,8 +41,11 @@ interface LiveConversionClient {
     /** ライブ変換を依頼する。未処理の古い要求は捨てられ、最新の要求だけが変換される。 */
     fun requestLiveConversion(sessionEpoch: Long, request: LiveRequest)
 
-    /** ライブ変換で確定したsegment列を、単位ごとにエンジンへ学習させる。学習禁止欄では呼ばない。 */
-    fun learnCommitted(sessionEpoch: Long, units: List<List<LearnedSegment>>)
+    /**
+     * ライブ変換で確定したsegment列を、単位ごとにエンジンへ学習させる。学習禁止欄では呼ばない。
+     * kanaModifierInsensitiveは確定した読みが12キーだけで入力されたかで、変換時と同じ条件で表記を再現するために使う。
+     */
+    fun learnCommitted(sessionEpoch: Long, units: List<List<LearnedSegment>>, kanaModifierInsensitive: Boolean = false)
 
     /** 注目したsegmentの候補の取り直しを依頼する。未処理の古い要求は捨てられ、最新の要求だけを処理する。 */
     fun requestSegmentCandidates(sessionEpoch: Long, request: CandidateRequest)
@@ -207,7 +210,8 @@ class ConversionWorker(
                 .firstOrNull { it.id == candidateId } ?: return@execute
             candidate.reading?.let { reading -> lookupLearningStore()?.record(reading, candidate.value) }
             val sessionId = predictionSessions[request.sessionEpoch] ?: return@execute
-            if (!runCatching { engine.setIncognito(false) }.getOrDefault(false)) return@execute
+            val insensitive = kanaModifierInsensitive(request.kanaModifierInsensitive)
+            if (!runCatching { engine.setIncognito(false, insensitive) }.getOrDefault(false)) return@execute
             runCatching { engine.commitPrediction(sessionId, candidateId) }
             lastPredictionRequests.remove(request.sessionEpoch)
             lastPredictionCandidates.remove(request.sessionEpoch)
@@ -218,13 +222,14 @@ class ConversionWorker(
      * 終了判定は呼び出し時点で行う。Send等で確定直後に入力欄が閉じても、同じ世代のsession破棄より先に
      * キューへ積むため、確定した内容を学習できる。
      */
-    override fun learnCommitted(sessionEpoch: Long, units: List<List<LearnedSegment>>) {
+    override fun learnCommitted(sessionEpoch: Long, units: List<List<LearnedSegment>>, kanaModifierInsensitive: Boolean) {
         if (units.isEmpty() || isEnded(sessionEpoch)) return
         executor.execute {
             val sessionId = engineSessions[sessionEpoch] ?: return@execute
             // 表示のまま確定したsegmentと、同じ単位の先頭からの句をIME側の学習にも記録する。
             lookupLearningStore()?.let { store -> recordCommittedUnits(store, units) }
-            if (!runCatching { engine.setIncognito(false) }.getOrDefault(false)) return@execute
+            val insensitive = kanaModifierInsensitive(kanaModifierInsensitive)
+            if (!runCatching { engine.setIncognito(false, insensitive) }.getOrDefault(false)) return@execute
             lastConverted.remove(sessionEpoch)
             for (unit in units) {
                 val learned = runCatching { engine.learnSegments(sessionId, unit) }.getOrDefault(false)
@@ -325,7 +330,8 @@ class ConversionWorker(
         }
         val sessionId = sessionFor(request.sessionEpoch)
         // 学習と履歴の方針は、読みをエンジンへ送る前に必ず指定する。
-        if (sessionId == null || !runCatching { engine.setIncognito(request.incognito) }.getOrDefault(false)) {
+        val insensitive = kanaModifierInsensitive(request.kanaModifierInsensitive)
+        if (sessionId == null || !runCatching { engine.setIncognito(request.incognito, insensitive) }.getOrDefault(false)) {
             onOutcome(ConversionOutcome.Failed(request))
             return
         }
@@ -409,7 +415,8 @@ class ConversionWorker(
         val request = pending.request
         if (isEnded(sessionEpoch) || currentHealth !is EngineHealth.Ready) return
         val sessionId = sessionFor(sessionEpoch) ?: return
-        if (!runCatching { engine.setIncognito(!request.learningAllowed) }.getOrDefault(false)) return
+        val insensitive = kanaModifierInsensitive(request.kanaModifierInsensitive)
+        if (!runCatching { engine.setIncognito(!request.learningAllowed, insensitive) }.getOrDefault(false)) return
         lastConverted.remove(sessionEpoch)
         // 一つの部分範囲をMozcで変換する。ニューラル変換の辞書としても使う。
         val mozcRange: (String) -> List<ResultSegment>? = { chunk ->
@@ -481,7 +488,8 @@ class ConversionWorker(
         val (sessionEpoch, request) = latestCandidateRequest.getAndSet(null) ?: return
         if (isEnded(sessionEpoch) || currentHealth !is EngineHealth.Ready || isAsciiOnly(request.reading)) return
         val sessionId = sessionFor(sessionEpoch) ?: return
-        if (!runCatching { engine.setIncognito(!request.learningAllowed) }.getOrDefault(false)) return
+        val insensitive = kanaModifierInsensitive(request.kanaModifierInsensitive)
+        if (!runCatching { engine.setIncognito(!request.learningAllowed, insensitive) }.getOrDefault(false)) return
         lastConverted.remove(sessionEpoch)
         // 文脈に使う前後の読み。ASCIIだけの読みはライブ変換でもMozcへ送らないため、文脈にもしない。
         val preceding = request.preceding.takeUnless(::isAsciiOnly).orEmpty()
@@ -525,7 +533,8 @@ class ConversionWorker(
             return
         }
         val sessionId = predictionSessionFor(request.sessionEpoch)
-        if (sessionId == null || !runCatching { engine.setIncognito(request.incognito) }.getOrDefault(false)) {
+        val insensitive = kanaModifierInsensitive(request.kanaModifierInsensitive)
+        if (sessionId == null || !runCatching { engine.setIncognito(request.incognito, insensitive) }.getOrDefault(false)) {
             onPredictionResult(PredictionResult(request, emptyList()))
             return
         }
@@ -544,6 +553,12 @@ class ConversionWorker(
         lastPredictionCandidates[request.sessionEpoch] = candidates
         onPredictionResult(PredictionResult(request, candidates))
     }
+
+    /**
+     * 表記ゆれ変換を使うか。12キーだけで入力した読みの要求で使い、評価の記録中は変換結果を評価の比較条件から
+     * 変えないため使わない。
+     */
+    private fun kanaModifierInsensitive(requested: Boolean): Boolean = requested && !evaluationActive()
 
     /** 読みに完全一致する学習語の表記を返す関数。学習禁止欄と学習キャッシュが無い場合はnull。 */
     private fun learnedSurfaces(learningAllowed: Boolean): ((String) -> List<String>)? =
