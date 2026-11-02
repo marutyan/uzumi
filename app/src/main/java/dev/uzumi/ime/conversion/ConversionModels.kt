@@ -15,6 +15,25 @@ data class ConversionRequest(
     val headLength: Int? = null,
 )
 
+/** 入力途中または入力後の予測要求。世代と読み、ゼロクエリ時の文脈を応答適用前に照合する。 */
+data class PredictionRequest(
+    val sessionEpoch: Long,
+    val revision: Long,
+    val reading: String = "",
+    val precedingText: String = "",
+    val incognito: Boolean = false,
+) {
+    /** compositionが無い状態で周辺文字列から次の語を求める要求か。 */
+    val isZeroQuery: Boolean
+        get() = reading.isEmpty()
+}
+
+/** Mozcが返す予測候補。候補IDは、選択時に同じ予測sessionで確定学習するために保持する。 */
+data class PredictionCandidate(val id: Int, val value: String, val reading: String? = null)
+
+/** 要求の世代に結び付いた予測候補。 */
+data class PredictionResult(val request: PredictionRequest, val candidates: List<PredictionCandidate>)
+
 /** 変換結果の一文節。readingはその文節が占める読み、valueは現在の第一候補の表記。 */
 data class ConversionSegment(
     val reading: String,

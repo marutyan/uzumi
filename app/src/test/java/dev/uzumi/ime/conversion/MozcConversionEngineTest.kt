@@ -18,6 +18,84 @@ import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.SessionComma
 
 /** Mozc protocolの命令列と、辞書なし状態の検出を偽のnativeで検証する。 */
 class MozcConversionEngineTest {
+    /** 入力途中のsuggestion要求は混合候補を明示し、読みの続きを持つ予測候補だけを返す。 */
+    @Test
+    fun suggestRequestsFullReadingPredictions() {
+        val native = FakeMozcNative().apply {
+            respond = { input ->
+                if (input.type == Input.CommandType.SEND_KEY && input.key.hasKeyString()) {
+                    predictionOutput(
+                        CandidateWord.newBuilder().setId(4).setKey("ありがとう").setValue("ありがとう"),
+                        CandidateWord.newBuilder().setId(8).setKey("ありがとうございます").setValue("ありがとうございます"),
+                        CandidateWord.newBuilder().setId(9).setKey("ありがとう").setValue("有難う"),
+                        CandidateWord.newBuilder().setId(10).setKey("ありがと").setValue("有難う"),
+                    )
+                } else {
+                    Output.newBuilder().setConsumed(true).build()
+                }
+            }
+        }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+        assertTrue(engine.setIncognito(true))
+        native.inputs.clear()
+
+        assertEquals(
+            listOf(PredictionCandidate(4, "ありがとう", "ありがとう"),
+                PredictionCandidate(8, "ありがとうございます", "ありがとうございます"),
+                PredictionCandidate(9, "有難う", "ありがとう")),
+            engine.suggest(sessionId = 5, reading = "ありがと"),
+        )
+        val inputs = native.inputs.filter { it.type == Input.CommandType.SEND_KEY && it.key.hasKeyString() }
+        assertEquals(listOf("あ", "り", "が", "と"), inputs.map { it.key.keyString })
+        // 途中のキーでは予測を計算させず、最後のキーでだけ既定どおり予測を求める。
+        assertTrue(inputs.dropLast(1).all { it.hasRequestSuggestion() && !it.requestSuggestion })
+        assertTrue(inputs.last().requestSuggestion)
+        assertFalse(inputs.any { it.hasRequest() })
+        val requests = native.inputs.filter { it.type == Input.CommandType.SET_REQUEST }.map { it.request }
+        assertEquals(2, requests.size)
+        assertTrue(requests.first().isIncognitoMode)
+        assertTrue(requests.first().mixedConversion)
+        assertFalse(requests.first().zeroQuerySuggestion)
+        assertTrue(requests.last().isIncognitoMode)
+        assertFalse(requests.last().mixedConversion)
+        assertFalse(requests.last().zeroQuerySuggestion)
+        assertFalse(native.inputs.any { it.key.specialKey == KeyEvent.SpecialKey.SPACE })
+    }
+
+    /** 次の語の要求は専用NWP命令へ確定文脈を載せ、Mozcが返した候補をそのまま識別する。 */
+    @Test
+    fun requestNextWordPredictionUsesSurroundingContext() {
+        val native = FakeMozcNative().apply {
+            respond = { input ->
+                if (input.command.type == SessionCommand.CommandType.REQUEST_NWP) {
+                    predictionOutput(
+                        CandidateWord.newBuilder().setId(3).setKey("てんき").setValue("天気"),
+                        CandidateWord.newBuilder().setId(5).setKey("よほう").setValue("予報"),
+                    )
+                } else {
+                    Output.newBuilder().setConsumed(true).build()
+                }
+            }
+        }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        assertEquals(
+            listOf(PredictionCandidate(3, "天気", "てんき"), PredictionCandidate(5, "予報", "よほう")),
+            engine.requestNextWordPrediction(sessionId = 7, precedingText = "明日の"),
+        )
+        val input = native.inputs.single { it.type == Input.CommandType.SEND_COMMAND }
+        assertEquals(Input.CommandType.SEND_COMMAND, input.type)
+        assertEquals(SessionCommand.CommandType.REQUEST_NWP, input.command.type)
+        assertEquals("明日の", input.context.precedingText)
+        assertTrue(input.requestSuggestion)
+        val requests = native.inputs.filter { it.type == Input.CommandType.SET_REQUEST }.map { it.request }
+        assertEquals(2, requests.size)
+        assertTrue(requests.first().zeroQuerySuggestion)
+        assertTrue(requests.first().mixedConversion)
+        assertFalse(requests.last().zeroQuerySuggestion)
+        assertFalse(requests.last().mixedConversion)
+    }
+
     /** libmozc.soが無いビルドでは、辞書を探さずにUnavailableを返す。 */
     @Test
     fun missingNativeLibraryIsUnavailable() {
@@ -141,6 +219,12 @@ class MozcConversionEngineTest {
         }
         return builder.build()
     }
+
+    /** 候補ID・読み・表記を含むMozc応答を作り、JNIなしで候補抽出を確かめる。 */
+    private fun predictionOutput(vararg words: CandidateWord.Builder): Output = Output.newBuilder()
+        .setConsumed(true)
+        .setAllCandidateWords(CandidateList.newBuilder().addAllCandidates(words.map(CandidateWord.Builder::build)))
+        .build()
 
     /** Mozcが失敗を返した場合は変換結果を作らない。 */
     @Test

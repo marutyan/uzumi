@@ -89,6 +89,83 @@ class ConversionWorkerTest {
         assertTrue(fixture.outcomes.single() is ConversionOutcome.Failed)
     }
 
+    /** 入力途中予測は変換sessionと分け、同じ候補IDを専用sessionで確定し、IME側の学習にも記録する。 */
+    @Test
+    fun predictionUsesDedicatedSessionAndCommitsSelectedCandidate() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.worker.requestConversion(request(reading = "かんじ"))
+        fixture.executor.runAll()
+        fixture.engine.calls.clear()
+        val prediction = PredictionRequest(sessionEpoch = 1, revision = 2, reading = "ありがと")
+
+        fixture.worker.requestPrediction(prediction)
+        fixture.executor.runAll()
+
+        assertEquals(listOf("createSession", "setIncognito(false)", "suggest(2,ありがと)"), fixture.engine.calls)
+        assertEquals(prediction, fixture.predictionResults.single().request)
+        assertEquals(listOf("ありがとう", "ありがとうございます", "助かります"),
+            fixture.predictionResults.single().candidates.map { it.value })
+
+        fixture.engine.calls.clear()
+        fixture.worker.commitPrediction(prediction, candidateId = 14)
+        fixture.executor.runAll()
+        assertEquals(listOf("setIncognito(false)", "commitCandidate(2,14)"), fixture.engine.calls)
+        assertEquals(listOf("助かります"), learning.exactMatches("たすかります").map { it.surface })
+    }
+
+    /** 学習禁止の入力途中予測はincognitoを先に指定し、選択しても確定学習を送らない。 */
+    @Test
+    fun incognitoPredictionDoesNotLearn() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.calls.clear()
+        val prediction = PredictionRequest(sessionEpoch = 1, revision = 2, reading = "ひみつ", incognito = true)
+
+        fixture.worker.requestPrediction(prediction)
+        fixture.executor.runAll()
+        fixture.worker.commitPrediction(prediction, candidateId = 11)
+        fixture.executor.runAll()
+
+        assertTrue(fixture.engine.calls.indexOf("setIncognito(true)") < fixture.engine.calls.indexOf("suggest(1,ひみつ)"))
+        assertFalse(fixture.engine.calls.any { it.startsWith("commitCandidate") })
+    }
+
+    /** incognitoの指定に失敗した予測要求は、本文を送らず空候補として返す。 */
+    @Test
+    fun incognitoFailurePreventsPredictionRequest() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.incognitoAccepted = false
+        fixture.engine.calls.clear()
+        val prediction = PredictionRequest(sessionEpoch = 1, revision = 2, reading = "ひみつ", incognito = true)
+
+        fixture.worker.requestPrediction(prediction)
+        fixture.executor.runAll()
+
+        assertEquals(listOf("createSession", "setIncognito(true)"), fixture.engine.calls)
+        assertEquals(prediction, fixture.predictionResults.single().request)
+        assertTrue(fixture.predictionResults.single().candidates.isEmpty())
+    }
+
+    /** 次の語の予測へ直前の確定文脈を渡し、空の応答は空候補のまま返す。 */
+    @Test
+    fun zeroQueryPredictionUsesContextAndAllowsEmptyFallback() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.nextWordPredictions = emptyList()
+        fixture.engine.calls.clear()
+        val prediction = PredictionRequest(sessionEpoch = 1, revision = 3, precedingText = "明日の")
+
+        fixture.worker.requestPrediction(prediction)
+        fixture.executor.runAll()
+
+        assertEquals(listOf("createSession", "setIncognito(false)", "nextWord(1,明日の)"), fixture.engine.calls)
+        assertEquals(prediction, fixture.predictionResults.single().request)
+        assertTrue(fixture.predictionResults.single().candidates.isEmpty())
+    }
+
     /** 終了したフィールドの要求は、キューに残っていてもエンジンへ送らず、sessionを破棄する。 */
     @Test
     fun endedSessionDropsQueuedRequestAndDeletesEngineSession() {
@@ -1037,6 +1114,7 @@ class ConversionWorkerTest {
         val healthChanges = mutableListOf<EngineHealth>()
         val liveResults = mutableListOf<Pair<Long, LiveResult>>()
         val candidateResults = mutableListOf<Pair<Long, CandidateResult>>()
+        val predictionResults = mutableListOf<PredictionResult>()
         val reports = mutableListOf<Pair<Long, LiveRequestReport>>()
         var evaluating = false
         val worker = ConversionWorker(
@@ -1046,6 +1124,7 @@ class ConversionWorkerTest {
             onOutcome = { outcomes += it },
             onLiveResult = { epoch, result -> liveResults += epoch to result },
             onCandidateResult = { epoch, result -> candidateResults += epoch to result },
+            onPredictionResult = predictionResults::add,
             userDictionary = { dictionary },
             learningStore = { learning },
             onLiveReport = { epoch, report -> reports += epoch to report },
@@ -1110,6 +1189,14 @@ private class FakeConversionEngine : ConversionEngine {
     var nextSessionId = 100L
     var knownConversionValues = listOf("漢字", "感じ")
     var segmentReadingOverride: String? = null
+    var predictions = listOf(
+        PredictionCandidate(11, "ありがとう", "ありがとう"),
+        PredictionCandidate(12, "☺", "えがお"),
+        PredictionCandidate(13, "ありがとうございます", "ありがとうございます"),
+        PredictionCandidate(14, "助かります", "たすかります"),
+        PredictionCandidate(15, "助かった", "たすかった"),
+    )
+    var nextWordPredictions = listOf(PredictionCandidate(21, "天気", "てんき"))
 
     // 明示変換で返す先頭文節の候補の表記。既定では「かんじ」だけknownConversionValuesを返し、他は読みをそのまま返す。
     var convertValuesFor: (String) -> List<String> = { reading -> if (reading == "かんじ") knownConversionValues else listOf(reading) }
@@ -1138,6 +1225,18 @@ private class FakeConversionEngine : ConversionEngine {
             segments = listOf(ConversionSegment(segmentReading, values.first())),
             headCandidates = values.mapIndexed { index, value -> ConversionCandidate(index, value, segmentReading) },
         )
+    }
+
+    /** 入力途中予測の引数を記録し、テストが指定した候補を返す。 */
+    override fun suggest(sessionId: Long, reading: String): List<PredictionCandidate> {
+        calls += "suggest($sessionId,$reading)"
+        return predictions
+    }
+
+    /** ゼロクエリ予測の文脈を記録し、テストが指定した候補を返す。 */
+    override fun requestNextWordPrediction(sessionId: Long, precedingText: String): List<PredictionCandidate> {
+        calls += "nextWord($sessionId,$precedingText)"
+        return nextWordPredictions
     }
 
     override fun commitCandidate(sessionId: Long, candidateId: Int): Boolean {

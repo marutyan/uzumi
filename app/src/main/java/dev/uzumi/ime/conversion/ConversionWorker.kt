@@ -48,6 +48,18 @@ interface LiveConversionClient {
     fun requestSegmentCandidates(sessionEpoch: Long, request: CandidateRequest)
 }
 
+/** 入力途中とゼロクエリの予測を非同期で取得し、選択候補の確定を通知する窓口。 */
+interface PredictionClient {
+    /** Mozcの辞書とnative初期化が完了しているか。 */
+    val isPredictionAvailable: Boolean
+
+    /** 最新の予測要求をキューへ積み、結果を後から返す。 */
+    fun requestPrediction(request: PredictionRequest)
+
+    /** 表示した予測候補を選んだことを、対応するMozc sessionへ伝える。 */
+    fun commitPrediction(request: PredictionRequest, candidateId: Int)
+}
+
 /**
  * 変換エンジンを一つの直列executorだけから呼ぶ窓口。
  * globalなSessionHandlerへの同時呼び出しを防ぎ、UI threadをJNI呼び出しで止めない。
@@ -75,7 +87,9 @@ class ConversionWorker(
     private val evaluationActive: () -> Boolean = { false },
     // 単調な時計（ナノ秒）。時間超過の期限と、適用までの時間の起点に使う。JVMテストで差し替える。
     private val nanoTime: () -> Long = System::nanoTime,
-) : ConversionClient, LiveConversionClient {
+    // 予測応答はsessionEpochとrevisionを保ったままUIへ返す。
+    private val onPredictionResult: (PredictionResult) -> Unit = {},
+) : ConversionClient, LiveConversionClient, PredictionClient {
     @Volatile
     private var currentHealth: EngineHealth = EngineHealth.Loading
 
@@ -95,11 +109,19 @@ class ConversionWorker(
     // 未処理の候補の取り直し要求のうち最新の一件と、その編集セッションの世代。
     private val latestCandidateRequest = AtomicReference<Pair<Long, CandidateRequest>?>(null)
 
+    // 未処理の予測要求のうち最新の一件。古い読みや文脈の結果を抑える。
+    private val latestPredictionRequest = AtomicReference<PredictionRequest?>(null)
+
     // この値以下のsessionEpochは終了済み。キューに残った要求もエンジンへ送らない。
     private val endedThroughEpoch = AtomicLong(Long.MIN_VALUE)
 
     // 以下はworker threadだけが読み書きする。
     private val engineSessions = mutableMapOf<Long, Long>()
+    // 予測要求は通常変換・ライブ変換のpreeditや履歴を変えない専用sessionで処理する。
+    private val predictionSessions = mutableMapOf<Long, Long>()
+    // sessionEpochごとに、候補IDを確定できる最新の予測要求と候補一覧を保持する。
+    private val lastPredictionRequests = mutableMapOf<Long, PredictionRequest>()
+    private val lastPredictionCandidates = mutableMapOf<Long, List<PredictionCandidate>>()
     // sessionEpochごとに、エンジン側sessionの状態を作った直前の要求。学習通知の照合に使う。
     private val lastConverted = mutableMapOf<Long, ConversionRequest>()
     // sessionEpochごとに、直前の明示変換で表示した先頭文節の候補。確定した候補の読みと表記を引くために使う。
@@ -111,6 +133,9 @@ class ConversionWorker(
 
     override val isAvailable: Boolean
         get() = currentHealth is EngineHealth.Ready
+
+    override val isPredictionAvailable: Boolean
+        get() = isAvailable
 
     /** エンジンの読み込みと既知の変換例による確認をworkerで始める。 */
     fun start() {
@@ -164,6 +189,31 @@ class ConversionWorker(
     override fun requestSegmentCandidates(sessionEpoch: Long, request: CandidateRequest) {
         latestCandidateRequest.set(sessionEpoch to request)
         executor.execute(::drainLatestCandidateRequest)
+    }
+
+    /** 入力途中またはゼロクエリの最新予測だけをworkerへ送る。 */
+    override fun requestPrediction(request: PredictionRequest) {
+        latestPredictionRequest.set(request)
+        executor.execute(::drainLatestPredictionRequest)
+    }
+
+    /**
+     * 対応する予測要求がまだ最新なら、明示変換の候補確定と同じく、選択した候補をIME側の学習へ記録し、
+     * Mozcの予測sessionへも確定して履歴を学習させる。
+     */
+    override fun commitPrediction(request: PredictionRequest, candidateId: Int) {
+        if (request.incognito || isEnded(request.sessionEpoch)) return
+        executor.execute {
+            if (lastPredictionRequests[request.sessionEpoch] != request) return@execute
+            val candidate = lastPredictionCandidates[request.sessionEpoch].orEmpty()
+                .firstOrNull { it.id == candidateId } ?: return@execute
+            candidate.reading?.let { reading -> lookupLearningStore()?.record(reading, candidate.value) }
+            val sessionId = predictionSessions[request.sessionEpoch] ?: return@execute
+            if (!runCatching { engine.setIncognito(false) }.getOrDefault(false)) return@execute
+            runCatching { engine.commitCandidate(sessionId, candidateId) }
+            lastPredictionRequests.remove(request.sessionEpoch)
+            lastPredictionCandidates.remove(request.sessionEpoch)
+        }
     }
 
     /**
@@ -257,10 +307,13 @@ class ConversionWorker(
         executor.execute {
             lastConverted.remove(sessionEpoch)
             lastHeadCandidates.remove(sessionEpoch)
+            lastPredictionRequests.remove(sessionEpoch)
+            lastPredictionCandidates.remove(sessionEpoch)
             // 学習は打鍵ごとではなく、入力欄の終了時にまとめて保存する。
             lookupLearningStore()?.flush()
-            val sessionId = engineSessions.remove(sessionEpoch) ?: return@execute
-            runCatching { engine.deleteSession(sessionId) }
+            val sessionId = engineSessions.remove(sessionEpoch)
+            if (sessionId != null) runCatching { engine.deleteSession(sessionId) }
+            predictionSessions.remove(sessionEpoch)?.let { runCatching { engine.deleteSession(it) } }
         }
     }
 
@@ -404,6 +457,35 @@ class ConversionWorker(
         onCandidateResult(sessionEpoch, CandidateResult(request, candidates))
     }
 
+    /** 専用sessionでMozc予測を取り、同じ要求の応答だけを候補選択へ結び付ける。 */
+    private fun drainLatestPredictionRequest() {
+        val request = latestPredictionRequest.getAndSet(null) ?: return
+        if (isEnded(request.sessionEpoch)) return
+        if (currentHealth !is EngineHealth.Ready) {
+            onPredictionResult(PredictionResult(request, emptyList()))
+            return
+        }
+        val sessionId = predictionSessionFor(request.sessionEpoch)
+        if (sessionId == null || !runCatching { engine.setIncognito(request.incognito) }.getOrDefault(false)) {
+            onPredictionResult(PredictionResult(request, emptyList()))
+            return
+        }
+        val generated = runCatching {
+            if (request.isZeroQuery) {
+                engine.requestNextWordPrediction(sessionId, request.precedingText)
+            } else {
+                engine.suggest(sessionId, request.reading)
+            }
+        }.getOrDefault(emptyList())
+        val judge = EmoticonJudge(lookupUserDictionary(), lookupLearningStore().takeUnless { request.incognito })
+        val candidates = generated
+            .filterNot { EmoticonText.isEmoticon(it.value) || judge.isEmoticon(it.reading ?: request.reading, it.value) }
+            .take(MAX_VISIBLE_PREDICTIONS)
+        lastPredictionRequests[request.sessionEpoch] = request
+        lastPredictionCandidates[request.sessionEpoch] = candidates
+        onPredictionResult(PredictionResult(request, candidates))
+    }
+
     /** 読みに完全一致する学習語の表記を返す関数。学習禁止欄と学習キャッシュが無い場合はnull。 */
     private fun learnedSurfaces(learningAllowed: Boolean): ((String) -> List<String>)? =
         lookupLearningStore()?.takeIf { learningAllowed }?.let { store ->
@@ -441,6 +523,14 @@ class ConversionWorker(
         return created
     }
 
+    /** 予測専用のMozc sessionをsessionEpochごとに一つだけ作成する。 */
+    private fun predictionSessionFor(sessionEpoch: Long): Long? {
+        predictionSessions[sessionEpoch]?.let { return it }
+        val created = runCatching { engine.createSession() }.getOrNull() ?: return null
+        predictionSessions[sessionEpoch] = created
+        return created
+    }
+
     /** sessionEpochのEditor sessionが既に終了しているかを返す。 */
     private fun isEnded(sessionEpoch: Long): Boolean = sessionEpoch <= endedThroughEpoch.get()
 
@@ -475,5 +565,8 @@ class ConversionWorker(
 
         /** KNOWN_READINGの候補に辞書があれば必ず含まれる表記。 */
         const val KNOWN_CONVERSION = "漢字"
+
+        /** 候補バーの先頭に表示する予測候補の最大件数。 */
+        private const val MAX_VISIBLE_PREDICTIONS = 3
     }
 }

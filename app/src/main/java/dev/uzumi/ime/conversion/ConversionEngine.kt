@@ -23,6 +23,12 @@ interface ConversionEngine {
      */
     fun convert(sessionId: Long, reading: String, headLength: Int? = null): EngineConversion?
 
+    /** 入力途中の読み全体に対するMozc予測を返す。変換候補と予測候補を分けるため別sessionで呼ぶ。 */
+    fun suggest(sessionId: Long, reading: String): List<PredictionCandidate>
+
+    /** 確定済みの周辺文字列から、次の語のゼロクエリ予測を返す。 */
+    fun requestNextWordPrediction(sessionId: Long, precedingText: String): List<PredictionCandidate>
+
     /** 直前の変換の先頭文節を指定候補で確定し、エンジンへ選択を学習させる。 */
     fun commitCandidate(sessionId: Long, candidateId: Int): Boolean
 
