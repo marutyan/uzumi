@@ -56,6 +56,7 @@ import dev.uzumi.ime.evaluation.TimingKind
 import dev.uzumi.ime.evaluation.TimingSample
 import dev.uzumi.ime.keyboard.CandidateBarViews
 import dev.uzumi.ime.keyboard.CandidateGridView
+import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardAction
 import dev.uzumi.ime.keyboard.KeyboardColors
 import dev.uzumi.ime.keyboard.KeyboardDimens
@@ -86,6 +87,8 @@ import java.util.concurrent.atomic.AtomicInteger
 class UzumiInputMethodService : InputMethodService() {
     private var session: EditorSession? = null
     private var keyboardPanel: KeyboardPanel? = null
+    // 最近履歴は一覧を開いたときに読み、入力成功後かつ機密欄以外でのみ書く。
+    private val emojiRecentStore by lazy { EmojiRecentStore(this) }
     private var candidateRow: LinearLayout? = null
     private var candidateBar: LinearLayout? = null
 
@@ -556,8 +559,10 @@ class UzumiInputMethodService : InputMethodService() {
     private fun handleKeyboardAction(action: KeyboardAction) {
         val current = session ?: return
         OperationClassifier.keyboardAction(action, current.isLiveMode)?.let(evaluation::record)
-        // Backspaceが続く間は削除内容をまとめ、それ以外の操作でUndo記録を終える。
-        if (action != KeyboardAction.Delete && action != KeyboardAction.DeleteToLineStart) current.forgetDeletionUndo()
+        // Backspaceは連続削除をまとめ、絵文字一覧の開閉中は削除Undoを保ち、ほかの編集操作で記録を終える。
+        if (action != KeyboardAction.Delete && action != KeyboardAction.DeleteToLineStart &&
+            action != KeyboardAction.OpenEmojiPicker && action != KeyboardAction.CloseEmojiPicker
+        ) current.forgetDeletionUndo()
         when (action) {
             is KeyboardAction.Text -> current.inputText(action.value)
             KeyboardAction.Delete -> current.deleteBackward()
@@ -575,6 +580,18 @@ class UzumiInputMethodService : InputMethodService() {
             KeyboardAction.TransformKana -> current.transformKana()
             KeyboardAction.ToKatakana -> current.toKatakana()
             KeyboardAction.DeleteToLineStart -> current.deleteToLineStart()
+            KeyboardAction.OpenEmojiPicker -> {
+                val isSensitive = currentPolicy?.isSensitive != false
+                keyboardPanel?.showEmojiPicker(if (isSensitive) emptyList() else emojiRecentStore.load())
+            }
+            KeyboardAction.CloseEmojiPicker -> keyboardPanel?.hideEmojiPicker()
+            is KeyboardAction.InsertEmoji -> {
+                val inserted = current.pasteText(action.value)
+                if (inserted && currentPolicy?.isSensitive == false) {
+                    val recentValues = emojiRecentStore.record(action.value, insertionSucceeded = true, isSensitive = false)
+                    keyboardPanel?.setRecentEmojiValues(recentValues)
+                }
+            }
             // 変換中の←→の長押しで、文節の区切りを一文字ずつ縮める・伸ばす
             is KeyboardAction.ResizeSegment -> current.resizeSegment(action.delta)
         }

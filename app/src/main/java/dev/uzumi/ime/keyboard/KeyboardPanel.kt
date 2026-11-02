@@ -7,13 +7,13 @@ import android.view.View
 import android.widget.LinearLayout
 
 /**
- * 日本語12キーフリック・英語QWERTY・数字・記号面のキーボードを提供するメインUIパネル。
+ * 日本語12キーフリック・英語QWERTY・数字・記号・顔文字・絵文字の入力面を提供するメインUIパネル。
  *
  * @param context コンテキスト
  * @param onAction キーボード操作イベントを通知するコールバック
  * @param lineDeleteLength 削除キーの左ドラッグで消える、カーソルから行頭までの文字数を返す。分からなければnull
  * @param preferences 設定画面で選んだ高さ・拡大表示・振動・キー音・削除の左ドラッグ
- * @param onPanelKey IMEへ操作を送らずパネルの中で完結するキー（面の切替、Shift、記号のページ）を押したときに呼ぶ。評価用の計数に使う
+ * @param onPanelKey IMEへ操作を送らずパネル内で完結する面・ページ・カテゴリ切替を押したときに呼ぶ。評価用の計数に使う
  */
 // 必須コールバックを伴うプログラム生成専用Viewであり、XMLからは生成しない。
 @SuppressLint("ViewConstructor")
@@ -60,6 +60,10 @@ class KeyboardPanel(
     // 記号面で表示中のページ番号。KeyboardLayoutData.SYMBOL_PAGESの添字。
     private var symbolPageIndex = 0
     private val symbolPageContainers = mutableListOf<LinearLayout>()
+    private var symbolBottomRow: LinearLayout? = null
+    private var emojiPickerView: EmojiPickerView? = null
+    private var emojiPickerBottomRow: LinearLayout? = null
+    private var emojiPickerVisible = false
 
     // 押したキーの拡大表示。password欄では入力した文字を画面に大きく出さないため使わない。
     private val keyPreview = KeyPreviewPopup(this, KeyboardColors.from(context))
@@ -205,6 +209,8 @@ class KeyboardPanel(
             mode
         }
 
+        if (resolvedMode != KeyboardMode.SYMBOL || currentMode != KeyboardMode.SYMBOL) hideEmojiPicker()
+
         currentMode = resolvedMode
         if (!isNumericField && !isPasswordField && (resolvedMode == KeyboardMode.KANA || resolvedMode == KeyboardMode.QWERTY)) {
             lastNormalMode = resolvedMode
@@ -249,8 +255,67 @@ class KeyboardPanel(
      */
     private fun updateSymbolPageVisibility() {
         symbolPageContainers.forEachIndexed { index, page ->
-            page.visibility = if (index == symbolPageIndex) View.VISIBLE else View.GONE
+            page.visibility = if (!emojiPickerVisible && index == symbolPageIndex) View.VISIBLE else View.GONE
         }
+    }
+
+    /** 記号面から一覧を開き、初回だけMozcデータを読み込んで最近タブを表示する。 */
+    fun showEmojiPicker(recentValues: List<String>) {
+        cancelPendingInput()
+        if (emojiPickerView == null) {
+            val picker = EmojiPickerView(
+                context = context,
+                catalog = EmojiPickerCatalogLoader.load(context),
+                rowHeightPx = rowHeightPx(preferences.rowHeightDp),
+                recentValues = recentValues,
+                onSelect = { dispatchAction(KeyboardAction.InsertEmoji(it)) },
+                onPanelKey = onPanelKey,
+            )
+            val bottomRow = buildEmojiPickerBottomRow()
+            emojiPickerView = picker
+            emojiPickerBottomRow = bottomRow
+            symbolContainer.addView(picker, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+            symbolContainer.addView(bottomRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        } else {
+            emojiPickerView?.setRecentValues(recentValues)
+            emojiPickerView?.showRecent()
+        }
+        emojiPickerVisible = true
+        symbolPageContainers.forEach { it.visibility = View.GONE }
+        symbolBottomRow?.visibility = View.GONE
+        emojiPickerView?.visibility = View.VISIBLE
+        emojiPickerBottomRow?.visibility = View.VISIBLE
+    }
+
+    /** 入力が成功した履歴を一覧へ渡し、最近タブの表示を同期する。 */
+    fun setRecentEmojiValues(values: List<String>) {
+        emojiPickerView?.setRecentValues(values)
+    }
+
+    /** 顔文字・絵文字一覧を閉じ、直前の記号ページへ戻る。 */
+    fun hideEmojiPicker() {
+        cancelPendingInput()
+        emojiPickerVisible = false
+        emojiPickerView?.visibility = View.GONE
+        emojiPickerBottomRow?.visibility = View.GONE
+        symbolBottomRow?.visibility = View.VISIBLE
+        updateSymbolPageVisibility()
+    }
+
+    /** 一覧用の下段を作り、記号面へ戻るキーと既存の入力面切替を配置する。 */
+    private fun buildEmojiPickerBottomRow(): LinearLayout {
+        val row = createRow(rowHeightPx(preferences.rowHeightDp))
+        row.addView(createKey(KeySpec.Action(KeyboardAction.CloseEmojiPicker, "記号"), 1.4f))
+        val kanaKey = createKey(KeySpec.ModeSwitch("あ", KeyboardMode.KANA), 1.0f)
+        kanaSwitchKeyViews.add(kanaKey)
+        row.addView(kanaKey)
+        row.addView(createKey(KeySpec.ModeSwitch("ABC", KeyboardMode.QWERTY), 1.0f))
+        row.addView(createKey(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), 1.0f))
+        row.addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 3.0f))
+        val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 2.6f)
+        enterKeyViews.add(enterKey)
+        row.addView(enterKey)
+        return row
     }
 
     /**
@@ -508,17 +573,19 @@ class KeyboardPanel(
         }
         updateSymbolPageVisibility()
 
-        // 最下段: [かな] [英字] [数字] [空白] [Enter]
+        // 最下段: [かな] [英字] [数字] [絵文字] [空白] [Enter]
         val bottomRow = createRow(rowHeight)
         val kanaKey = createKey(KeySpec.ModeSwitch("あ", KeyboardMode.KANA), 1.2f)
         kanaSwitchKeyViews.add(kanaKey)
         bottomRow.addView(kanaKey)
         bottomRow.addView(createKey(KeySpec.ModeSwitch("ABC", KeyboardMode.QWERTY), 1.2f))
         bottomRow.addView(createKey(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), 1.2f))
-        bottomRow.addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 3.9f))
-        val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 2.5f)
+        bottomRow.addView(createKey(KeySpec.Action(KeyboardAction.OpenEmojiPicker, "☺"), 1.2f))
+        bottomRow.addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 2.8f))
+        val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 2.4f)
         enterKeyViews.add(enterKey)
         bottomRow.addView(enterKey)
+        symbolBottomRow = bottomRow
         container.addView(bottomRow)
         return container
     }

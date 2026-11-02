@@ -212,6 +212,14 @@ class KeyboardLayoutDataTest {
         assertEquals("カーソルを右へ移動", KeySpeech.actionDescription(KeyboardAction.MoveEditorCursor(1)))
     }
 
+    /** 顔文字・絵文字の一覧操作を読み上げ、選択値を操作名へ含めない。 */
+    @Test
+    fun emojiPickerActionsHavePrivacySafeDescriptions() {
+        assertEquals("絵文字・顔文字一覧を開く", KeySpeech.actionDescription(KeyboardAction.OpenEmojiPicker))
+        assertEquals("絵文字または顔文字を入力", KeySpeech.actionDescription(KeyboardAction.InsertEmoji("🔐")))
+        assertEquals("記号の一覧へ戻る", KeySpeech.actionDescription(KeyboardAction.CloseEmojiPicker))
+    }
+
     @Test
     fun modeDescriptionsNameEveryMode() {
         val descriptions = KeyboardMode.entries.map(KeySpeech::modeSwitchDescription)

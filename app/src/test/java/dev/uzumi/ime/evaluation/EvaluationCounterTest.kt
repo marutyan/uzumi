@@ -21,6 +21,9 @@ class EvaluationCounterTest {
         assertEquals(OperationKind.INPUT, kind(KeyboardAction.Text(".")))
         assertEquals(OperationKind.INPUT, kind(KeyboardAction.Space))
         assertEquals(OperationKind.INPUT, kind(KeyboardAction.TransformKana))
+        assertEquals(OperationKind.INPUT, kind(KeyboardAction.InsertEmoji("🙂")))
+        assertEquals(OperationKind.OTHER, kind(KeyboardAction.OpenEmojiPicker))
+        assertEquals(OperationKind.OTHER, kind(KeyboardAction.CloseEmojiPicker))
         // 句点とEnterは本来の終端操作
         assertEquals(OperationKind.TERMINATOR, kind(KeyboardAction.Text("。")))
         assertEquals(OperationKind.TERMINATOR, kind(KeyboardAction.Enter))

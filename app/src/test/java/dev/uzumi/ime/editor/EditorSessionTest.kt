@@ -59,6 +59,23 @@ class EditorSessionTest {
         assertTrue(client.committedAll.isEmpty())
     }
 
+    /** 一覧で選んだ絵文字列も未確定の読みを先に確定し、変換・学習へ渡さずそのまま入力する。 */
+    @Test
+    fun emojiPickerSelectionFinishesCompositionAndKeepsTheSequence() {
+        val connection = FakeEditorConnection()
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        val emoji = "👩‍💻"
+
+        assertTrue(session.inputText("かな"))
+        assertTrue(session.pasteText(emoji))
+
+        assertEquals(listOf("かな", emoji), connection.committedTexts)
+        assertTrue(session.compositionSnapshot().reading.isEmpty())
+        assertTrue(client.requests.isEmpty())
+        assertTrue(client.committedAll.isEmpty())
+    }
+
     /** 貼り付け本文はライブ変換要求と個人学習へ渡さない。 */
     @Test
     fun pasteTextDoesNotEnterLiveConversionOrLearning() {

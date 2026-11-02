@@ -120,5 +120,8 @@ object KeySpeech {
         is KeyboardAction.MoveCursor -> if (action.delta < 0) "カーソルを左へ移動" else "カーソルを右へ移動"
         is KeyboardAction.MoveEditorCursor -> if (action.delta < 0) "カーソルを左へ移動" else "カーソルを右へ移動"
         is KeyboardAction.ResizeSegment -> if (action.delta < 0) "文節を縮める" else "文節を伸ばす"
+        KeyboardAction.OpenEmojiPicker -> "絵文字・顔文字一覧を開く"
+        is KeyboardAction.InsertEmoji -> "絵文字または顔文字を入力"
+        KeyboardAction.CloseEmojiPicker -> "記号の一覧へ戻る"
     }
 }

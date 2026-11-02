@@ -68,4 +68,16 @@ sealed interface KeyboardAction {
      * カーソルから同じ行の行頭までを一度に消す要求。削除キーを左へドラッグして離したときに送る（Simejiと同じ操作）。
      */
     data object DeleteToLineStart : KeyboardAction
+
+    /** 記号面から絵文字・顔文字の一覧を開く操作。 */
+    data object OpenEmojiPicker : KeyboardAction
+
+    /** 絵文字一覧から選んだ値を未確定文字の確定後にそのまま入力する操作。
+     *
+     * @property value 入力する絵文字または顔文字
+     */
+    data class InsertEmoji(val value: String) : KeyboardAction
+
+    /** 絵文字・顔文字一覧から記号面へ戻る操作。 */
+    data object CloseEmojiPicker : KeyboardAction
 }
