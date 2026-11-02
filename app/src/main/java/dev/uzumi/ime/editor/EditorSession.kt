@@ -790,6 +790,7 @@ class EditorSession(
      */
     fun handleEnter(): Boolean {
         if (hasComposition) return commitComposition()
+        if (EditorActionPolicy.shouldSendEnterKey(policy)) return active && connection.sendEnterKey()
         if (liveCore != null) {
             val kind = if (EditorActionPolicy.shouldInsertNewline(policy)) {
                 EnterKind.Newline

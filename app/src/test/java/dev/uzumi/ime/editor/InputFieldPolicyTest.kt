@@ -53,12 +53,20 @@ class InputFieldPolicyTest {
         assertEquals("改行", policy.actionLabel)
     }
 
-    /** 複数行とNO_ENTER_ACTIONではeditor actionより改行を優先する。 */
+    /**
+     * NO_ENTER_ACTIONとactionの指定がない複数行欄は改行し、複数行でも検索・送信が指定された欄はactionを優先する。
+     * actionの指定がない単一行欄はEnterキーのイベントを送る。
+     */
     @Test
-    fun multilineAndNoEnterActionInsertNewline() {
-        val multiline = InputFieldPolicy.fromRaw(
+    fun enterFollowsNoEnterActionAndExplicitAction() {
+        val multilineSearch = InputFieldPolicy.fromRaw(
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE,
-            EditorInfo.IME_ACTION_SEND,
+            EditorInfo.IME_ACTION_SEARCH,
+            null,
+        )
+        val multilineUnspecified = InputFieldPolicy.fromRaw(
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE,
+            EditorInfo.IME_ACTION_UNSPECIFIED,
             null,
         )
         val noEnterAction = InputFieldPolicy.fromRaw(
@@ -66,10 +74,21 @@ class InputFieldPolicyTest {
             EditorInfo.IME_ACTION_SEND or EditorInfo.IME_FLAG_NO_ENTER_ACTION,
             "送る",
         )
+        val singleLineUnspecified = InputFieldPolicy.fromRaw(
+            InputType.TYPE_CLASS_TEXT,
+            EditorInfo.IME_ACTION_UNSPECIFIED,
+            null,
+        )
 
-        assertTrue(EditorActionPolicy.shouldInsertNewline(multiline))
+        assertFalse(EditorActionPolicy.shouldInsertNewline(multilineSearch))
+        assertFalse(EditorActionPolicy.shouldSendEnterKey(multilineSearch))
+        assertEquals("検索", multilineSearch.actionLabel)
+        assertTrue(EditorActionPolicy.shouldInsertNewline(multilineUnspecified))
+        assertEquals("改行", multilineUnspecified.actionLabel)
         assertTrue(EditorActionPolicy.shouldInsertNewline(noEnterAction))
         assertEquals("改行", noEnterAction.actionLabel)
+        assertFalse(EditorActionPolicy.shouldInsertNewline(singleLineUnspecified))
+        assertTrue(EditorActionPolicy.shouldSendEnterKey(singleLineUnspecified))
     }
 
     /** 独自action IDがある場合は標準action maskより優先する。 */

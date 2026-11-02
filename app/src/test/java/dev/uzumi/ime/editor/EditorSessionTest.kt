@@ -376,6 +376,28 @@ class EditorSessionTest {
         assertEquals(listOf(EditorInfo.IME_ACTION_SEND), connection.editorActions)
     }
 
+    /** actionの指定がない単一行欄では、確定後のEnterでEnterキーのイベントを送り、複数行の検索欄では検索actionを送る。 */
+    @Test
+    fun enterSendsKeyEventOrSearchActionByField() {
+        val keyConnection = FakeEditorConnection()
+        val keySession = EditorSession(keyConnection, normalPolicy(imeAction = EditorInfo.IME_ACTION_UNSPECIFIED))
+        keySession.inputText("あ")
+        assertTrue(keySession.handleEnter())
+        assertEquals(0, keyConnection.enterKeys)
+        assertTrue(keySession.handleEnter())
+        assertEquals(1, keyConnection.enterKeys)
+        assertTrue(keyConnection.editorActions.isEmpty())
+
+        val searchConnection = FakeEditorConnection()
+        val search = EditorSession(
+            searchConnection,
+            normalPolicy(imeAction = EditorInfo.IME_ACTION_SEARCH).copy(isMultiLine = true),
+        )
+        assertTrue(search.handleEnter())
+        assertEquals(listOf(EditorInfo.IME_ACTION_SEARCH), searchConnection.editorActions)
+        assertTrue(searchConnection.committedTexts.isEmpty())
+    }
+
     /** 「小゛゜」操作を直前のかなへ順に適用する。 */
     @Test
     fun transformKanaCyclesVoicedAndSemiVoicedForms() {
@@ -762,7 +784,8 @@ class EditorSessionTest {
 
         val newlineConnection = FakeEditorConnection()
         val newlineClient = FakeLiveClient()
-        val newline = liveSession(newlineConnection, newlineClient, normalPolicy().copy(isMultiLine = true))
+        // AndroidのTextViewは改行させたい複数行欄へNO_ENTER_ACTIONを自動で付けるため、その状態を再現する。
+        val newline = liveSession(newlineConnection, newlineClient, normalPolicy().copy(isMultiLine = true, noEnterAction = true))
         typeLive(newline, newlineClient, "よい")
         assertTrue(newline.handleEnter())
         assertEquals(listOf("良い"), newlineConnection.committedTexts)
@@ -1562,6 +1585,7 @@ private class FakeEditorConnection : EditorConnectionPort {
     val deleteCalls = mutableListOf<Pair<Int, Int>>()
     val selectionCalls = mutableListOf<Pair<Int, Int>>()
     val editorActions = mutableListOf<Int>()
+    var enterKeys = 0
     var selectedTextValue: CharSequence? = null
 
     override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
@@ -1595,6 +1619,12 @@ private class FakeEditorConnection : EditorConnectionPort {
     override fun performEditorAction(actionCode: Int): Boolean {
         if (invalidated) return false
         editorActions += actionCode
+        return true
+    }
+
+    override fun sendEnterKey(): Boolean {
+        if (invalidated) return false
+        enterKeys += 1
         return true
     }
 
@@ -1691,6 +1721,8 @@ private class ModelEditorConnection(
     }
 
     override fun performEditorAction(actionCode: Int): Boolean = active
+
+    override fun sendEnterKey(): Boolean = active
 
     override fun textBeforeCursor(maxChars: Int): CharSequence? {
         if (!active) return null

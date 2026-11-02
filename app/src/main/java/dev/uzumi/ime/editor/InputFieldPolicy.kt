@@ -90,7 +90,7 @@ data class InputFieldPolicy(
                 isMultiLine = multiLine,
                 noEnterAction = noEnterAction,
                 imeAction = action,
-                actionLabel = if (multiLine || noEnterAction) {
+                actionLabel = if (EditorActionPolicy.insertsNewline(multiLine, noEnterAction, action)) {
                     "改行"
                 } else {
                     actionLabel?.takeIf { it.isNotBlank() }
@@ -138,8 +138,20 @@ object InlineAutofillPolicy {
  * Enter入力を改行として扱うか、editor actionとして送るかを判定する。
  */
 object EditorActionPolicy {
-    /** 改行欄やactionなしの欄では、Enterを文字として確定する。 */
-    fun shouldInsertNewline(policy: InputFieldPolicy): Boolean {
-        return policy.isMultiLine || policy.noEnterAction || policy.imeAction == EditorInfo.IME_ACTION_NONE
-    }
+    /**
+     * Enterを改行として入れるか。AndroidのTextViewは改行させたい複数行欄へ自動でNO_ENTER_ACTIONを付けるため、
+     * 標準のキーボードと同じく、NO_ENTER_ACTION・actionなし・actionの指定がない複数行欄だけを改行にする。
+     * 複数行でも検索や送信が指定された欄（WebViewやComposeの検索欄など）では、そのactionを優先する。
+     */
+    fun shouldInsertNewline(policy: InputFieldPolicy): Boolean =
+        insertsNewline(policy.isMultiLine, policy.noEnterAction, policy.imeAction)
+
+    /** [shouldInsertNewline]と同じ規則を、欄の情報を組み立てる前の値で判定する。 */
+    fun insertsNewline(multiLine: Boolean, noEnterAction: Boolean, action: Int): Boolean =
+        noEnterAction || action == EditorInfo.IME_ACTION_NONE ||
+            (multiLine && action == EditorInfo.IME_ACTION_UNSPECIFIED)
+
+    /** actionの指定がない単一行欄では、標準のキーボードと同じくEnterキーのイベントを送り、扱いを欄に任せる。 */
+    fun shouldSendEnterKey(policy: InputFieldPolicy): Boolean =
+        !shouldInsertNewline(policy) && policy.imeAction == EditorInfo.IME_ACTION_UNSPECIFIED
 }

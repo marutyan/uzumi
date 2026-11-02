@@ -1,5 +1,7 @@
 package dev.uzumi.ime.editor
 
+import android.os.SystemClock
+import android.view.KeyEvent
 import android.view.inputmethod.InputConnection
 
 /**
@@ -26,6 +28,9 @@ interface EditorConnectionPort {
 
     /** editor actionを送る。 */
     fun performEditorAction(actionCode: Int): Boolean
+
+    /** actionの指定がない欄へ、ソフトキーボードのEnterキーの押下と解放を送る。 */
+    fun sendEnterKey(): Boolean
 
     /** 削除範囲計算に使う直前の文字列を取得する。 */
     fun textBeforeCursor(maxChars: Int): CharSequence?
@@ -86,6 +91,16 @@ class AndroidInputConnectionPort(
 
     override fun performEditorAction(actionCode: Int): Boolean {
         return call { delegate.performEditorAction(actionCode) }
+    }
+
+    override fun sendEnterKey(): Boolean {
+        val time = SystemClock.uptimeMillis()
+        // InputMethodService.sendDownUpKeyEventsと同じ印を付け、ソフトキーボード由来の入力として扱わせる。
+        val flags = KeyEvent.FLAG_SOFT_KEYBOARD or KeyEvent.FLAG_KEEP_TOUCH_MODE
+        return call {
+            delegate.sendKeyEvent(KeyEvent(time, time, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER, 0, 0, -1, 0, flags)) &&
+                delegate.sendKeyEvent(KeyEvent(time, time, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER, 0, 0, -1, 0, flags))
+        }
     }
 
     override fun textBeforeCursor(maxChars: Int): CharSequence? {
