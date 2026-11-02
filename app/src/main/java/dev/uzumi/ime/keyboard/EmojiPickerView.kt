@@ -1,5 +1,6 @@
 package dev.uzumi.ime.keyboard
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -11,6 +12,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 
 /** カテゴリタブと縦スクロールの格子で絵文字・顔文字を選ぶ。 */
+// 必須コールバックを伴うプログラム生成専用Viewであり、XMLからは生成しない。
+@SuppressLint("ViewConstructor")
 internal class EmojiPickerView(
     context: Context,
     private val catalog: EmojiPickerCatalog,
@@ -122,7 +125,7 @@ internal class EmojiPickerView(
         }
     }
 
-    /** 選択中のカテゴリと履歴から項目を作り、顔文字が省略されない行幅で並べる。 */
+    /** 選択中のカテゴリと履歴から項目を作り、絵文字と顔文字をそれぞれの列数で並べる。 */
     private fun renderItems() {
         itemContent.removeAllViews()
         val items = if (selectedCategory == RECENT_CATEGORY.id) {
@@ -142,12 +145,8 @@ internal class EmojiPickerView(
             return
         }
 
-        val columns = if (selectedCategory == RECENT_CATEGORY.id || selectedCategory.startsWith(KAOMOJI_PREFIX)) {
-            KAOMOJI_COLUMN_COUNT
-        } else {
-            emojiColumnCount()
-        }
-        items.chunked(columns).forEach { rowItems ->
+        EmojiPickerGrid.rows(items, emojiColumnCount(), KAOMOJI_COLUMN_COUNT).forEach { rowItems ->
+            val columns = if (rowItems.first().isKaomoji) KAOMOJI_COLUMN_COUNT else emojiColumnCount()
             val row = LinearLayout(context).apply {
                 orientation = HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -218,9 +217,6 @@ internal class EmojiPickerView(
         /** 「最近」タブのID。 */
         private const val RECENT_ID = "recent"
 
-        /** 顔文字カテゴリのID接頭辞。 */
-        private const val KAOMOJI_PREFIX = "kaomoji_"
-
         /** 空の最近タブで案内する短い文言。 */
         private const val EMPTY_RECENTS_LABEL = "まだありません"
 
@@ -230,7 +226,7 @@ internal class EmojiPickerView(
         /** 絵文字格子の表示領域を設定したキー2行分に保つ。 */
         private const val GRID_VISIBLE_ROWS = 2
 
-        /** 最近と顔文字の格子は長い文字列を見せるため2列にする。 */
+        /** 顔文字の格子は長い文字列を見せるため2列にする。 */
         private const val KAOMOJI_COLUMN_COUNT = 2
 
         /** 一つの絵文字セルに必要な最小幅(dp)。 */

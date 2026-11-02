@@ -587,8 +587,9 @@ class UzumiInputMethodService : InputMethodService() {
             KeyboardAction.CloseEmojiPicker -> keyboardPanel?.hideEmojiPicker()
             is KeyboardAction.InsertEmoji -> {
                 val inserted = current.pasteText(action.value)
-                if (inserted && currentPolicy?.isSensitive == false) {
-                    val recentValues = emojiRecentStore.record(action.value, insertionSucceeded = true, isSensitive = false)
+                // 機密欄に加え、設定で学習を止めている場合も履歴へ残さない。
+                if (inserted && currentPolicy?.suppressLearning == false) {
+                    val recentValues = emojiRecentStore.record(action.value, insertionSucceeded = true, learningSuppressed = false)
                     keyboardPanel?.setRecentEmojiValues(recentValues)
                 }
             }

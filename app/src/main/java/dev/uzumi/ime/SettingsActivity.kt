@@ -23,6 +23,7 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import dev.uzumi.ime.conversion.NeuralModelSpec
+import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.keyboard.ToolbarAction
 import dev.uzumi.ime.keyboard.ToolbarPreferences
@@ -178,6 +179,7 @@ class SettingsActivity : Activity() {
             .setPositiveButton(R.string.settings_clear_learning_ok) { _, _ ->
                 background {
                     LearningStores.get(this).clearAll()
+                    EmojiRecentStore(this).clear()
                     runOnUiThread { Toast.makeText(this, R.string.settings_clear_learning_done, Toast.LENGTH_SHORT).show() }
                 }
             }

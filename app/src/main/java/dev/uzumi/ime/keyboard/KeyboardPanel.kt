@@ -302,7 +302,7 @@ class KeyboardPanel(
         updateSymbolPageVisibility()
     }
 
-    /** 一覧用の下段を作り、記号面へ戻るキーと既存の入力面切替を配置する。 */
+    /** 一覧用の下段を作り、記号面へ戻るキー、既存の入力面切替、削除キーを配置する。 */
     private fun buildEmojiPickerBottomRow(): LinearLayout {
         val row = createRow(rowHeightPx(preferences.rowHeightDp))
         row.addView(createKey(KeySpec.Action(KeyboardAction.CloseEmojiPicker, "記号"), 1.4f))
@@ -311,7 +311,8 @@ class KeyboardPanel(
         row.addView(kanaKey)
         row.addView(createKey(KeySpec.ModeSwitch("ABC", KeyboardMode.QWERTY), 1.0f))
         row.addView(createKey(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), 1.0f))
-        row.addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 3.0f))
+        row.addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 2.0f))
+        row.addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.0f))
         val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 2.6f)
         enterKeyViews.add(enterKey)
         row.addView(enterKey)

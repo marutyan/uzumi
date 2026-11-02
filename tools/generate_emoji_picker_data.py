@@ -94,14 +94,49 @@ CATEGORY_KEYWORDS = {
     ),
 }
 
-# Mozcの説明で分類できない絵文字を符号位置範囲で補って分類する。
+# 符号位置の範囲で確実に分かる絵文字を、説明語より先に分類する。先に一致した範囲を採用するため、
+# 例外（顔の範囲内の人物など）は広い範囲より前に置く。説明語の部分一致による誤分類を防ぐ。
+PRIORITY_RANGES = (
+    ("people", 0x1F645, 0x1F647), ("people", 0x1F64B, 0x1F64F),
+    ("face", 0x1F600, 0x1F644), ("face", 0x1F648, 0x1F64A),
+    ("face", 0x1F910, 0x1F917), ("face", 0x1F920, 0x1F925), ("face", 0x1F927, 0x1F92F),
+    ("face", 0x1F970, 0x1F976), ("face", 0x1F978, 0x1F97A), ("face", 0x1FAE0, 0x1FAEA),
+    ("face", 0x1F9D0, 0x1F9D0), ("face", 0x1F479, 0x1F480), ("face", 0x1F4A9, 0x1F4A9),
+    ("face", 0x2639, 0x263A), ("face", 0x2620, 0x2620),
+    ("people", 0x1F440, 0x1F478), ("people", 0x1F47C, 0x1F47C), ("people", 0x1F481, 0x1F487),
+    ("objects", 0x1F451, 0x1F462), ("people", 0x1F463, 0x1F465),
+    ("people", 0x1F4AA, 0x1F4AA), ("people", 0x261D, 0x261D), ("people", 0x270A, 0x270D),
+    ("people", 0x1F590, 0x1F596), ("people", 0x1F918, 0x1F91F), ("people", 0x1F926, 0x1F926),
+    ("people", 0x1F90C, 0x1F90F), ("people", 0x1F930, 0x1F939), ("people", 0x1F93C, 0x1F93E),
+    ("people", 0x1F977, 0x1F977), ("people", 0x1F9B0, 0x1F9B9), ("people", 0x1F9BB, 0x1F9BF),
+    ("people", 0x1F9CD, 0x1F9DF), ("people", 0x1F9D1, 0x1F9DD), ("people", 0x1FAF0, 0x1FAF8),
+    ("people", 0x1F3C3, 0x1F3C4), ("people", 0x1F3C7, 0x1F3C7), ("people", 0x1F3CA, 0x1F3CC),
+    ("people", 0x26F9, 0x26F9), ("people", 0x1F6A3, 0x1F6A3), ("people", 0x1F6B4, 0x1F6B6),
+    ("people", 0x1F6C0, 0x1F6C0), ("people", 0x1F6CC, 0x1F6CC), ("people", 0x1F57A, 0x1F57A),
+    ("people", 0x1F574, 0x1F575), ("people", 0x1F46A, 0x1F46A),
+    ("food", 0x2615, 0x2615), ("food", 0x1F374, 0x1F37F), ("food", 0x1F32D, 0x1F32F),
+    ("food", 0x1F336, 0x1F336), ("food", 0x1F33D, 0x1F373), ("food", 0x1F52A, 0x1F52A),
+    ("food", 0x1F950, 0x1F96F), ("food", 0x1F9C0, 0x1F9CB), ("food", 0x1FAD0, 0x1FADF),
+    ("animal", 0x1F400, 0x1F43F), ("animal", 0x1F54A, 0x1F54A), ("animal", 0x1F577, 0x1F578),
+    ("animal", 0x1F980, 0x1F9AE), ("animal", 0x1FAB0, 0x1FAB6), ("animal", 0x1FABD, 0x1FABD),
+    ("travel", 0x1F3D7, 0x1F3DB), ("travel", 0x1F3DF, 0x1F3F0), ("travel", 0x1F680, 0x1F6A8),
+    ("travel", 0x1F6E3, 0x1F6FF), ("travel", 0x1F6D5, 0x1F6D7),
+    ("nature", 0x1F300, 0x1F32C), ("nature", 0x1F331, 0x1F335), ("nature", 0x1F337, 0x1F33C),
+    ("nature", 0x1F3D4, 0x1F3D6), ("nature", 0x1F3DC, 0x1F3DE), ("nature", 0x1F4A7, 0x1F4A7),
+    ("nature", 0x1F525, 0x1F525), ("nature", 0x2600, 0x2604), ("nature", 0x26A1, 0x26A1),
+    ("nature", 0x2744, 0x2744), ("nature", 0x26C4, 0x26C5), ("nature", 0x26C8, 0x26C8),
+    ("nature", 0x1F490, 0x1F490), ("nature", 0x1FAB7, 0x1FABC),
+    ("objects", 0x2694, 0x2694), ("objects", 0x2709, 0x2709), ("objects", 0x1F50D, 0x1F50E),
+    ("objects", 0x1F52B, 0x1F52B), ("objects", 0x1F52E, 0x1F52E), ("travel", 0x26E9, 0x26EA),
+    ("symbols", 0x2626, 0x2626), ("symbols", 0x2640, 0x2642), ("symbols", 0x2648, 0x2653),
+    ("symbols", 0x269C, 0x269C), ("symbols", 0x26CE, 0x26CE), ("symbols", 0x271D, 0x271D),
+    ("symbols", 0x2733, 0x2733), ("symbols", 0x2747, 0x2747),
+    ("nature", 0x1F384, 0x1F384), ("activity", 0x1F3A0, 0x1F3C2),
+)
+
+# 範囲表と説明語のどちらでも決まらない絵文字を、広いブロック単位の符号位置範囲で補って分類する。
 CODE_POINT_RANGES = {
-    "face": ((0x1F600, 0x1F64F), (0x1F910, 0x1F92F), (0x1F970, 0x1F97A), (0x1F9D0, 0x1F9D0)),
-    "animal": ((0x1F400, 0x1F43F), (0x1F980, 0x1F9AE)),
-    "food": ((0x1F330, 0x1F37F), (0x1F950, 0x1F96F), (0x1F9C0, 0x1F9CB), (0x1FAD0, 0x1FADF)),
-    "nature": ((0x1F300, 0x1F32F),),
     "activity": ((0x1F3A0, 0x1F3FF), (0x1F93C, 0x1F945)),
-    "travel": ((0x1F680, 0x1F6FF),),
     "objects": ((0x1F4A0, 0x1F5FF),),
 }
 
@@ -143,21 +178,20 @@ def make_label(japanese_name: str, description: str, reading: str) -> str:
     return "絵文字"
 
 
-# 符号位置またはMozcの説明語から絵文字のカテゴリを一つ決める。
+# 先頭の符号位置、次にMozcの説明語から絵文字のカテゴリを一つ決める。
 def emoji_category(code_points: list[int], searchable_text: str) -> str:
     # カテゴリ判定でだけ修飾子を外し、parse_emojisは元の絵文字列をそのままassetへ残す。
     points = [point for point in code_points if point not in IGNORED_CODE_POINTS and not 0x1F3FB <= point <= 0x1F3FF]
     base = points[0] if points else 0
     if any(0x1F1E6 <= point <= 0x1F1FF for point in points) or base in (0x1F3F3, 0x1F3F4):
         return "flags"
-    if any(start <= base <= end for start, end in CODE_POINT_RANGES["face"]):
-        return "face"
+    for category, start, end in PRIORITY_RANGES:
+        if start <= base <= end:
+            return category
     for category, keywords in CATEGORY_KEYWORDS.items():
         if any(keyword in searchable_text for keyword in keywords):
             return category
     for category, ranges in CODE_POINT_RANGES.items():
-        if category == "face":
-            continue
         if any(start <= base <= end for start, end in ranges):
             return category
     return "symbols"
