@@ -504,6 +504,12 @@ class EditorSession(
 
     /** compositionが無いときの削除。選択範囲、またはカーソル直前の一書記素を消す。 */
     private fun deleteOutsideComposition(previous: DeletionUndo?): Boolean {
+        // 互換入力欄（端末アプリなど）は周辺文字列を返さないことがあり、削除はキーイベントでしか届かない。
+        // 標準のキーボードと同じくDeleteキーを送り、消える本文が分からないため「元に戻す」は記録しない。
+        if (policy.isTypeNull) {
+            deletionUndo = null
+            return connection.sendDeleteKey()
+        }
         if (selectionStart != null && selectionEnd != null && selectionStart != selectionEnd) {
             val selected = if (policy.isSensitive) null else connection.selectedText()?.toString()
             val accepted = connection.commitText("", 1)

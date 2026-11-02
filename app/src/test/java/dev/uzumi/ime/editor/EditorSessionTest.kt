@@ -361,6 +361,27 @@ class EditorSessionTest {
     }
 
     /**
+     * TYPE_NULLの欄では周辺文字列を読めなくても、BackspaceをDeleteキーのイベントとして送る。
+     * 通常の欄で周辺文字列の取得に一時的に失敗した場合は、キーイベントを送らず何もしない。
+     */
+    @Test
+    fun typeNullBackspaceSendsDeleteKeyButNormalFieldDoesNot() {
+        val typeNull = FakeEditorConnection().apply { beforeCursor = null }
+        val terminal = EditorSession(typeNull, normalPolicy(isTypeNull = true))
+        assertTrue(terminal.inputText("a"))
+
+        assertTrue(terminal.deleteBackward())
+        assertEquals(1, typeNull.deleteKeys)
+        assertTrue(typeNull.deleteCalls.isEmpty())
+        assertFalse(terminal.canUndoDeletion)
+
+        val normal = FakeEditorConnection().apply { beforeCursor = null }
+        val session = EditorSession(normal, normalPolicy())
+        assertFalse(session.deleteBackward())
+        assertEquals(0, normal.deleteKeys)
+    }
+
+    /**
      * パスワード・数値の欄ではcompositionを作らず一文字ずつ確定し、最初のEnterでeditor actionを送る。
      * パスワード欄で入力した文字を消しても、「元に戻す」のために本文を覚えない。
      */
@@ -1653,6 +1674,7 @@ private class FakeEditorConnection : EditorConnectionPort {
     val selectionCalls = mutableListOf<Pair<Int, Int>>()
     val editorActions = mutableListOf<Int>()
     var enterKeys = 0
+    var deleteKeys = 0
     var selectedTextValue: CharSequence? = null
 
     override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
@@ -1692,6 +1714,12 @@ private class FakeEditorConnection : EditorConnectionPort {
     override fun sendEnterKey(): Boolean {
         if (invalidated) return false
         enterKeys += 1
+        return true
+    }
+
+    override fun sendDeleteKey(): Boolean {
+        if (invalidated) return false
+        deleteKeys += 1
         return true
     }
 
@@ -1790,6 +1818,8 @@ private class ModelEditorConnection(
     override fun performEditorAction(actionCode: Int): Boolean = active
 
     override fun sendEnterKey(): Boolean = active
+
+    override fun sendDeleteKey(): Boolean = active
 
     override fun textBeforeCursor(maxChars: Int): CharSequence? {
         if (!active) return null
