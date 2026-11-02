@@ -200,6 +200,17 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
         return compositionUpdate(buildRequest())
     }
 
+    /** 入力カーソル直前の指定読みを一度の編集として置き換える。想定した末尾と異なる場合は扱わない。 */
+    fun replaceBeforeCursor(expected: String, replacement: String): LiveUpdate {
+        if (!acceptsInput() || expected.isEmpty()) return LiveUpdate.NOT_HANDLED
+        val expectedClusters = GraphemeClusters.split(expected)
+        val cursor = state.inputCursor
+        val start = cursor - expectedClusters.size
+        if (start < 0 || state.clusters.subList(start, cursor) != expectedClusters) return LiveUpdate.NOT_HANDLED
+        if (!applyReadingEdit(start, cursor, replacement, OperationKind.INPUT)) return LiveUpdate.NO_CHANGE
+        return compositionUpdate(buildRequest())
+    }
+
     /**
      * 入力カーソルを読みの書記素位置へ動かす。変換済みsegmentの内部へ入る場合は、
      * 表示内の位置と読みを対応付けられないため、そのsegmentを読みへ戻す（Undo可能な一操作）。

@@ -52,6 +52,8 @@ class EditorSession(
     private val evaluation: EvaluationCounter? = null,
     // Phase 3aの正→誤の遷移の判定。評価モードで課題の許容表記が与えられたときだけ使う。
     private val correctness: CorrectnessJudge? = null,
+    // 英字配列のローマ字をかなにするか。欄ごとの可否はInputFieldPolicy.usesRomajiInputで呼び出し側が決める。
+    romajiInputEnabled: Boolean = false,
 ) {
     private val buffer = CompositionBuffer()
     // compositionの内容が変わるたびに増える番号。変換応答が現在の読みに対するものかを照合する。
@@ -78,6 +80,10 @@ class EditorSession(
     private val staleCompositions = mutableListOf<CompositionGeometry>()
     // 確定操作の遅延通知を、後から始まったcompositionと区別するために保持する。
     private val pendingCommittedSelections = mutableListOf<SelectionTransition>()
+
+    // 12キーの同じキーの連続タップと、英字配列の入力途中のローマ字。どちらもこの編集セッションの間だけ持つ。
+    private val kanaToggle = KanaKeyToggle()
+    private val romajiComposer = if (romajiInputEnabled) RomajiKanaComposer() else null
 
     // ライブ変換で最後にEditorへ送ったカーソル位置（composition先頭からのUTF-16 offset）。
     private var liveCursorUtf16 = 0
@@ -160,10 +166,88 @@ class EditorSession(
 
     /**
      * 文字入力をcompositionへ追加する。接続結果が不明なら同じ本文を再送しない。
+     * 12キーの連続タップとローマ字の入力途中は、別の文字が来た時点で区切る。
      */
     fun inputText(value: String): Boolean {
         if (!active || value.isEmpty()) return false
+        kanaToggle.reset()
+        if (!finishRomajiInput()) return false
+        return inputTextDirect(value)
+    }
 
+    /**
+     * 英字配列から届いた文字列を、ローマ字かな入力が有効な欄ではかなへ組み立てて入れる。無効な欄では[inputText]と同じ。
+     * 入力途中のローマ字はcompositionの末尾にそのまま表示し、次のキーで差し替える。
+     */
+    fun inputRomajiText(value: String): Boolean {
+        if (!active || value.isEmpty()) return false
+        if (romajiComposer == null || value.any { it.code !in ASCII_PRINTABLE }) return inputText(value)
+        kanaToggle.reset()
+        return value.all(::inputRomajiCharacter)
+    }
+
+    /**
+     * 12キーのタップ。同じキーを猶予時間内に続けて押すと、直前に入れた一文字を同じ行の次の文字（[values]の次）へ
+     * 差し替える。差し替えは未確定の読みの末尾一文字の置き換えとして扱い、変換要求と「元に戻す」は通常の入力と同じ経路を通る。
+     */
+    fun inputKanaTap(values: List<String>, nowMillis: Long): Boolean {
+        if (!active || values.isEmpty()) return false
+        if (!finishRomajiInput()) return false
+        // 一文字ずつ直接確定する欄には差し替える未確定文字が無いため、従来どおり先頭の文字を入れる。
+        if (commitsDirectly) {
+            kanaToggle.reset()
+            return inputTextDirect(values.first())
+        }
+        // 明示変換の結果を表示中なら確定してから新しい読みを始める。確定の中で連続タップの状態も区切られる。
+        if (liveCore == null && currentConversion() != null && !commitComposition()) return false
+        val step = kanaToggle.next(values, nowMillis, compositionInputCursor())
+        val previous = step.previous
+        val accepted = if (previous == null) inputTextDirect(step.value) else replaceCompositionTail(previous, step.value)
+        if (!accepted) {
+            kanaToggle.reset()
+            // 末尾が想定と違って差し替えられなかった場合は、タップを失わないよう新しい文字として入れ直す。
+            return previous != null && active && inputKanaTap(values, nowMillis)
+        }
+        kanaToggle.accept(values, step, nowMillis, compositionInputCursor())
+        return true
+    }
+
+    /**
+     * 12キーの連続タップの途中なら区切り、次のタップを新しい文字にする。区切った場合はtrue。
+     * →キーをこの用途に使い、連続タップの途中ではカーソルや文節を動かさない（Gboard・iPhoneと同じ）。
+     */
+    fun endKanaToggle(nowMillis: Long): Boolean {
+        if (!active || !hasComposition || !kanaToggle.isActive(nowMillis)) return false
+        kanaToggle.reset()
+        return true
+    }
+
+    /** 確定・変換・カーソル移動などの前に、入力途中のローマ字を確定し（末尾の「n」は「ん」）、連続タップを区切る。 */
+    fun finishPendingInput(): Boolean {
+        kanaToggle.reset()
+        return finishRomajiInput()
+    }
+
+    /**
+     * 表示を変えずに連続タップとローマ字の保留を捨てる。候補の選択や取り消しは表示中の状態に対して行うため、
+     * 先にかなへ確定して状態を変えると、選んだ候補が古いとして拒否されてしまう。
+     */
+    private fun abandonPendingInput() {
+        kanaToggle.reset()
+        romajiComposer?.reset()
+    }
+
+    /** 外部のカーソル移動や接続の切替の後に、古い末尾を入力途中として扱わないよう状態を捨てる。 */
+    private fun resetInputSequences() {
+        abandonPendingInput()
+    }
+
+    /** この欄で英字配列のローマ字かな入力が有効か。有効な欄では英字配列の自動大文字化を止める。 */
+    val isRomajiInputEnabled: Boolean
+        get() = romajiComposer != null
+
+    /** 文字入力をcompositionへ追加する共通本体。直接確定の欄では一文字ずつ確定する。 */
+    private fun inputTextDirect(value: String): Boolean {
         if (commitsDirectly) {
             val accepted = connection.commitText(value, 1)
             if (accepted) updateExternalSelectionAfterCommit(value)
@@ -183,27 +267,93 @@ class EditorSession(
         return false
     }
 
+    /** ローマ字一文字を組み立て器へ渡し、compositionの末尾の入力途中のローマ字を差し替える。 */
+    private fun inputRomajiCharacter(char: Char): Boolean {
+        val composer = romajiComposer ?: return inputTextDirect(char.toString())
+        // 明示変換の結果を表示中なら先に確定する。確定は保留を確定させるため、組み立て器へ渡す前に済ませる。
+        if (liveCore == null && currentConversion() != null && !commitComposition()) return false
+        if (applyRomajiEdit(composer.input(char))) return true
+        composer.reset()
+        return false
+    }
+
+    /** 入力途中のローマ字をかなへ確定する。差し替えられなくても、セッションが有効なら続く操作は止めない。 */
+    private fun finishRomajiInput(): Boolean {
+        val edit = romajiComposer?.finish() ?: return true
+        return applyRomajiEdit(edit) || active
+    }
+
+    /** ローマ字の差し替えを適用する。共通の先頭（保留した「k」の後ろへ「t」を足す場合など）は書き換えない。 */
+    private fun applyRomajiEdit(edit: RomajiEdit): Boolean {
+        val common = edit.remove.commonPrefixWith(edit.insert).length
+        val remove = edit.remove.substring(common)
+        val insert = edit.insert.substring(common)
+        return when {
+            remove.isEmpty() && insert.isEmpty() -> true
+            remove.isEmpty() -> inputTextDirect(insert)
+            else -> replaceCompositionTail(remove, insert)
+        }
+    }
+
+    /**
+     * 読みの入力位置の直前にある[expected]を[replacement]へ一度の編集として差し替える。末尾が想定と違えば何もしない。
+     * ライブ変換では句読点が文節の区切りや確定を意味するため、句読点を含む差し替えは、消してから通常の入力として入れる。
+     */
+    private fun replaceCompositionTail(expected: String, replacement: String): Boolean {
+        if (!active || commitsDirectly || expected.isEmpty()) return false
+        deletionUndo = null
+        liveCore?.let {
+            if (replacement.any { char -> char.toString() in LIVE_PUNCTUATION }) {
+                val removed = performLive { core -> core.replaceBeforeCursor(expected, "") } ?: false
+                return removed && (performLive { core -> core.inputText(replacement) } ?: false)
+            }
+            return performLive { core -> core.replaceBeforeCursor(expected, replacement) } ?: false
+        }
+        if (!buffer.replaceBeforeCursor(expected, replacement)) return false
+        markCompositionChanged()
+        if (synchronizeComposition()) return true
+        failClosed()
+        return false
+    }
+
+    /** 連続タップの照合に使う、composition上の入力位置（書記素）。未確定文字が無ければ-1。 */
+    private fun compositionInputCursor(): Int {
+        if (!hasComposition) return -1
+        return liveCore?.inputCursor ?: buffer.cursorCluster
+    }
+
     /** 読み末尾または外部カーソル直前の書記素を削除する。連続した削除は一度のUndoにまとめる。 */
     fun deleteBackward(): Boolean {
         if (!active) return false
+        kanaToggle.reset()
+        val romajiPendingBefore = romajiComposer?.pendingText?.takeIf(String::isNotEmpty)
+        if (romajiPendingBefore != null) romajiComposer?.deletePending()
         val previous = activeBackspaceDeletion()
         liveCore?.let { core ->
             if (core.display.isNotEmpty()) {
-                if (core.inputCursor == 0) return deleteBeforeComposition()
+                if (core.inputCursor == 0) {
+                    romajiComposer?.restorePending(romajiPendingBefore.orEmpty())
+                    return deleteBeforeComposition()
+                }
                 if (policy.isSensitive) {
                     val accepted = performLive { it.deleteBackward() } ?: false
                     if (accepted) deletionUndo = null
+                    if (!accepted) romajiComposer?.restorePending(romajiPendingBefore.orEmpty())
                     return accepted
                 }
                 val depthBefore = core.undoDepth
                 val accepted = performLive { it.deleteBackward() } ?: false
-                if (!accepted) return false
+                if (!accepted) {
+                    romajiComposer?.restorePending(romajiPendingBefore.orEmpty())
+                    return false
+                }
                 val addedUndoSteps = (core.undoDepth - depthBefore).coerceAtLeast(0)
                 rememberBackspaceDeletion(
                     previous = previous,
                     explicitComposition = previous?.explicitComposition,
                     liveUndoSteps = (previous?.liveUndoSteps ?: 0) + addedUndoSteps,
                     originalCompositionStart = previous?.originalCompositionStart ?: compositionStart,
+                    romajiPending = previous?.romajiPending ?: romajiPendingBefore,
                 )
                 return true
             }
@@ -217,7 +367,10 @@ class EditorSession(
                 previous?.explicitConversionCommitRequest ?: appliedConversionCommitRequest ?: conversion?.request
             }
             val originalStart = previous?.originalCompositionStart ?: compositionStart
-            if (!buffer.deleteBackward()) return false
+            if (!buffer.deleteBackward()) {
+                romajiComposer?.restorePending(romajiPendingBefore.orEmpty())
+                return false
+            }
             markCompositionChanged()
             if (!synchronizeComposition()) {
                 failClosed()
@@ -233,6 +386,7 @@ class EditorSession(
                     explicitConversionCommitRequest = conversionCommitRequest,
                     liveUndoSteps = previous?.liveUndoSteps ?: 0,
                     originalCompositionStart = originalStart,
+                    romajiPending = previous?.romajiPending ?: romajiPendingBefore,
                 )
             }
             return true
@@ -276,6 +430,7 @@ class EditorSession(
      * 行頭にいる場合は直前の改行一つを消す。消した文字列は、機密欄・学習禁止欄を除いて「元に戻す」のために覚える。
      */
     fun deleteToLineStart(): Boolean {
+        if (!finishPendingInput()) return false
         deletionUndo = null
         if (!active) return false
         if (hasComposition) {
@@ -311,11 +466,13 @@ class EditorSession(
      * 外部選択や別の編集が入っていれば記録を捨て、利用者の別の文字列を壊さない。
      */
     fun undoDeletion(): Boolean {
+        kanaToggle.reset()
         val record = deletionUndo ?: return false
         deletionUndo = null
         if (!active || !matchesDeletionLocation(record)) return false
 
         if (record.kind == DeletionUndoKind.LINE_START) {
+            romajiComposer?.reset()
             if (hasComposition) return false
             if (record.fromComposition) return inputText(record.lineText)
             return restoreExternalText(record.lineText)
@@ -346,16 +503,19 @@ class EditorSession(
                 request = record.explicitConversion.request.copy(revision = revision),
             )
             appliedConversionCommitRequest = record.explicitConversionCommitRequest
+            romajiComposer?.restorePending(record.romajiPending.orEmpty())
             return true
         }
         if (record.liveUndoSteps > 0) {
             val core = liveCore ?: return false
             if (!core.isActive || !core.isLiveEnabled || core.undoDepth < record.liveUndoSteps) return false
-            return performLive { live ->
+            val restored = performLive { live ->
                 var update = LiveUpdate.NOT_HANDLED
                 repeat(record.liveUndoSteps) { update = live.undo() }
                 update
             } ?: false
+            if (restored) romajiComposer?.restorePending(record.romajiPending.orEmpty())
+            return restored
         }
         return record.removedExternal.isNotEmpty()
     }
@@ -389,6 +549,7 @@ class EditorSession(
         liveUndoSteps: Int,
         originalCompositionStart: Int?,
         removedExternal: String = previous?.removedExternal.orEmpty(),
+        romajiPending: String? = previous?.romajiPending,
     ) {
         if (policy.isSensitive) {
             deletionUndo = null
@@ -406,6 +567,7 @@ class EditorSession(
             explicitConversionCommitRequest = explicitConversionCommitRequest,
             liveUndoSteps = liveUndoSteps,
             originalCompositionStart = originalCompositionStart,
+            romajiPending = romajiPending,
             before = location.before,
             after = location.after,
             cursor = location.cursor,
@@ -582,6 +744,7 @@ class EditorSession(
      */
     fun moveCursor(delta: Int): Boolean {
         if (!active || delta == 0) return false
+        if (!finishPendingInput()) return false
         liveCore?.let { core ->
             if (core.display.isEmpty()) return moveOutsideComposition(delta)
             val length = core.segments.lastOrNull()?.readingEnd ?: 0
@@ -667,6 +830,7 @@ class EditorSession(
      */
     fun commitComposition(): Boolean {
         if (!active) return false
+        if (!finishPendingInput()) return false
         liveCore?.let { core ->
             if (core.display.isEmpty()) return true
             return performLive { it.commitComposition() } ?: false
@@ -685,6 +849,7 @@ class EditorSession(
     /** 未確定の入力を先に確定し、貼り付け文字列を変換・学習へ渡さずそのまま入力する。 */
     fun pasteText(text: String): Boolean {
         if (!active || text.isEmpty()) return false
+        if (!finishPendingInput()) return false
         if (hasComposition && !commitComposition()) return false
         deletionUndo = null
         val start = knownSelectionStart()
@@ -702,6 +867,7 @@ class EditorSession(
      */
     fun selectConversionCandidate(choice: ConversionChoice): Boolean {
         if (!active) return false
+        abandonPendingInput()
         val conversion = currentConversion() ?: return false
         if (conversion.request != choice.request) return false
         val candidate = conversion.headCandidates.firstOrNull { it.id == choice.candidateId } ?: return false
@@ -764,6 +930,7 @@ class EditorSession(
      */
     fun applyCandidate(value: String): Boolean {
         if (!active || liveCore != null || policy.suppressSuggestions || value.isEmpty() || buffer.isEmpty) return false
+        abandonPendingInput()
         markCompositionChanged()
         buffer.setDisplay(value)
         if (synchronizeComposition()) return true
@@ -777,6 +944,7 @@ class EditorSession(
      */
     fun toKatakana(): Boolean {
         if (!active) return false
+        if (!finishPendingInput()) return false
         val core = liveCore
         if (core != null) {
             val focused = core.focusedSegment ?: return false
@@ -792,6 +960,7 @@ class EditorSession(
     /** カーソル直前のかなを小文字・濁点・半濁点へ循環変換する。 */
     fun transformKana(): Boolean {
         if (!active || policy.isTypeNull) return false
+        if (!finishPendingInput()) return false
         if (liveCore != null) return performLive { it.transformBeforeCursor(KanaModifier::transform) } ?: false
         if (buffer.isEmpty) return false
         if (!buffer.transformBeforeCursor(KanaModifier::transform)) return false
@@ -807,6 +976,7 @@ class EditorSession(
      * 従来どおりカタカナ候補を選ぶ。
      */
     fun convert(): Boolean {
+        if (!finishPendingInput()) return false
         if (liveCore != null) return selectNextLiveCandidate()
         if (active && !buffer.isEmpty && (pendingConversion != null || currentConversion() != null)) return true
         val client = conversionClient
@@ -836,6 +1006,7 @@ class EditorSession(
      * 未確定文字がなければ改行またはeditor actionへ振り分ける。
      */
     fun handleEnter(): Boolean {
+        if (!finishPendingInput()) return false
         if (hasComposition) return commitComposition()
         if (EditorActionPolicy.shouldSendEnterKey(policy)) return active && connection.sendEnterKey()
         if (liveCore != null) {
@@ -890,6 +1061,7 @@ class EditorSession(
                 }
             }
             invalidateDeletionUndoUnlessSelectionMatches(newSelectionStart, newSelectionEnd, candidatesStart, candidatesEnd)
+            resetInputSequences()
             compositionStart = null
             clearCompositionExpectations()
             pendingCommittedSelections.clear()
@@ -898,6 +1070,7 @@ class EditorSession(
         }
 
         if (!hasComposingSpan) {
+            resetInputSequences()
             deletionUndo = null
             // hostがspanを終了済みなら、旧readingを次の入力で再挿入しない。
             discardCompositionWithoutEditorCall()
@@ -906,6 +1079,7 @@ class EditorSession(
         }
 
         if (newSelectionStart < 0 || newSelectionEnd < 0 || newSelectionStart != newSelectionEnd) {
+            resetInputSequences()
             deletionUndo = null
             finishAndDiscardComposition(newSelectionStart, newSelectionEnd)
             return
@@ -934,6 +1108,7 @@ class EditorSession(
             invalidateDeletionUndoUnlessSelectionMatches(newSelectionStart, newSelectionEnd, candidatesStart, candidatesEnd)
         }
         if (sameCurrentSpan && acceptCompositionSelection(candidatesStart, newSelectionStart)) {
+            resetInputSequences()
             recordExpectedComposition(
                 CompositionGeometry(
                     start = candidatesStart,
@@ -945,6 +1120,7 @@ class EditorSession(
         }
 
         // host側に残るspanを確定してから内部readingを捨て、次入力の誤置換を防ぐ。
+        resetInputSequences()
         deletionUndo = null
         finishAndDiscardComposition(newSelectionStart, newSelectionEnd)
     }
@@ -956,6 +1132,7 @@ class EditorSession(
      */
     fun close() {
         if (!active) return
+        resetInputSequences()
         active = false
         deletionUndo = null
         buffer.clear()
@@ -974,6 +1151,7 @@ class EditorSession(
      * commitTextは使わない。Editorが旧接続を閉じた時点でspanを確定済みの場合に、同じ本文を二重に入れるため。
      */
     fun closeForRestart(restartedConnection: EditorConnectionPort) {
+        resetInputSequences()
         if (hasComposition) restartedConnection.finishComposingText()
         close()
     }
@@ -996,7 +1174,10 @@ class EditorSession(
     }
 
     /** ライブ変換の候補を選ぶ。表示時と状態が変わっていれば拒否する。対象segmentはchosenになる。 */
-    fun selectLiveCandidate(choice: CandidateChoice): Boolean = performLive { it.selectCandidate(choice) } ?: false
+    fun selectLiveCandidate(choice: CandidateChoice): Boolean {
+        abandonPendingInput()
+        return performLive { it.selectCandidate(choice) } ?: false
+    }
 
     /**
      * 候補バーの対象を前（direction<0）または次のsegmentへ移す。読点は飛ばし、最後のsegmentの次は
@@ -1005,6 +1186,7 @@ class EditorSession(
     fun moveLiveFocus(direction: Int): Boolean {
         val core = liveCore ?: return false
         if (!active || direction == 0) return false
+        if (!finishPendingInput()) return false
         val segments = core.segments
         var index = segments.indexOfFirst { it.id == core.focusedSegment?.id }
         if (index < 0) return false
@@ -1055,6 +1237,7 @@ class EditorSession(
      */
     fun resizeSegment(delta: Int): Boolean {
         if (!active || delta == 0) return false
+        if (!finishPendingInput()) return false
         if (liveCore != null) return performLive { it.resizeFocusedSegment(delta) } ?: false
         return resizeConversionHead(delta)
     }
@@ -1063,11 +1246,15 @@ class EditorSession(
     fun returnLiveFocusToInput(): Boolean {
         val core = liveCore ?: return false
         if (!active) return false
+        if (!finishPendingInput()) return false
         return core.returnToInputPosition().handled && refreshLiveHighlight()
     }
 
     /** ライブ変換の直前の操作（候補の誤選択など）を取り消す。取り消せる操作が無ければfalse。 */
-    fun undoLive(): Boolean = performLive { it.undo() } ?: false
+    fun undoLive(): Boolean {
+        abandonPendingInput()
+        return performLive { it.undo() } ?: false
+    }
 
     /** workerから届いたライブ変換の結果を、コアが現在の状態と照合できた場合だけ表示へ反映する。 */
     fun applyLiveResult(result: LiveResult): Boolean {
@@ -1537,6 +1724,12 @@ class EditorSession(
          * 確定・破棄するので、速い連続入力でも誤って確定しないよう32（8打鍵以上）にする。
          */
         const val MAX_STALE_COMPOSITIONS = 32
+
+        /** ローマ字として組み立てる文字の範囲（ASCIIの印字可能文字）。これ以外を含む文字列はそのまま入れる。 */
+        val ASCII_PRINTABLE = 0x21..0x7e
+
+        /** ライブ変換で区切りや確定を意味する句読点。差し替えではなく通常の入力として入れる。 */
+        val LIVE_PUNCTUATION = LiveConversionRules.TERMINAL_PUNCTUATION + LiveConversionRules.SOFT_BOUNDARY
     }
 }
 
@@ -1593,6 +1786,8 @@ private data class DeletionUndo(
     val before: String,
     val after: String,
     val composition: CompositionGeometry?,
+    // ローマ字の保留表示をUndoした後、同じ未確定入力として続けるための状態。
+    val romajiPending: String? = null,
     // 行頭までの削除で未確定読みを消した場合は、戻すときに読みを再入力する。
     val fromComposition: Boolean = false,
 )

@@ -565,7 +565,11 @@ class KeyView(context: Context) : View(context) {
                 val finalDirection = determineFlickDirection(upX - startX, upY - startY, thresholdPx)
                 val char = KeyboardLayoutData.getKanaChar(finalSpec.type, finalDirection)
                 if (char.isNotEmpty()) {
-                    onAction?.invoke(KeyboardAction.Text(char))
+                    onAction?.invoke(if (finalDirection == FlickDirection.CENTER) {
+                        KeyboardAction.KanaTap(finalSpec.type)
+                    } else {
+                        KeyboardAction.Text(char)
+                    })
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                 }
             }
@@ -650,7 +654,7 @@ class KeyView(context: Context) : View(context) {
             is KeySpec.Kana -> {
                 val char = KeyboardLayoutData.getKanaChar(currentSpec.type, FlickDirection.CENTER)
                 if (char.isNotEmpty()) {
-                    onAction?.invoke(KeyboardAction.Text(char))
+                    onAction?.invoke(KeyboardAction.KanaTap(currentSpec.type))
                     haptic(HapticFeedbackConstants.KEYBOARD_TAP)
                 }
             }

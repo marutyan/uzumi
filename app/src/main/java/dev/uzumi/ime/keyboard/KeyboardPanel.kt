@@ -29,6 +29,10 @@ class KeyboardPanel(
     private var currentMode = KeyboardMode.KANA
     private var lastNormalMode = KeyboardMode.KANA
 
+    /** 現在表示中の面が英字QWERTYか。ローマ字変換の対象を他の面から分ける。 */
+    val isQwertyMode: Boolean
+        get() = currentMode == KeyboardMode.QWERTY
+
     private val shiftState = QwertyShiftState()
 
     private var actionLabel = "確定"

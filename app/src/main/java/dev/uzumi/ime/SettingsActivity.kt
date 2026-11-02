@@ -53,6 +53,8 @@ class SettingsActivity : Activity() {
         content.addView(section(R.string.settings_section_input))
         content.addView(switchRow(R.string.live_conversion_switch, R.string.live_conversion_description,
             UzumiSettings.isLiveConversionEnabled(this)) { UzumiSettings.setLiveConversionEnabled(this, it) })
+        content.addView(switchRow(R.string.settings_romaji_input, R.string.settings_romaji_input_description,
+            UzumiSettings.isRomajiInputEnabled(this)) { UzumiSettings.setRomajiInputEnabled(this, it) })
         content.addView(switchRow(R.string.settings_delete_drag, R.string.settings_delete_drag_description,
             UzumiSettings.keyboardPreferences(this).deleteDrag) { UzumiSettings.setDeleteDrag(this, it) })
 

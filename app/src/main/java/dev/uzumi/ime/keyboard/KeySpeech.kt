@@ -110,6 +110,7 @@ object KeySpeech {
      */
     fun actionDescription(action: KeyboardAction): String = when (action) {
         is KeyboardAction.Text -> spokenText(action.value)
+        is KeyboardAction.KanaTap -> spokenText(KeyboardLayoutData.getKanaChar(action.type, FlickDirection.CENTER))
         is KeyboardAction.Delete -> "削除"
         is KeyboardAction.Enter -> "確定"
         is KeyboardAction.Space -> "空白"

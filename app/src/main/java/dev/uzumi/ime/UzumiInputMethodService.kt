@@ -7,6 +7,7 @@ import android.inputmethodservice.InputMethodService
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.TextUtils
@@ -60,6 +61,7 @@ import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardAction
 import dev.uzumi.ime.keyboard.KeyboardColors
 import dev.uzumi.ime.keyboard.KeyboardDimens
+import dev.uzumi.ime.keyboard.KeyboardLayoutData
 import dev.uzumi.ime.keyboard.KeyboardPanel
 import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.keyboard.ToolbarAction
@@ -284,7 +286,10 @@ class UzumiInputMethodService : InputMethodService() {
             ::handleKeyboardAction,
             lineDeleteLength = { session?.lineDeleteLength() },
             preferences = displayPreferences,
-            onPanelKey = { evaluation.record(OperationKind.OTHER) },
+            onPanelKey = {
+                session?.finishPendingInput()
+                evaluation.record(OperationKind.OTHER)
+            },
         ).also { panel ->
             keyboardArea.addView(panel, FrameLayout.LayoutParams(match, wrap))
         }
@@ -365,7 +370,9 @@ class UzumiInputMethodService : InputMethodService() {
         val policy = InputFieldPolicy.fromEditorInfo(info)
             .copy(learningDisabledBySetting = LearningStores.peek()?.isEnabled != true)
         currentPolicy = policy
-        autoCapsMode = info.initialCapsMode and policy.capsModeFlags
+        // ローマ字かな入力の欄では、英字配列の小文字がかなの入力になるため自動大文字化を使わない（Gboardと同じ）。
+        val romaji = policy.usesRomajiInput(UzumiSettings.isRomajiInputEnabled(this))
+        autoCapsMode = if (romaji) 0 else info.initialCapsMode and policy.capsModeFlags
         // ライブ変換の設定は入力開始ごとに読み、設定画面での変更を次の入力欄から反映する。
         val live = policy.usesLiveConversion(UzumiSettings.isLiveConversionEnabled(this))
         // debugビルドで選んだモデル。ニューラル変換はライブ変換の要求だけに使う。releaseビルドでは常にMozcだけ。
@@ -385,6 +392,7 @@ class UzumiInputMethodService : InputMethodService() {
             compositionStyler = ::highlightSegment,
             evaluation = evaluation,
             correctness = CorrectnessJudge.shared,
+            romajiInputEnabled = romaji,
         )
         if (inputViewVisible) refreshClipboardSuggestion()
         applyPolicyToKeyboard()
@@ -435,10 +443,13 @@ class UzumiInputMethodService : InputMethodService() {
         refreshCandidates()
     }
 
-    /** カーソル位置で欄が求める大文字化を問い合わせ、英字配列のShiftへ反映する。欄が求めない場合は問い合わせない。 */
+    /**
+     * カーソル位置で欄が求める大文字化を問い合わせ、英字配列のShiftへ反映する。欄が求めない場合と、
+     * ローマ字かな入力の欄では問い合わせない。
+     */
     private fun updateAutoCaps() {
         val flags = currentPolicy?.capsModeFlags ?: 0
-        autoCapsMode = if (flags == 0) 0 else currentInputConnection?.getCursorCapsMode(flags) ?: 0
+        autoCapsMode = if (session?.isRomajiInputEnabled == true || flags == 0) 0 else currentInputConnection?.getCursorCapsMode(flags) ?: 0
         keyboardPanel?.setAutoCapsMode(autoCapsMode)
     }
 
@@ -564,18 +575,31 @@ class UzumiInputMethodService : InputMethodService() {
             action != KeyboardAction.OpenEmojiPicker && action != KeyboardAction.CloseEmojiPicker
         ) current.forgetDeletionUndo()
         when (action) {
-            is KeyboardAction.Text -> current.inputText(action.value)
-            KeyboardAction.Delete -> current.deleteBackward()
-            // ライブ変換の入力中は、←→で候補バーの対象の文節を前後へ移す（Simejiの変換中の←→に当たる操作）
-            is KeyboardAction.MoveCursor -> if (current.isLiveMode && current.hasComposition) {
-                current.moveLiveFocus(action.delta)
+            // 英字配列の文字は、ローマ字かな入力が有効な欄ではかなへ組み立てる（無効な欄では従来どおり英字）。
+            is KeyboardAction.Text -> if (keyboardPanel?.isQwertyMode == true) {
+                current.inputRomajiText(action.value)
             } else {
-                current.moveCursor(action.delta)
+                current.inputText(action.value)
+            }
+            is KeyboardAction.KanaTap ->
+                current.inputKanaTap(KeyboardLayoutData.toggleChars(action.type), SystemClock.uptimeMillis())
+            KeyboardAction.Delete -> current.deleteBackward()
+            is KeyboardAction.MoveCursor -> when {
+                // 12キーの連続タップの途中の→は、次のタップを新しい文字にする区切りとして使い、カーソルは動かさない。
+                action.delta > 0 && current.endKanaToggle(SystemClock.uptimeMillis()) -> Unit
+                // ライブ変換の入力中は、←→で候補バーの対象の文節を前後へ移す（Simejiの変換中の←→に当たる操作）
+                current.isLiveMode && current.hasComposition -> current.moveLiveFocus(action.delta)
+                else -> current.moveCursor(action.delta)
             }
             // Space・変換キーの横ドラッグは、ライブ変換中も文節焦点ではなく実カーソルを動かす。
             is KeyboardAction.MoveEditorCursor -> current.moveCursor(action.delta)
             KeyboardAction.Enter -> current.handleEnter()
-            KeyboardAction.Space -> current.insertSpace()
+            // ローマ字かな入力中の英字配列のSpaceは、12キーの空白キーと同じく入力中なら変換にする。
+            KeyboardAction.Space -> if (keyboardPanel?.isQwertyMode == true && current.isRomajiInputEnabled && current.hasComposition) {
+                current.convert()
+            } else {
+                current.insertSpace()
+            }
             KeyboardAction.Convert -> current.convert()
             KeyboardAction.TransformKana -> current.transformKana()
             KeyboardAction.ToKatakana -> current.toKatakana()

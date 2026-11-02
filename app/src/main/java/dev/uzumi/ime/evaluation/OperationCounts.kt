@@ -1,6 +1,8 @@
 package dev.uzumi.ime.evaluation
 
 import dev.uzumi.ime.keyboard.KeyboardAction
+import dev.uzumi.ime.keyboard.FlickDirection
+import dev.uzumi.ime.keyboard.KeyboardLayoutData
 
 /**
  * Phase 2cの評価で数える操作の種類。押下1回を一つの種類へ分け、入力した本文や候補の文字列は持たない。
@@ -63,6 +65,7 @@ object OperationClassifier {
      */
     fun keyboardAction(action: KeyboardAction, liveMode: Boolean): OperationKind? = when (action) {
         is KeyboardAction.Text -> text(action.value)
+        is KeyboardAction.KanaTap -> text(KeyboardLayoutData.getKanaChar(action.type, FlickDirection.CENTER))
         KeyboardAction.Space, KeyboardAction.TransformKana -> OperationKind.INPUT
         KeyboardAction.Convert -> if (liveMode) OperationKind.CORRECTION else OperationKind.COMMIT
         KeyboardAction.Delete,

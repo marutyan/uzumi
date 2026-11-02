@@ -11,6 +11,9 @@ sealed interface KeyboardAction {
      */
     data class Text(val value: String) : KeyboardAction
 
+    /** 12キーの中央タップ。フリック入力と区別して同じキーの行内トグルを可能にする。 */
+    data class KanaTap(val type: KanaKeyType) : KeyboardAction
+
     /**
      * 1文字（またはカーソル直前の要素）の削除。
      */

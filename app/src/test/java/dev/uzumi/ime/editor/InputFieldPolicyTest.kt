@@ -142,6 +142,16 @@ class InputFieldPolicyTest {
         assertFalse(email.usesLiveConversion(liveSettingEnabled = true))
         assertFalse(typeNull.usesLiveConversion(liveSettingEnabled = true))
         assertFalse(number.usesLiveConversion(liveSettingEnabled = true))
+
+        // ローマ字かな入力も、英字や数字そのものを入れる欄では設定にかかわらず使わない。
+        assertTrue(text.usesRomajiInput(romajiSettingEnabled = true))
+        assertFalse(text.usesRomajiInput(romajiSettingEnabled = false))
+        assertTrue(noLearning.usesRomajiInput(romajiSettingEnabled = true))
+        assertFalse(hidden.usesRomajiInput(romajiSettingEnabled = true))
+        assertFalse(uri.usesRomajiInput(romajiSettingEnabled = true))
+        assertFalse(email.usesRomajiInput(romajiSettingEnabled = true))
+        assertFalse(typeNull.usesRomajiInput(romajiSettingEnabled = true))
+        assertFalse(number.usesRomajiInput(romajiSettingEnabled = true))
     }
 
     /** Inline候補は未確定文字も通常候補もない待機中だけ出し、入力を始めたら通常の表示を優先する。 */

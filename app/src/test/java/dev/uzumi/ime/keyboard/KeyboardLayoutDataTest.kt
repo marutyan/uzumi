@@ -23,6 +23,15 @@ class KeyboardLayoutDataTest {
         assertEquals("お", KeyboardLayoutData.getKanaChar(KanaKeyType.A, FlickDirection.DOWN))
     }
 
+    /** 同じキーの連続タップでは行の文字を順に切り替え、や行はフリックの括弧を含めない。 */
+    @Test
+    fun toggleCharsFollowRowOrder() {
+        assertEquals(listOf("あ", "い", "う", "え", "お"), KeyboardLayoutData.toggleChars(KanaKeyType.A))
+        assertEquals(listOf("や", "ゆ", "よ"), KeyboardLayoutData.toggleChars(KanaKeyType.YA))
+        assertEquals(listOf("わ", "を", "ん", "ー", "〜"), KeyboardLayoutData.toggleChars(KanaKeyType.WA))
+        assertEquals(listOf("、", "。", "？", "！", "…"), KeyboardLayoutData.toggleChars(KanaKeyType.PUNCT))
+    }
+
     @Test
     fun testKanaKeyKa() {
         assertEquals("か", KeyboardLayoutData.getKanaChar(KanaKeyType.KA, FlickDirection.CENTER))

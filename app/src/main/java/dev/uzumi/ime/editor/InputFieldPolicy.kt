@@ -43,6 +43,14 @@ data class InputFieldPolicy(
         return liveSettingEnabled && !isPassword && !isTypeNull && !isNumeric && !isAddressLike
     }
 
+    /**
+     * ローマ字かな入力の設定がONのとき、この欄の英字配列でローマ字をかなにするか。パスワード・互換入力・数字・
+     * URL・メールの欄は英字や数字そのものを入れる欄のため、設定にかかわらず従来どおり英字を入れる。
+     */
+    fun usesRomajiInput(romajiSettingEnabled: Boolean): Boolean {
+        return romajiSettingEnabled && !isPassword && !isTypeNull && !isNumeric && !isAddressLike
+    }
+
     companion object {
         /** EditorInfoを、接続をまたいで持ち運べる方針へ変換する。 */
         fun fromEditorInfo(info: EditorInfo): InputFieldPolicy {

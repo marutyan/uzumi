@@ -1635,6 +1635,246 @@ class EditorSessionTest {
         assertEquals(listOf("蚊", "か"), session.candidateOptions().map(CandidateOption::value))
     }
 
+    /** 明示変換で同じキーを続けてタップすると、末尾の一文字だけが行の次の文字へ替わり、一周すると戻る。 */
+    @Test
+    fun kanaTapTogglesLastCharacterWithinWindow() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy())
+
+        assertTrue(session.inputKanaTap(A_ROW, 0))
+        assertTrue(session.inputKanaTap(A_ROW, 300))
+        assertTrue(session.inputKanaTap(A_ROW, 600))
+        assertEquals("う", connection.text)
+        assertEquals("う", session.compositionSnapshot().reading)
+        // 一周すると先頭へ戻る
+        session.inputKanaTap(A_ROW, 900)
+        session.inputKanaTap(A_ROW, 1_200)
+        session.inputKanaTap(A_ROW, 1_500)
+        assertEquals("あ", connection.text)
+
+        // 猶予時間を過ぎたタップ、別のキーのタップは新しい文字になる
+        assertTrue(session.inputKanaTap(A_ROW, 1_500 + KanaKeyToggle.WINDOW_MILLIS + 1))
+        assertTrue(session.inputKanaTap(KA_ROW, 2_600))
+        assertTrue(session.inputKanaTap(A_ROW, 2_700))
+        assertEquals("ああかあ", connection.text)
+        assertTrue(session.commitComposition())
+        assertEquals("ああかあ", connection.text)
+    }
+
+    /** →は連続タップの途中だけ区切りとして使われ、フリック・小゛゜・削除の後のタップも新しい文字になる。 */
+    @Test
+    fun kanaToggleEndsAtArrowFlickTransformAndDelete() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy())
+
+        assertFalse(session.endKanaToggle(0))
+        session.inputKanaTap(A_ROW, 0)
+        assertTrue(session.endKanaToggle(100))
+        assertFalse(session.endKanaToggle(150))
+        session.inputKanaTap(A_ROW, 200)
+        assertEquals("ああ", connection.text)
+
+        // フリックで入れた文字の後
+        session.inputText("い")
+        session.inputKanaTap(A_ROW, 300)
+        assertEquals("ああいあ", connection.text)
+
+        // 「つ」を小゛゜で「っ」にした後
+        repeat(3) { session.inputKanaTap(TA_ROW, 400L + it) }
+        assertTrue(session.transformKana())
+        session.inputKanaTap(TA_ROW, 500)
+        assertEquals("ああいあった", connection.text)
+
+        // 削除の後
+        assertTrue(session.deleteBackward())
+        session.inputKanaTap(TA_ROW, 600)
+        assertEquals("ああいあった", connection.text)
+        assertTrue(session.endKanaToggle(700))
+        assertFalse(session.endKanaToggle(700 + KanaKeyToggle.WINDOW_MILLIS + 1))
+    }
+
+    /** 外部のカーソル移動の後は、同じキーを続けてタップしても前の文字を差し替えない。 */
+    @Test
+    fun kanaToggleEndsWhenCursorMovesInsideComposition() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy())
+        session.inputKanaTap(A_ROW, 0)
+        session.inputKanaTap(KA_ROW, 100)
+        assertTrue(session.moveCursor(-1))
+        session.inputKanaTap(KA_ROW, 200)
+        assertEquals("あかか", connection.text)
+    }
+
+    /** 直接確定の欄では差し替えず、タップごとに先頭の文字を確定する。 */
+    @Test
+    fun kanaTapCommitsDirectlyInPasswordField() {
+        val connection = FakeEditorConnection()
+        val session = EditorSession(connection, normalPolicy().copy(isPassword = true))
+        assertTrue(session.inputKanaTap(A_ROW, 0))
+        assertTrue(session.inputKanaTap(A_ROW, 100))
+        assertEquals(listOf("あ", "あ"), connection.committedTexts)
+        assertTrue(connection.composingTexts.isEmpty())
+    }
+
+    /** ライブ変換では差し替えた読みで変換を依頼し直し、「、」から「。」への切り替えは句点として確定する。 */
+    @Test
+    fun liveKanaToggleReconvertsAndPeriodCommits() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = liveSession(connection, client)
+
+        session.inputKanaTap(listOf("よ", "い"), 0)
+        client.deliverLatest(session)
+        assertEquals("世", connection.text)
+        session.inputKanaTap(A_ROW, 100)
+        session.inputKanaTap(A_ROW, 200)
+        client.deliverLatest(session)
+        assertEquals("よい", client.requests.last().second.identity.reading)
+        assertEquals("良い", connection.text)
+
+        session.inputKanaTap(PUNCT_ROW, 300)
+        assertEquals("良い、", connection.text)
+        assertTrue(session.hasComposition)
+        session.inputKanaTap(PUNCT_ROW, 400)
+        assertEquals("良い。", connection.text)
+        assertFalse(session.hasComposition)
+        assertEquals(listOf(listOf(LearnedSegment("よい", "良い"))), client.learned)
+
+        // 確定後のタップは差し替える相手が無いため、新しい文字として入る
+        session.inputKanaTap(PUNCT_ROW, 500)
+        assertEquals("良い。、", connection.text)
+    }
+
+    /** ローマ字かな入力では、入力途中の子音を表示しながら、Mozcの表のとおりにかなへ組み立てる。 */
+    @Test
+    fun romajiInputComposesKanaWithPendingLetters() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy(), romajiInputEnabled = true)
+
+        assertTrue(session.inputRomajiText("k"))
+        assertEquals("k", connection.text)
+        assertTrue(session.inputRomajiText("y"))
+        assertEquals("ky", connection.text)
+        assertTrue(session.inputRomajiText("o"))
+        assertEquals("きょ", connection.text)
+
+        typeRomaji(session, "uhanndatta")
+        assertEquals("きょうはんだった", connection.text)
+        typeRomaji(session, "nkan'ixtu-,.")
+        assertEquals("きょうはんだったんかんいっー、。", connection.text)
+        typeRomaji(session, "tchiwwwa")
+        assertEquals("きょうはんだったんかんいっー、。っちwっわ", connection.text)
+
+        // 末尾の「n」は確定時に「ん」にする
+        typeRomaji(session, "kan")
+        assertEquals("きょうはんだったんかんいっー、。っちwっわかn", connection.text)
+        assertTrue(session.commitComposition())
+        assertEquals("きょうはんだったんかんいっー、。っちwっわかん", connection.text)
+        assertFalse(session.hasComposition)
+    }
+
+    /** 大文字・数字・表に無い記号は英字のまま入れ、入力途中の子音はその場で区切る。 */
+    @Test
+    fun romajiInputKeepsUppercaseAndDigitsAsLetters() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy(), romajiInputEnabled = true)
+        typeRomaji(session, "Aika2kA?")
+        assertEquals("Aいか2kA？", connection.text)
+    }
+
+    /** ローマ字かな入力が無効なら、英字配列の文字は従来どおり英字として入る。 */
+    @Test
+    fun romajiInputDisabledKeepsLetters() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy())
+        assertFalse(session.isRomajiInputEnabled)
+        assertTrue(session.inputRomajiText("ka"))
+        assertEquals("ka", connection.text)
+    }
+
+    /** Backspaceは入力途中のローマ字を一文字ずつ消し、残った子音から入力を続けられる。元に戻すと保留も戻る。 */
+    @Test
+    fun romajiBackspaceDeletesPendingLettersAndUndoRestoresThem() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy(), initialSelectionStart = 0, initialSelectionEnd = 0, romajiInputEnabled = true)
+
+        typeRomaji(session, "aky")
+        assertTrue(session.deleteBackward())
+        assertEquals("あk", connection.text)
+        typeRomaji(session, "a")
+        assertEquals("あか", connection.text)
+
+        typeRomaji(session, "ky")
+        assertTrue(session.deleteBackward())
+        assertTrue(session.deleteBackward())
+        assertTrue(session.deleteBackward())
+        assertEquals("あ", connection.text)
+        assertTrue(session.undoDeletion())
+        assertEquals("あかky", connection.text)
+        typeRomaji(session, "a")
+        assertEquals("あかきゃ", connection.text)
+    }
+
+    /** 明示変換の結果を表示中にローマ字を打つと、表示中の変換を確定してから新しい読みを始める。 */
+    @Test
+    fun romajiInputAfterExplicitConversionCommitsItFirst() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client, romajiInputEnabled = true)
+        typeRomaji(session, "kan")
+        assertTrue(session.convert())
+        // 変換前に末尾の「n」を「ん」にしてから読みを送る
+        assertEquals("かん", client.requests.single().reading)
+        val request = client.requests.single()
+        val outcome = ConversionOutcome.Converted(
+            ConversionResult(
+                request = request,
+                segments = listOf(ConversionSegment("かん", "缶")),
+                headCandidates = listOf(ConversionCandidate(0, "缶", "かん")),
+            ),
+        )
+        assertTrue(session.applyConversionOutcome(outcome))
+        assertEquals("缶", connection.text)
+        typeRomaji(session, "ga")
+        assertEquals("缶が", connection.text)
+        assertEquals("が", session.compositionSnapshot().reading)
+    }
+
+    /** ライブ変換でもローマ字の句点で確定し、末尾の「n」は句点の前で「ん」にする。 */
+    @Test
+    fun liveRomajiInputCommitsAtPeriod() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = EditorSession(
+            connection = connection,
+            policy = normalPolicy(),
+            initialSelectionStart = 0,
+            initialSelectionEnd = 0,
+            sessionEpoch = 5,
+            liveCore = LiveConversionCore(),
+            liveClient = client,
+            romajiInputEnabled = true,
+        )
+        for (char in "yoi.") {
+            session.inputRomajiText(char.toString())
+            client.deliverLatest(session)
+        }
+        assertEquals("良い。", connection.text)
+        assertEquals(listOf(listOf(LearnedSegment("よい", "良い"))), client.learned)
+
+        for (char in "kan.") {
+            session.inputRomajiText(char.toString())
+            client.deliverLatest(session)
+        }
+        assertEquals("良い。蚊ん。", connection.text)
+        assertFalse(session.hasComposition)
+    }
+
+    /** ローマ字を一文字ずつ英字配列のキーとして入れる。 */
+    private fun typeRomaji(session: EditorSession, text: String) {
+        text.forEach { assertTrue(session.inputRomajiText(it.toString())) }
+    }
+
     /** ライブ変換の編集セッションを作る。変換要求はclientへ記録され、テストが結果を返す。 */
     private fun liveSession(
         connection: EditorConnectionPort,
@@ -1678,6 +1918,14 @@ class EditorSessionTest {
             imeAction = imeAction,
             actionLabel = "完了",
         )
+    }
+
+    private companion object {
+        /** 12キーの連続タップで使う、各キーの切り替え順。 */
+        val A_ROW = listOf("あ", "い", "う", "え", "お")
+        val KA_ROW = listOf("か", "き", "く", "け", "こ")
+        val TA_ROW = listOf("た", "ち", "つ", "て", "と")
+        val PUNCT_ROW = listOf("、", "。", "？", "！", "…")
     }
 }
 
