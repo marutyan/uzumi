@@ -2,6 +2,7 @@ package dev.uzumi.ime.keyboard
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.text.TextUtils
 import android.view.View
 import android.widget.LinearLayout
 
@@ -28,9 +29,7 @@ class KeyboardPanel(
     private var currentMode = KeyboardMode.KANA
     private var lastNormalMode = KeyboardMode.KANA
 
-    private var isShifted = false
-    private var isCapsLock = false
-    private var lastShiftPressTime = 0L
+    private val shiftState = QwertyShiftState()
 
     private var actionLabel = "確定"
     private var isNumericField = false
@@ -125,6 +124,18 @@ class KeyboardPanel(
         isComposing = composing
         kanaNumberKeyView?.replaceSpec(KeyboardLayoutData.kanaNumberKey(composing))
         kanaSpaceKeyView?.replaceSpec(KeyboardLayoutData.kanaSpaceKey(composing))
+    }
+
+    /**
+     * 入力欄がカーソル位置に求める大文字化の種類（InputConnection.getCursorCapsModeの値。0なら求めない）を受け取り、
+     * 英字配列のShiftを自動で切り替える。IMEは入力開始時とカーソル位置が変わるたびに呼ぶ。
+     */
+    fun setAutoCapsMode(capsMode: Int) {
+        val changed = shiftState.applyAutoCaps(
+            shift = capsMode != 0,
+            characters = capsMode and TextUtils.CAP_MODE_CHARACTERS != 0,
+        )
+        if (changed) updateQwertyShiftViews()
     }
 
     /**
@@ -247,31 +258,14 @@ class KeyboardPanel(
      */
     private fun dispatchAction(action: KeyboardAction) {
         onAction(action)
-        if (action is KeyboardAction.Text && isShifted && !isCapsLock) {
-            isShifted = false
-            updateQwertyShiftViews()
-        }
+        if (action is KeyboardAction.Text && shiftState.onTextInput()) updateQwertyShiftViews()
     }
 
     /**
      * Shiftキーの押下（単押し: Shiftトグル、素早いダブルタップ: Caps Lockトグル）。
      */
     private fun toggleShift() {
-        val now = System.currentTimeMillis()
-        if (isCapsLock) {
-            isCapsLock = false
-            isShifted = false
-        } else if (isShifted) {
-            if (now - lastShiftPressTime < DOUBLE_TAP_TIMEOUT_MS) {
-                isCapsLock = true
-                isShifted = false
-            } else {
-                isShifted = false
-            }
-        } else {
-            isShifted = true
-        }
-        lastShiftPressTime = now
+        shiftState.toggle(System.currentTimeMillis())
         updateQwertyShiftViews()
     }
 
@@ -281,8 +275,10 @@ class KeyboardPanel(
      * パネル全体における英語入力状態の視覚的一貫性を保つ役割を担う。
      */
     private fun updateQwertyShiftViews() {
-        qwertyKeyViews.forEach { it.updateShiftState(isShifted, isCapsLock) }
-        shiftKeyViews.forEach { it.updateShiftState(isShifted, isCapsLock) }
+        val shifted = shiftState.isShiftActive
+        val capsLock = shiftState.isCapsLock
+        qwertyKeyViews.forEach { it.updateShiftState(shifted, capsLock) }
+        shiftKeyViews.forEach { it.updateShiftState(shifted, capsLock) }
     }
 
     /**
@@ -597,9 +593,77 @@ class KeyboardPanel(
     }
 
     companion object {
-        private const val DOUBLE_TAP_TIMEOUT_MS = 350L
-
         /** タップ領域の高さの下限（dp）。 */
         private const val MIN_TOUCH_DP = 48f
+    }
+}
+
+/**
+ * 英字配列のShift状態。利用者が押したShift・Caps Lockと、入力欄の自動大文字化による一時的なShiftを分けて持ち、
+ * 手動の操作を優先する。Viewから切り離し、自動大文字化と手動操作の組み合わせをJVMテストで守る。
+ */
+class QwertyShiftState {
+    /** 利用者がShiftキーで有効にした、次の1文字だけの大文字化。 */
+    var isShifted = false
+        private set
+
+    /** 利用者がShiftキーの素早い2回押しで有効にしたCaps Lock。 */
+    var isCapsLock = false
+        private set
+
+    // 入力欄の自動大文字化による一時的なShift。手動のShiftとは別に持ち、カーソル位置が変わるたびに決め直す。
+    private var isAutoShifted = false
+
+    // 欄がすべて大文字を求めている（CAP_CHARACTERS）か。この間は1文字打っても自動のShiftを解除しない。
+    private var isAutoCharacters = false
+
+    private var lastShiftPressTime = 0L
+
+    /** 文字キーを大文字で表示・入力するShiftが有効か（Caps Lockを除く）。 */
+    val isShiftActive: Boolean
+        get() = isShifted || isAutoShifted
+
+    /**
+     * Shiftキーの押下（単押し: Shiftトグル、素早いダブルタップ: Caps Lockトグル）を反映する。
+     * 自動のShiftだけが有効な間に押した場合は、標準のキーボードと同じく自動のShiftを取り消して小文字にする。
+     */
+    fun toggle(nowMillis: Long) {
+        if (isCapsLock) {
+            isCapsLock = false
+            isShifted = false
+        } else if (isShifted) {
+            if (nowMillis - lastShiftPressTime < DOUBLE_TAP_TIMEOUT_MS) {
+                isCapsLock = true
+            }
+            isShifted = false
+        } else if (isAutoShifted) {
+            isAutoShifted = false
+            isAutoCharacters = false
+        } else {
+            isShifted = true
+        }
+        lastShiftPressTime = nowMillis
+    }
+
+    /** 入力欄が求める自動大文字化を反映する。表示が変わる場合はtrueを返す。 */
+    fun applyAutoCaps(shift: Boolean, characters: Boolean): Boolean {
+        val before = isShiftActive
+        isAutoShifted = shift
+        isAutoCharacters = shift && characters
+        return before != isShiftActive
+    }
+
+    /** 1文字入力した後の解除。Caps Lockと欄のすべて大文字の指定は続ける。表示が変わる場合はtrueを返す。 */
+    fun onTextInput(): Boolean {
+        if (isCapsLock) return false
+        val before = isShiftActive
+        isShifted = false
+        if (!isAutoCharacters) isAutoShifted = false
+        return before != isShiftActive
+    }
+
+    private companion object {
+        // Shiftの2回押しをCaps Lockとみなす間隔（ミリ秒）。
+        const val DOUBLE_TAP_TIMEOUT_MS = 350L
     }
 }

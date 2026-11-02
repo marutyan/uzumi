@@ -378,4 +378,52 @@ class KeyboardLayoutDataTest {
         val (high, low) = listOf(luminance(a), luminance(b)).sortedDescending()
         return (high + 0.05) / (low + 0.05)
     }
+    @Test
+    fun autoCapsShiftsOneLetterAndYieldsToManualShift() {
+        // 文頭で自動のShiftが入り、1文字打つと解除される
+        val state = QwertyShiftState()
+        assertTrue(state.applyAutoCaps(shift = true, characters = false))
+        assertTrue(state.isShiftActive)
+        assertTrue(state.onTextInput())
+        assertFalse(state.isShiftActive)
+        // 文の途中では自動のShiftを外すが、手動のShiftは残す
+        state.toggle(nowMillis = 0L)
+        assertFalse(state.applyAutoCaps(shift = false, characters = false))
+        assertTrue(state.isShiftActive)
+        state.onTextInput()
+        assertFalse(state.isShiftActive)
+    }
+
+    @Test
+    fun autoCapsCharactersKeepsShiftAndCapsLockWins() {
+        // すべて大文字の欄では、1文字打っても自動のShiftを続ける
+        val state = QwertyShiftState()
+        state.applyAutoCaps(shift = true, characters = true)
+        assertFalse(state.onTextInput())
+        assertTrue(state.isShiftActive)
+        // Caps Lockは自動大文字化の有無に関係なく続く
+        val locked = QwertyShiftState()
+        locked.toggle(nowMillis = 1_000L)
+        locked.toggle(nowMillis = 1_100L)
+        assertTrue(locked.isCapsLock)
+        locked.applyAutoCaps(shift = false, characters = false)
+        locked.onTextInput()
+        assertTrue(locked.isCapsLock)
+    }
+
+    @Test
+    fun shiftKeyCancelsAutoShiftWithoutTurningShiftOn() {
+        // 自動のShiftだけが入っている間にShiftを押すと、小文字に戻す
+        val state = QwertyShiftState()
+        state.applyAutoCaps(shift = true, characters = false)
+        state.toggle(nowMillis = 0L)
+        assertFalse(state.isShiftActive)
+        assertFalse(state.isCapsLock)
+        // 自動大文字化を求めない欄では、従来どおり押すたびにShiftを切り替える
+        val manual = QwertyShiftState()
+        manual.toggle(nowMillis = 0L)
+        assertTrue(manual.isShiftActive)
+        manual.toggle(nowMillis = 1_000L)
+        assertFalse(manual.isShiftActive)
+    }
 }

@@ -20,6 +20,8 @@ data class InputFieldPolicy(
     val isAddressLike: Boolean = false,
     // 利用者が設定で変換の学習を止めているか。欄の機密性とは別に、学習と履歴の保存だけを止める。
     val learningDisabledBySetting: Boolean = false,
+    // 欄が求める自動大文字化の種類（InputTypeのTYPE_TEXT_FLAG_CAP_*）。InputConnection.getCursorCapsModeへそのまま渡す。
+    val capsModeFlags: Int = 0,
 ) {
     /** 機密欄、明示的な学習禁止欄、または設定で学習を止めているかどうか。 */
     val suppressLearning: Boolean
@@ -81,6 +83,12 @@ data class InputFieldPolicy(
             val multiLine = inputClass == InputType.TYPE_CLASS_TEXT &&
                 (inputType and InputType.TYPE_TEXT_FLAG_MULTI_LINE != 0 || noEnterAction)
             val action = actionId.takeIf { it != 0 } ?: (imeOptions and EditorInfo.IME_MASK_ACTION)
+            // 文字欄の大文字化の指定だけを使う。パスワード欄では指定があっても大文字化しない。
+            val capsModeFlags = if (inputClass == InputType.TYPE_CLASS_TEXT && !password) {
+                inputType and CAPS_MODE_FLAGS
+            } else {
+                0
+            }
 
             return InputFieldPolicy(
                 isPassword = password,
@@ -97,8 +105,14 @@ data class InputFieldPolicy(
                         ?: defaultActionLabel(action, multiLine = false)
                 },
                 isAddressLike = addressLike,
+                capsModeFlags = capsModeFlags,
             )
         }
+
+        // 自動大文字化を求めるInputTypeのフラグ。値はTextUtilsのCAP_MODE_*と同じである。
+        private const val CAPS_MODE_FLAGS = InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or
+            InputType.TYPE_TEXT_FLAG_CAP_WORDS or
+            InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
 
         private fun defaultActionLabel(action: Int, multiLine: Boolean): String {
             if (multiLine || action == EditorInfo.IME_ACTION_NONE) return "改行"

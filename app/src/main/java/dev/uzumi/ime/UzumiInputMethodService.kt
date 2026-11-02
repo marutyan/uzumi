@@ -120,6 +120,9 @@ class UzumiInputMethodService : InputMethodService() {
     // 受けたInline応答の通し番号。展開中に新しい応答が来た場合や欄が替わった場合に、古い展開結果を捨てる。
     private var inlineResponseGeneration = 0L
     private var currentPolicy: InputFieldPolicy? = null
+
+    // カーソル位置で欄が求める大文字化の種類（TextUtils.CAP_MODE_*、0なら求めない）。キーボードを作り直しても引き継ぐ。
+    private var autoCapsMode = 0
     private val mainHandler = Handler(Looper.getMainLooper())
     private var conversionExecutor: ExecutorService? = null
     private var conversionWorker: ConversionWorker? = null
@@ -344,6 +347,7 @@ class UzumiInputMethodService : InputMethodService() {
         candidateGrid?.hide()
         toolbarPanel?.hide()
         currentPolicy = null
+        autoCapsMode = 0
         refreshCandidates()
         val info = attribute ?: return
         editorInOwnApp = info.packageName == packageName
@@ -354,6 +358,7 @@ class UzumiInputMethodService : InputMethodService() {
         val policy = InputFieldPolicy.fromEditorInfo(info)
             .copy(learningDisabledBySetting = LearningStores.peek()?.isEnabled != true)
         currentPolicy = policy
+        autoCapsMode = info.initialCapsMode and policy.capsModeFlags
         // ライブ変換の設定は入力開始ごとに読み、設定画面での変更を次の入力欄から反映する。
         val live = policy.usesLiveConversion(UzumiSettings.isLiveConversionEnabled(this))
         // debugビルドで選んだモデル。ニューラル変換はライブ変換の要求だけに使う。releaseビルドでは常にMozcだけ。
@@ -419,7 +424,15 @@ class UzumiInputMethodService : InputMethodService() {
             candidatesStart = candidatesStart,
             candidatesEnd = candidatesEnd,
         )
+        updateAutoCaps()
         refreshCandidates()
+    }
+
+    /** カーソル位置で欄が求める大文字化を問い合わせ、英字配列のShiftへ反映する。欄が求めない場合は問い合わせない。 */
+    private fun updateAutoCaps() {
+        val flags = currentPolicy?.capsModeFlags ?: 0
+        autoCapsMode = if (flags == 0) 0 else currentInputConnection?.getCursorCapsMode(flags) ?: 0
+        keyboardPanel?.setAutoCapsMode(autoCapsMode)
     }
 
     /** 非表示になるキーボードの保留タッチを止める。 */
@@ -640,6 +653,7 @@ class UzumiInputMethodService : InputMethodService() {
         val policy = currentPolicy ?: return
         keyboardPanel?.setEditorMode(policy.isNumeric, policy.isPassword)
         keyboardPanel?.setActionLabel(policy.actionLabel)
+        keyboardPanel?.setAutoCapsMode(autoCapsMode)
     }
 
     /** IME表示中だけクリップボード変更を監視し、期限付きの一時候補を更新する。 */

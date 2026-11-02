@@ -176,4 +176,31 @@ class InputFieldPolicyTest {
         assertFalse(InlineAutofillPolicy.acceptsResponse(responseEpoch = 3, currentEpoch = null, responseGeneration = 5, latestGeneration = 5))
         assertFalse(InlineAutofillPolicy.acceptsResponse(responseEpoch = 3, currentEpoch = 3, responseGeneration = 4, latestGeneration = 5))
     }
+    /** 文字欄の大文字化の指定だけを取り出し、パスワード欄や数字欄では大文字化しない。 */
+    @Test
+    fun capsModeFlagsFollowTextFieldRequest() {
+        val text = InputType.TYPE_CLASS_TEXT
+        assertEquals(0, InputFieldPolicy.fromRaw(text, EditorInfo.IME_ACTION_DONE, null).capsModeFlags)
+        assertEquals(
+            InputType.TYPE_TEXT_FLAG_CAP_SENTENCES,
+            InputFieldPolicy.fromRaw(
+                text or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or InputType.TYPE_TEXT_FLAG_MULTI_LINE,
+                EditorInfo.IME_ACTION_DONE,
+                null,
+            ).capsModeFlags,
+        )
+        assertEquals(
+            InputType.TYPE_TEXT_FLAG_CAP_WORDS or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS,
+            InputFieldPolicy.fromRaw(
+                text or InputType.TYPE_TEXT_FLAG_CAP_WORDS or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS,
+                EditorInfo.IME_ACTION_DONE,
+                null,
+            ).capsModeFlags,
+        )
+        val password = text or InputType.TYPE_TEXT_VARIATION_PASSWORD or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        assertEquals(0, InputFieldPolicy.fromRaw(password, EditorInfo.IME_ACTION_DONE, null).capsModeFlags)
+        // 数字欄ではCAPのビットが別の意味（符号・小数）になるため使わない
+        val number = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
+        assertEquals(0, InputFieldPolicy.fromRaw(number, EditorInfo.IME_ACTION_DONE, null).capsModeFlags)
+    }
 }
