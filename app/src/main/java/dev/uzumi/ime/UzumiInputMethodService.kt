@@ -876,7 +876,7 @@ class UzumiInputMethodService : InputMethodService() {
             indexes.forEach { index ->
                 val entry = entries[index]
                 if (entry.sectionBreakBefore && index != indexes.first()) candidateLine.addView(views.divider())
-                candidateLine.addView(views.item(entry.label, entry.selected) { pickCandidate(current, entry, index) }.apply {
+                candidateLine.addView(views.item(entry.label, entry.selected, entry.isPrediction) { pickCandidate(current, entry, index) }.apply {
                     maxLines = 1
                 })
             }
@@ -1082,6 +1082,7 @@ class UzumiInputMethodService : InputMethodService() {
             values = entries.map { it.label },
             selected = entries.indexOfFirst { it.selected },
             dividerIndex = entries.indexOfFirst { it.sectionBreakBefore }.takeIf { it >= 0 },
+            predictionIndexes = entries.indices.filter { entries[it].isPrediction }.toSet(),
         ) { index ->
             grid.hide()
             pickCandidate(current, entries[index], index)
@@ -1101,6 +1102,8 @@ class UzumiInputMethodService : InputMethodService() {
         val label: String,
         val selected: Boolean,
         val sectionBreakBefore: Boolean = false,
+        // 選ぶとすぐ確定する予測の候補か。選ぶだけの通常候補と見分けられるよう、色を変えて表示する。
+        val isPrediction: Boolean = false,
         val onPick: () -> Unit,
     )
 
@@ -1109,7 +1112,7 @@ class UzumiInputMethodService : InputMethodService() {
         current: EditorSession,
         result: PredictionResult,
         candidate: PredictionCandidate,
-    ): CandidateEntry = CandidateEntry(candidate.value, selected = false) {
+    ): CandidateEntry = CandidateEntry(candidate.value, selected = false, isPrediction = true) {
         current.selectPrediction(result.request, candidate.id)
     }
 
