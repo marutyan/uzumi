@@ -313,7 +313,8 @@ class KeyboardPanel(
             emojiPickerView = picker
             emojiPickerBottomRow = bottomRow
             symbolContainer.addView(picker, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-            symbolContainer.addView(bottomRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+            // 下段はcreateRowで1段分の高さを持つ。WRAP_CONTENTで上書きすると、親いっぱいに広がるキーに合わせて画面全体まで伸びる。
+            symbolContainer.addView(bottomRow)
         } else {
             emojiPickerView?.setRecentValues(recentValues)
             emojiPickerView?.showRecent()
