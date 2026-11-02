@@ -353,12 +353,16 @@ class ConversionWorker(
      * 明示変換の各文節へ、候補の統合規則（並びは「ユーザー辞書 → 学習 → エンジン」、顔文字・絵文字は後ろ）を適用する。
      * 各文節の候補はその文節の読みだけを置き換えるため、候補を選んでも他の文節は変わらない。
      * 読み全体に一致する登録語があり、利用者が区切りを指定していなければ、読み全体を一文節にまとめて登録語を表示する。
+     * 登録語が無く読み全体に一致する学習語があれば、同じく一文節にまとめる。読みが完全に一致する学習語は
+     * ライブ変換と同じく最初の表示にする。評価の記録中は比較条件を変えないため、学習語を表示に使わない。
      */
     private fun mergeExplicitSegments(request: ConversionRequest, conversion: EngineConversion): List<ConversionSegment> {
         val store = lookupLearningStore().takeUnless { request.incognito }
         val dictionary = lookupUserDictionary()
         val emoticons = emoticonJudge(learningAllowed = !request.incognito)
+        val displayStore = store.takeUnless { evaluationActive() }
         val source = wholeReadingSegment(request, conversion, dictionary)?.let(::listOf)
+            ?: wholeLearnedSegment(request, conversion, displayStore, emoticons)?.let(::listOf)
             ?: conversion.segments.mapIndexed { index, segment ->
                 // 先頭文節の候補はheadCandidatesでも受け取れる。読みが文節と同じものだけを使う。
                 val engineCandidates = segment.candidates.ifEmpty {
@@ -371,6 +375,11 @@ class ConversionWorker(
                 listOf(ConversionCandidate(ConversionCandidate.DISPLAYED_VALUE_ID, segment.value, segment.reading))
             }
             val single = EngineConversion(segments = listOf(segment), headCandidates = engineCandidates)
+            // 表示に使う学習語。エンジンの表示と違う表記を確定するため、文節はエンジンの学習から外す（learnedReading）。
+            val shown = displayStore?.let { learnedDisplay(segment.reading, it, emoticons) }
+                ?.takeIf { it != segment.value }
+                ?.let { segment.copy(value = it, learnedReading = segment.reading) }
+                ?: segment
             val learned = LearnedCandidates.mergeExplicit(segment.reading, single, store).let { merged ->
                 // 前方一致の予測は入力した読み全体を置き換える候補なので、複数文節の途中の文節には出さない。
                 if (source.size == 1) {
@@ -378,7 +387,7 @@ class ConversionWorker(
                 } else {
                     merged.copy(headCandidates = merged.headCandidates.filter { it.learnedReading in setOf(null, segment.reading) })
                 }
-            }
+            }.copy(segments = listOf(shown))
             val withUser = UserDictionaryCandidates.mergeExplicit(segment.reading, learned, dictionary)
             val arranged = EmoticonCandidates.arrangeExplicit(withUser, emoticons)
             arranged.segments.single().copy(candidates = arranged.headCandidates)
@@ -404,6 +413,30 @@ class ConversionWorker(
             candidates = listOf(ConversionCandidate(ConversionCandidate.DISPLAYED_VALUE_ID, joined, request.reading)),
         )
     }
+
+    /**
+     * 読み全体に完全一致する学習語があり、エンジンが複数の文節に分け、利用者が区切りを指定していなければ、
+     * 読み全体を一文節にした文節を返す。表示する学習語は後段で決め、候補はエンジンの文節の表記を連結したものにする。
+     */
+    private fun wholeLearnedSegment(
+        request: ConversionRequest,
+        conversion: EngineConversion,
+        store: LearningStore?,
+        emoticons: EmoticonJudge,
+    ): ConversionSegment? {
+        if (store == null || conversion.segments.size < 2 || request.segmentLengths != null) return null
+        if (learnedDisplay(request.reading, store, emoticons) == null) return null
+        val joined = conversion.segments.joinToString(separator = "") { it.value }
+        return ConversionSegment(
+            reading = request.reading,
+            value = joined,
+            candidates = listOf(ConversionCandidate(ConversionCandidate.DISPLAYED_VALUE_ID, joined, request.reading)),
+        )
+    }
+
+    /** 明示変換の最初の表示に使う学習語。読みが完全に一致する語のうちscoreが最も高い、顔文字・絵文字でない語。 */
+    private fun learnedDisplay(reading: String, store: LearningStore, emoticons: EmoticonJudge): String? =
+        store.exactMatches(reading).map { it.surface }.firstOrNull { !emoticons.isEmoticon(reading, it) }
 
     /**
      * 最新のライブ変換要求だけを取り出し、保護範囲と入力カーソルで区切った部分範囲ごとに変換する。

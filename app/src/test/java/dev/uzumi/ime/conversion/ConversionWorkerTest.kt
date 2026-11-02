@@ -312,6 +312,7 @@ class ConversionWorkerTest {
     /**
      * 複数文節の明示変換では、各文節の候補をその文節の読みだけで学習語・登録語と統合する。
      * 読みを延ばす予測はその文節を置き換えられないため、途中の文節には出さない。
+     * 文節の読みに完全一致する学習語（「てんき」の「転機」）は、その文節の最初の表示にする。
      */
     @Test
     fun explicitConversionMergesCandidatesPerSegment() {
@@ -328,7 +329,8 @@ class ConversionWorkerTest {
 
         val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
         assertTrue(result.isConsistent)
-        assertEquals("今日は天気", result.display)
+        assertEquals("今日は転機", result.display)
+        assertEquals("てんき", result.segments[1].learnedReading)
         assertEquals(listOf("今日は", "京は"), result.segments[0].candidates.map { it.value })
         assertEquals(listOf("転機", "天気"), result.segments[1].candidates.map { it.value })
         assertEquals(result.segments[0].candidates, result.headCandidates)
@@ -353,6 +355,61 @@ class ConversionWorkerTest {
         assertEquals(listOf("きょうはてんき"), whole.segments.map { it.reading })
         assertEquals("今日晴天", whole.display)
         assertTrue(whole.segments.single().fromUserDictionary)
+        assertEquals(listOf("今日晴天", "今日は天気"), whole.headCandidates.map { it.value })
+        val resized = (fixture.outcomes[1] as ConversionOutcome.Converted).result
+        assertEquals(listOf("きょうは", "てんき"), resized.segments.map { it.reading })
+    }
+
+    /**
+     * 読みが完全に一致する学習語は明示変換の最初の表示になり、候補の先頭と一致する（変換キーの巡回が学習語を飛ばさない）。
+     * 表示のまま確定してもエンジンへは送らない。評価の記録中はエンジンの第一候補を表示する。
+     */
+    @Test
+    fun explicitConversionShowsLearnedWordFirstExceptWhileEvaluating() {
+        val learning = learningStore().apply { record("かんじ", "幹事") }
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        val conversion = request(reading = "かんじ")
+        fixture.worker.requestConversion(conversion)
+        fixture.executor.runAll()
+
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        assertEquals("幹事", result.display)
+        assertEquals("幹事", result.headCandidates.first().value)
+        assertEquals("かんじ", result.segments.single().learnedReading)
+        fixture.engine.calls.clear()
+        fixture.worker.commitAll(conversion, result.segments)
+        fixture.executor.runAll()
+        assertTrue(fixture.engine.calls.isEmpty())
+
+        fixture.evaluating = true
+        fixture.worker.requestConversion(request(revision = 2, reading = "かんじ"))
+        fixture.executor.runAll()
+        val evaluated = (fixture.outcomes.last() as ConversionOutcome.Converted).result
+        assertEquals("漢字", evaluated.display)
+        assertEquals(null, evaluated.segments.single().learnedReading)
+    }
+
+    /**
+     * 読み全体に一致する学習語があれば、エンジンが複数文節に分けても一文節にまとめて学習語を表示し、
+     * エンジンの表記の連結も候補に残す。利用者が区切りを伸縮した要求ではまとめない。
+     */
+    @Test
+    fun explicitConversionShowsWholeReadingLearnedWordAsOneSegment() {
+        val learning = learningStore().apply { record("きょうはてんき", "今日晴天") }
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.explicitSegmentsFor = { twoSegments() }
+
+        fixture.worker.requestConversion(request(reading = "きょうはてんき"))
+        fixture.executor.runAll()
+        fixture.worker.requestConversion(request(revision = 2, reading = "きょうはてんき").copy(segmentLengths = listOf(4)))
+        fixture.executor.runAll()
+
+        val whole = (fixture.outcomes[0] as ConversionOutcome.Converted).result
+        assertEquals(listOf("きょうはてんき"), whole.segments.map { it.reading })
+        assertEquals("今日晴天", whole.display)
+        assertEquals("きょうはてんき", whole.segments.single().learnedReading)
         assertEquals(listOf("今日晴天", "今日は天気"), whole.headCandidates.map { it.value })
         val resized = (fixture.outcomes[1] as ConversionOutcome.Converted).result
         assertEquals(listOf("きょうは", "てんき"), resized.segments.map { it.reading })
@@ -851,7 +908,7 @@ class ConversionWorkerTest {
         assertEquals(listOf("公園に", "行くよ"), fixture.liveResults[1].second.segments.map { it.surface })
     }
 
-    /** 明示変換では、読み全体に一致する句をエンジンの第一候補の前に置き、表示はエンジンの第一候補のままにする。 */
+    /** 明示変換では、読み全体に一致する句をエンジンの第一候補の前に置き、ライブ変換と同じく最初の表示にする。 */
     @Test
     fun explicitConversionPlacesWholeReadingPhraseFirst() {
         val learning = learningStore().apply { recordPhrase("こうえんにいく", "校園に行く", createIfMissing = true) }
@@ -864,7 +921,7 @@ class ConversionWorkerTest {
         val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
         assertEquals(listOf("校園に行く", "こうえんにいく"), result.headCandidates.map { it.value })
         assertEquals("こうえんにいく", result.headCandidates.first().learnedReading)
-        assertEquals("こうえんにいく", result.display)
+        assertEquals("校園に行く", result.display)
         assertTrue(result.isConsistent)
     }
 
