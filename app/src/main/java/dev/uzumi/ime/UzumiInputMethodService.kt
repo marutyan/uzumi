@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.text.SpannableString
 import android.text.Spanned
+import android.text.TextUtils
 import android.text.style.BackgroundColorSpan
 import android.util.Size
 import android.view.Gravity
@@ -1034,6 +1035,11 @@ class UzumiInputMethodService : InputMethodService() {
                 getString(R.string.clipboard_suggestion_description), true) {
                 evaluation.record(OperationKind.OTHER)
                 pasteFromClipboard()
+            }.apply {
+                // 長い本文でも✕とInline候補の幅を残すため、提案は画面幅の半分までに抑えて末尾を省略する。
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                maxWidth = resources.displayMetrics.widthPixels / 2
             })
             line.addView(views.symbolButton("✕", getString(R.string.clipboard_suggestion_dismiss)) {
                 dismissClipboardSuggestion()
