@@ -492,7 +492,16 @@ class UzumiInputMethodService : InputMethodService() {
                 ) {
                     detachInlineViews()
                     inlineSuggestions = suggestions.indices.mapNotNull { i ->
-                        inflated[i]?.let { InlineSuggestionItem(it, suggestions[i].info.isPinned) }
+                        inflated[i]?.let { view ->
+                            // 展開時にframeworkが描画済みの寸法をLayoutParamsへ入れて返すため、付け直しで失わないよう保持する。
+                            val params = view.layoutParams
+                            InlineSuggestionItem(
+                                view,
+                                suggestions[i].info.isPinned,
+                                width = params?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT,
+                                height = params?.height ?: ViewGroup.LayoutParams.WRAP_CONTENT,
+                            )
+                        }
                     }
                     refreshCandidates()
                 }
@@ -952,7 +961,12 @@ class UzumiInputMethodService : InputMethodService() {
     }
 
     /** OSが描画するInline Autofill候補一つ。[pinned]は候補バーの右端に固定する候補。 */
-    private class InlineSuggestionItem(val view: InlineContentView, val pinned: Boolean)
+    private class InlineSuggestionItem(
+        val view: InlineContentView,
+        val pinned: Boolean,
+        val width: Int,
+        val height: Int,
+    )
 
     /** 候補バーの一項目。押したときの操作を持つ。 */
     private class CandidateEntry(val label: String, val selected: Boolean, val onPick: () -> Unit)
@@ -1068,8 +1082,9 @@ class UzumiInputMethodService : InputMethodService() {
         val (pinned, regular) = inlineSuggestions.partition { it.pinned }
         // 候補の部品はrefreshCandidatesのたびに付け直すため、前の親から外してから加える。
         detachInlineViews()
-        val inlineParams = {
-            LinearLayout.LayoutParams(wrap, wrap).apply {
+        // 候補の中身は別プロセスのSurfaceで描かれ、部品自身は大きさを測れないため、展開時の寸法をそのまま使う。
+        val inlineParams = { item: InlineSuggestionItem ->
+            LinearLayout.LayoutParams(item.width, item.height).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 setMargins(margin, 0, margin, 0)
             }
@@ -1077,7 +1092,7 @@ class UzumiInputMethodService : InputMethodService() {
         val scrolling = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            regular.forEach { addView(it.view, inlineParams()) }
+            regular.forEach { addView(it.view, inlineParams(it)) }
         }
         val line = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1086,7 +1101,7 @@ class UzumiInputMethodService : InputMethodService() {
                 isHorizontalScrollBarEnabled = false
                 addView(scrolling, FrameLayout.LayoutParams(wrap, match))
             }, LinearLayout.LayoutParams(0, match, 1f))
-            pinned.forEach { addView(it.view, inlineParams()) }
+            pinned.forEach { addView(it.view, inlineParams(it)) }
         }
         row.addView(line, LinearLayout.LayoutParams(0, match, 1f))
     }
