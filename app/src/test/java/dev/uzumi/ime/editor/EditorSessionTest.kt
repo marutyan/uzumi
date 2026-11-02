@@ -398,6 +398,42 @@ class EditorSessionTest {
         assertTrue(searchConnection.committedTexts.isEmpty())
     }
 
+    /**
+     * 同じ欄の再開始（画面回転など）では、表示中の未確定文字列をそのまま確定してから閉じる。
+     * 確定しないと、次のセッションの最初の入力が以前の未確定本文全体を置き換える。
+     */
+    @Test
+    fun restartFinishesDisplayedCompositionBeforeNextSession() {
+        val editor = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        // 回転では同じInputConnectionで再開始する。旧セッションの窓口だけを無効化し、Editorは生かしておく。
+        val oldPort = object : EditorConnectionPort by editor {
+            override fun invalidate() = Unit
+        }
+        val old = EditorSession(oldPort, normalPolicy())
+        assertTrue(old.inputText("かな"))
+        assertTrue(old.applyCandidate("カナ"))
+
+        old.closeForRestart(editor)
+
+        assertFalse(old.isActive)
+        assertEquals(1, editor.finishComposingCalls)
+        val restarted = EditorSession(editor, normalPolicy(), initialSelectionStart = 2)
+        assertTrue(restarted.inputText("あ"))
+        assertEquals("カナあ", editor.text)
+    }
+
+    /** 未確定文字がなければ、再開始でも接続へ何も送らない。 */
+    @Test
+    fun restartWithoutCompositionSendsNothing() {
+        val editor = ModelEditorConnection(text = "済", selectionStart = 1, selectionEnd = 1)
+        val session = EditorSession(FakeEditorConnection(), normalPolicy(), initialSelectionStart = 1)
+
+        session.closeForRestart(editor)
+
+        assertEquals(0, editor.finishComposingCalls)
+        assertEquals("済", editor.text)
+    }
+
     /** 「小゛゜」操作を直前のかなへ順に適用する。 */
     @Test
     fun transformKanaCyclesVoicedAndSemiVoicedForms() {

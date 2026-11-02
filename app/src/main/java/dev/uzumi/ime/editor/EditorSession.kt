@@ -905,6 +905,7 @@ class EditorSession(
     /**
      * セッションを無効化し、内部compositionだけを捨てる。
      * 旧InputConnectionへfinishやcommitを送らないことが切替時の安全条件である。
+     * 同じ欄の再開始で未確定を確定する場合は[closeForRestart]を使う。
      */
     fun close() {
         if (!active) return
@@ -917,6 +918,17 @@ class EditorSession(
         clearCompositionExpectations()
         pendingCommittedSelections.clear()
         connection.invalidate()
+    }
+
+    /**
+     * 同じ入力欄への再開始（画面回転など）で、Editorに残る未確定の表示をその表記のまま確定してから閉じる。
+     * Editorのcomposing spanには表示中の変換がそのまま入っているため、finishComposingTextだけで表示文字列が確定する。
+     * 送り先は再開始後に有効な接続[restartedConnection]で、無効化済みのこのセッションの接続には送らない。
+     * commitTextは使わない。Editorが旧接続を閉じた時点でspanを確定済みの場合に、同じ本文を二重に入れるため。
+     */
+    fun closeForRestart(restartedConnection: EditorConnectionPort) {
+        if (hasComposition) restartedConnection.finishComposingText()
+        close()
     }
 
     /** ライブ変換の候補バーに出す内容。明示変換ではnull。 */

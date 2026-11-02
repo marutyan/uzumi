@@ -19,6 +19,7 @@ import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InlineSuggestionsRequest
+import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InlineSuggestionsResponse
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -342,7 +343,10 @@ class UzumiInputMethodService : InputMethodService() {
     /** フィールドごとに旧接続を破棄し、新しい編集セッションを開始する。 */
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
-        closeSession()
+        // 再開始（画面回転などの同じ欄への再接続）ではonFinishInputが呼ばれず、Editorにcomposing spanが残る。
+        // 残したまま新しいセッションで入力すると、未確定だった本文全体が新しい文字で置き換わるため、
+        // 再開始後に有効な接続（currentInputConnection）で先に確定する。
+        closeSession(restartedConnection = if (restarting) currentInputConnection else null)
         clearInlineSuggestions()
         candidateGrid?.hide()
         toolbarPanel?.hide()
@@ -1195,10 +1199,17 @@ class UzumiInputMethodService : InputMethodService() {
         )
     }
 
-    /** 旧接続への書込みを禁止してセッション参照を破棄する。 */
-    private fun closeSession() {
+    /**
+     * 旧接続への書込みを禁止してセッション参照を破棄する。再開始では[restartedConnection]へ未確定の表示を確定してから閉じる。
+     */
+    private fun closeSession(restartedConnection: InputConnection? = null) {
         session?.let { conversionWorker?.endSession(it.sessionEpoch) }
-        session?.close()
+        val current = session
+        if (current != null && restartedConnection != null) {
+            current.closeForRestart(AndroidInputConnectionPort(restartedConnection))
+        } else {
+            current?.close()
+        }
         session = null
     }
 
