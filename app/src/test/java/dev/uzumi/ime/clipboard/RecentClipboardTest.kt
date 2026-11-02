@@ -24,11 +24,14 @@ class RecentClipboardTest {
     }
 
     @Test
-    fun onlyPlainTextMimeTypeCanBeSuggested() {
-        assertTrue(RecentClipboardRules.hasPlainTextMimeType(listOf("text/plain")))
-        assertTrue(RecentClipboardRules.hasPlainTextMimeType(listOf("image/png", "TEXT/PLAIN")))
-        assertFalse(RecentClipboardRules.hasPlainTextMimeType(listOf("image/png")))
-        assertFalse(RecentClipboardRules.hasPlainTextMimeType(listOf("text/uri-list")))
+    fun onlyTextMimeTypesCanBeSuggested() {
+        assertTrue(RecentClipboardRules.hasTextMimeType(listOf("text/plain")))
+        assertTrue(RecentClipboardRules.hasTextMimeType(listOf("image/png", "TEXT/PLAIN")))
+        assertTrue(RecentClipboardRules.hasTextMimeType(listOf("text/html")))
+        assertTrue(RecentClipboardRules.hasTextMimeType(listOf("TEXT/HTML")))
+        assertFalse(RecentClipboardRules.hasTextMimeType(listOf("image/png")))
+        assertFalse(RecentClipboardRules.hasTextMimeType(listOf("image/png", "image/jpeg")))
+        assertFalse(RecentClipboardRules.hasTextMimeType(listOf("text/uri-list")))
     }
 
     @Test

@@ -70,7 +70,7 @@ class RecentClipboard(
         val version = changeVersion.get()
         val metadata = snapshot(readDescription() ?: return null) ?: return null
         if (!RecentClipboardRules.isFresh(metadata.timestamp, clockMillis(), lifetimeMillis)) return null
-        if (!RecentClipboardRules.hasPlainTextMimeType(metadata.mimeTypes)) return null
+        if (!RecentClipboardRules.hasTextMimeType(metadata.mimeTypes)) return null
 
         if (dismissedIdentity?.let { matches(metadata, it) } == true) return null
 
@@ -112,7 +112,7 @@ class RecentClipboard(
     fun hasCurrentText(): Boolean {
         if (!observing) return false
         val metadata = snapshot(readDescription() ?: return false) ?: return false
-        return RecentClipboardRules.hasPlainTextMimeType(metadata.mimeTypes)
+        return RecentClipboardRules.hasTextMimeType(metadata.mimeTypes)
     }
 
     /** 通常の貼り付け操作で、タップされた時点の現在のテキストclipを読む。 */
@@ -142,7 +142,7 @@ class RecentClipboard(
     }
 
     private fun readCurrentText(version: Long, metadata: Metadata, requireFresh: Boolean): String? {
-        if (!RecentClipboardRules.hasPlainTextMimeType(metadata.mimeTypes)) return null
+        if (!RecentClipboardRules.hasTextMimeType(metadata.mimeTypes)) return null
         if (!isCurrent(version, metadata, requireFresh)) return null
         val clip = readPrimaryClip() ?: return null
         if (!sameMetadata(clipMetadata(clip), metadata)) return null
@@ -212,7 +212,8 @@ class RecentClipboard(
 internal object RecentClipboardRules {
     const val DEFAULT_LIFETIME_MILLIS = 60_000L
     const val DEFAULT_PREVIEW_CODE_POINTS = 24
-    private const val PLAIN_TEXT_MIME_TYPE = "text/plain"
+    // ClipData.newHtmlText()はMIMEをtext/htmlだけにするが、itemのtextにはプレーンテキストが入る。
+    private val TEXT_MIME_TYPES = listOf("text/plain", "text/html")
 
     /**
      * ClipDescription.EXTRA_IS_SENSITIVEと同じキー。API 33で定数が追加される前も、コピー元アプリは同じ文字列で機密clipを示すため、
@@ -225,8 +226,9 @@ internal object RecentClipboardRules {
     fun isFresh(timestamp: Long, nowMillis: Long, lifetimeMillis: Long): Boolean =
         timestamp > 0 && lifetimeMillis > 0 && timestamp <= nowMillis && nowMillis - timestamp <= lifetimeMillis
 
-    fun hasPlainTextMimeType(mimeTypes: List<String>): Boolean =
-        mimeTypes.any { it.equals(PLAIN_TEXT_MIME_TYPE, ignoreCase = true) }
+    /** text/plainまたはtext/htmlを含むclipだけを対象にする。画像やURIだけのclipは対象外で、本文はitem.textだけから読む。 */
+    fun hasTextMimeType(mimeTypes: List<String>): Boolean =
+        mimeTypes.any { mime -> TEXT_MIME_TYPES.any { it.equals(mime, ignoreCase = true) } }
 
     /** 機密欄または機密clipでは、候補作成のために本文を読まない。 */
     fun shouldReadTextBody(clipboardSensitive: Boolean, sensitiveField: Boolean): Boolean =
