@@ -502,8 +502,22 @@ class ConversionWorker(
         onCandidateResult(sessionEpoch, CandidateResult(request, candidates))
     }
 
-    /** 専用sessionでMozc予測を取り、同じ要求の応答だけを候補選択へ結び付ける。 */
+    /**
+     * 専用sessionでMozc予測を取り、同じ要求の応答だけを候補選択へ結び付ける。
+     * ライブ変換の要求が待っていれば予測を後回しにする。連続打鍵で予測が先に走ると、
+     * ライブ変換の表示が遅れ、受理時刻から数えるニューラル変換の期限も削られるためである。
+     */
     private fun drainLatestPredictionRequest() {
+        if (latestPredictionRequest.get() == null) return
+        if (latestLiveRequest.get() != null) {
+            // 待っているライブ変換の処理はキューに積まれ済みのため、その後ろへ積み直す。要求はそのまま残し、最新だけを後で処理する。
+            try {
+                executor.execute(::drainLatestPredictionRequest)
+            } catch (_: RejectedExecutionException) {
+                // workerの終了中は予測を出さない。
+            }
+            return
+        }
         val request = latestPredictionRequest.getAndSet(null) ?: return
         if (isEnded(request.sessionEpoch)) return
         if (currentHealth !is EngineHealth.Ready) {

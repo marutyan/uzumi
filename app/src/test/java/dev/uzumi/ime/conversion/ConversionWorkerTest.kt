@@ -115,6 +115,31 @@ class ConversionWorkerTest {
         assertEquals(listOf("助かります"), learning.exactMatches("たすかります").map { it.surface })
     }
 
+    /**
+     * 連続打鍵で予測の処理がキューの先にあっても、ライブ変換の要求が待っていれば予測を後回しにし、
+     * ライブ変換を先にエンジンへ送る。予測は最新の要求だけを後で一度処理する。
+     */
+    @Test
+    fun pendingLiveConversionRunsBeforePrediction() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.calls.clear()
+
+        fixture.worker.requestPrediction(PredictionRequest(sessionEpoch = 7, revision = 1, reading = "か"))
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 2, reading = "かん"))
+        val latest = PredictionRequest(sessionEpoch = 7, revision = 2, reading = "かん")
+        fixture.worker.requestPrediction(latest)
+        fixture.executor.runAll()
+
+        val liveIndex = fixture.engine.calls.indexOf("convertSegments(1,かん)")
+        val suggestIndex = fixture.engine.calls.indexOfFirst { it.startsWith("suggest(") }
+        assertTrue(liveIndex >= 0 && liveIndex < suggestIndex)
+        assertEquals(1, fixture.engine.calls.count { it.startsWith("suggest(") })
+        assertTrue(fixture.engine.calls[suggestIndex].endsWith(",かん)"))
+        assertEquals(listOf(latest), fixture.predictionResults.map { it.request })
+        assertEquals(1, fixture.liveResults.size)
+    }
+
     /** 学習禁止の入力途中予測はincognitoを先に指定し、選択しても確定学習を送らない。 */
     @Test
     fun incognitoPredictionDoesNotLearn() {
