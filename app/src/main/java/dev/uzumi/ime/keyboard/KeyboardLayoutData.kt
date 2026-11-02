@@ -138,6 +138,19 @@ object KeyboardLayoutData {
     }
 
     /**
+     * 同じキーを続けてタップしたときに順に切り替わる文字（あ→い→う→え→お）。フリックの並び（中央・左・上・右・下）を使い、
+     * や行だけはフリックの括弧を除いて「や→ゆ→よ」にする（Gboard・iPhoneのトグル入力と同じ）。
+     */
+    fun toggleChars(type: KanaKeyType): List<String> {
+        val order = if (type == KanaKeyType.YA) {
+            listOf(FlickDirection.CENTER, FlickDirection.UP, FlickDirection.DOWN)
+        } else {
+            listOf(FlickDirection.CENTER, FlickDirection.LEFT, FlickDirection.UP, FlickDirection.RIGHT, FlickDirection.DOWN)
+        }
+        return order.map { getKanaChar(type, it) }.filter(String::isNotEmpty)
+    }
+
+    /**
      * QWERTYの文字をShift状態に応じて変換する。
      *
      * @param char 基準となるアルファベット文字

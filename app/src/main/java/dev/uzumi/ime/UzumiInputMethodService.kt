@@ -1,19 +1,36 @@
 package dev.uzumi.ime
 
 import android.content.Intent
+import android.content.ClipboardManager
+import android.graphics.drawable.Icon
 import android.inputmethodservice.InputMethodService
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.SpannableString
 import android.text.Spanned
+import android.text.TextUtils
 import android.text.style.BackgroundColorSpan
+import android.util.Size
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InlineSuggestionsRequest
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InlineSuggestionsResponse
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.inline.InlineContentView
+import android.widget.inline.InlinePresentationSpec
+import androidx.autofill.inline.UiVersions
+import androidx.autofill.inline.common.TextViewStyle
+import androidx.autofill.inline.common.ViewStyle
+import androidx.autofill.inline.v1.InlineSuggestionUi
 import dev.uzumi.ime.conversion.ConversionOutcome
 import dev.uzumi.ime.conversion.ConversionWorker
 import dev.uzumi.ime.conversion.EngineHealth
@@ -21,9 +38,13 @@ import dev.uzumi.ime.conversion.JniMozcNativeBridge
 import dev.uzumi.ime.conversion.MozcConversionEngine
 import dev.uzumi.ime.conversion.MozcDataInstaller
 import dev.uzumi.ime.conversion.NeuralModelSpec
+import dev.uzumi.ime.conversion.PredictionCandidate
+import dev.uzumi.ime.conversion.PredictionResult
 import dev.uzumi.ime.dictionary.UserDictionaries
+import dev.uzumi.ime.clipboard.RecentClipboard
 import dev.uzumi.ime.editor.AndroidInputConnectionPort
 import dev.uzumi.ime.editor.EditorSession
+import dev.uzumi.ime.editor.InlineAutofillPolicy
 import dev.uzumi.ime.editor.InputFieldPolicy
 import dev.uzumi.ime.evaluation.ConversionProgress
 import dev.uzumi.ime.evaluation.CorrectnessJudge
@@ -38,9 +59,17 @@ import dev.uzumi.ime.evaluation.TimingKind
 import dev.uzumi.ime.evaluation.TimingSample
 import dev.uzumi.ime.keyboard.CandidateBarViews
 import dev.uzumi.ime.keyboard.CandidateGridView
+import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardAction
+import dev.uzumi.ime.keyboard.KeyboardColors
+import dev.uzumi.ime.keyboard.KeyboardDimens
+import dev.uzumi.ime.keyboard.KeyboardLayoutData
 import dev.uzumi.ime.keyboard.KeyboardPanel
 import dev.uzumi.ime.keyboard.KeyboardPreferences
+import dev.uzumi.ime.keyboard.ToolbarAction
+import dev.uzumi.ime.keyboard.ToolbarBarViews
+import dev.uzumi.ime.keyboard.ToolbarPreferences
+import dev.uzumi.ime.keyboard.ToolbarTilePanel
 import dev.uzumi.ime.learning.LearningStores
 import dev.uzumi.ime.live.CandidateResult
 import dev.uzumi.ime.live.ConversionResult as LiveResult
@@ -62,16 +91,46 @@ import java.util.concurrent.atomic.AtomicInteger
 class UzumiInputMethodService : InputMethodService() {
     private var session: EditorSession? = null
     private var keyboardPanel: KeyboardPanel? = null
+    // 最近履歴は一覧を開いたときに読み、入力成功後かつ機密欄以外でのみ書く。
+    private val emojiRecentStore by lazy { EmojiRecentStore(this) }
     private var candidateRow: LinearLayout? = null
+    private var candidateBar: LinearLayout? = null
+
+    // Inline候補を置く常設の枠と、いま枠に入っている候補の一覧。候補が同じ間は付け外ししない。
+    // 部品を外すと別プロセスの描画面が作り直され、カーソル移動のたびに候補が一瞬消えるため。
+    private var inlineHost: LinearLayout? = null
+    private var inlineHostItems: List<InlineSuggestionItem>? = null
+    private var toolbarRow: LinearLayout? = null
     // 候補バーの左端（元に戻す・読みの札）と右端（末尾へ戻る・候補一覧の開閉）の置き場。
     private var barLeading: LinearLayout? = null
     private var barTrailing: LinearLayout? = null
     private var barViews: CandidateBarViews? = null
     // ∨で開く候補一覧。キーボードの面を覆って表示する。
     private var candidateGrid: CandidateGridView? = null
+    private var toolbarPanel: ToolbarTilePanel? = null
     // 入力Viewを作ったときのキーボード設定。設定画面で変わっていれば、次に表示するときに作り直す。
     private var builtPreferences: KeyboardPreferences? = null
+    private var builtToolbarPreferences: ToolbarPreferences? = null
+
+    // 入力Viewで実際に受け取った下端Insets（px）と、入力Viewを作った時点のバー段数上限・表示用キー行高。
+    // 実測Insetsでこの組が変わる場合だけ作り直し、表示に影響しない作り直しで初回表示が崩れるのを避ける。
+    private var observedBottomInsetPx = 0
+    private var builtInputLayout: Pair<Int, Float>? = null
+    private var toolbarViews: ToolbarBarViews? = null
+    // クリップボード本文はRecentClipboardの一時候補にだけ保持し、ログや設定へ保存しない。
+    private var recentClipboard: RecentClipboard? = null
+    private var clipboardSuggestion: RecentClipboard.Suggestion? = null
+    private var clipboardExpiry: Runnable? = null
+    private var clipboardSuggestionSessionEpoch: Long? = null
+    private var inputViewVisible = false
+    // Inline Autofill候補の表示部品。中身はOSが描画し、IMEは読まない（ログ・計数・学習・設定へ送らない）。
+    private var inlineSuggestions: List<InlineSuggestionItem> = emptyList()
+    // 受けたInline応答の通し番号。展開中に新しい応答が来た場合や欄が替わった場合に、古い展開結果を捨てる。
+    private var inlineResponseGeneration = 0L
     private var currentPolicy: InputFieldPolicy? = null
+
+    // カーソル位置で欄が求める大文字化の種類（TextUtils.CAP_MODE_*、0なら求めない）。キーボードを作り直しても引き継ぐ。
+    private var autoCapsMode = 0
     private val mainHandler = Handler(Looper.getMainLooper())
     private var conversionExecutor: ExecutorService? = null
     private var conversionWorker: ConversionWorker? = null
@@ -130,9 +189,10 @@ class UzumiInputMethodService : InputMethodService() {
             onOutcome = { outcome -> mainHandler.post { deliverConversion(outcome) } },
             onLiveResult = { sessionEpoch, result -> mainHandler.post { deliverLiveResult(sessionEpoch, result) } },
             onLiveReport = { sessionEpoch, report -> mainHandler.post { deliverLiveReport(sessionEpoch, report) } },
-            // 評価用の報告は評価モードの間だけ作る。計数器の状態はworkerのthreadからも読める。
+            // 評価用の報告は評価モードの間だけ作り、表記ゆれ変換も使わない。計数器の状態はworkerのthreadからも読める。
             evaluationActive = { evaluation.isRecording },
             onCandidateResult = { sessionEpoch, result -> mainHandler.post { deliverCandidateResult(sessionEpoch, result) } },
+            onPredictionResult = { result -> mainHandler.post { deliverPredictionResult(result) } },
             userDictionary = { UserDictionaries.get(this) },
             learningStore = { LearningStores.get(this) },
         )
@@ -149,6 +209,7 @@ class UzumiInputMethodService : InputMethodService() {
     override fun onDestroy() {
         EvaluationStatusSource.provider = null
         EvaluationStatusSource.neuralMemoryRequester = null
+        stopClipboardObservation()
         closeSession()
         applyNeuralSelection(null, restarting = false)
         mainHandler.removeCallbacksAndMessages(null)
@@ -163,13 +224,27 @@ class UzumiInputMethodService : InputMethodService() {
         val density = resources.displayMetrics.density
         val views = CandidateBarViews(this)
         barViews = views
+        candidateGrid?.hide()
+        toolbarPanel?.hide()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(views.colors.keyboardBackground)
         }
+        val toolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(views.colors.bar)
+        }
+        toolbarRow = toolbar
+        toolbarViews = ToolbarBarViews(this)
+        val toolbarPreferences = UzumiSettings.toolbarPreferences(this)
+        builtToolbarPreferences = toolbarPreferences
+        root.addView(toolbar, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+        ))
         val candidates = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(views.colors.bar)
         }
         candidateRow = candidates
         val leading = LinearLayout(this).apply {
@@ -187,16 +262,17 @@ class UzumiInputMethodService : InputMethodService() {
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(views.colors.bar)
         }
+        candidateBar = bar
         val match = LinearLayout.LayoutParams.MATCH_PARENT
         val wrap = LinearLayout.LayoutParams.WRAP_CONTENT
         bar.addView(leading, LinearLayout.LayoutParams(wrap, match))
-        bar.addView(HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            // 右端で切れた候補が固定ボタンの下へ潜って見えないよう、端をぼかして横へ続くことを示す
-            isHorizontalFadingEdgeEnabled = true
-            setFadingEdgeLength((CANDIDATE_FADE_DP * density).toInt())
-            addView(candidates, FrameLayout.LayoutParams(wrap, match))
-        }, LinearLayout.LayoutParams(0, match, 1f))
+        inlineHost = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+        }.also { host -> bar.addView(host, LinearLayout.LayoutParams(0, match, 0f)) }
+        bar.addView(candidates, LinearLayout.LayoutParams(0, match, 1f))
+        inlineHostItems = null
         bar.addView(trailing, LinearLayout.LayoutParams(wrap, match))
         root.addView(bar, LinearLayout.LayoutParams(match, (CandidateBarViews.BAR_HEIGHT_DP * density).toInt()))
 
@@ -204,17 +280,27 @@ class UzumiInputMethodService : InputMethodService() {
         val keyboardArea = FrameLayout(this)
         val preferences = UzumiSettings.keyboardPreferences(this)
         builtPreferences = preferences
+        val rowBudget = maximumBarRows()
+        val reservedBarRows = minOf(toolbarPreferences.toolbarRows + toolbarPreferences.candidateRows, rowBudget)
+        val displayPreferences = displayKeyboardPreferences(preferences, reservedBarRows)
+        builtInputLayout = rowBudget to displayPreferences.rowHeightDp
         keyboardPanel = KeyboardPanel(
             this,
             ::handleKeyboardAction,
             lineDeleteLength = { session?.lineDeleteLength() },
-            preferences = preferences,
-            onPanelKey = { evaluation.record(OperationKind.OTHER) },
+            preferences = displayPreferences,
+            onPanelKey = {
+                session?.finishPendingInput()
+                evaluation.record(OperationKind.OTHER)
+            },
         ).also { panel ->
             keyboardArea.addView(panel, FrameLayout.LayoutParams(match, wrap))
         }
         candidateGrid = CandidateGridView(this).also { grid ->
             keyboardArea.addView(grid, FrameLayout.LayoutParams(match, match))
+        }
+        toolbarPanel = ToolbarTilePanel(this).also { panel ->
+            keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
         }
         root.addView(keyboardArea, LinearLayout.LayoutParams(match, wrap))
         applyPolicyToKeyboard()
@@ -230,15 +316,53 @@ class UzumiInputMethodService : InputMethodService() {
                 WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
             )
             targetView.setPadding(systemInsets.left, 0, systemInsets.right, systemInsets.bottom)
+            // IMEのナビゲーション領域は端末全体の推定より高い場合があるため、実測値が変わったら段数と行高を計算し直す
+            if (systemInsets.bottom != observedBottomInsetPx) {
+                observedBottomInsetPx = systemInsets.bottom
+                val built = builtInputLayout
+                if (built != null && built != currentInputLayout()) {
+                    targetView.post { setInputView(onCreateInputView()) }
+                }
+            }
             insets
         }
+    }
+
+    /** 現在の設定と画面寸法から、入力Viewを作るときと同じ方法でバー段数上限と表示用キー行高を求める。 */
+    private fun currentInputLayout(): Pair<Int, Float> {
+        val rowBudget = maximumBarRows()
+        val toolbarPreferences = UzumiSettings.toolbarPreferences(this)
+        val reservedBarRows = minOf(toolbarPreferences.toolbarRows + toolbarPreferences.candidateRows, rowBudget)
+        return rowBudget to displayKeyboardPreferences(UzumiSettings.keyboardPreferences(this), reservedBarRows).rowHeightDp
+    }
+
+    /**
+     * 入力Viewが使える高さ（dp）を、画面全体からステータスバー・カットアウトと下端の操作領域を除いて求める。
+     * 下端は端末全体の推定と、入力Viewで実際に受け取ったInsetsの大きい方を使う。
+     */
+    private fun availableInputHeightDp(): Int {
+        val density = resources.displayMetrics.density
+        val metrics = getSystemService(WindowManager::class.java)?.maximumWindowMetrics
+            ?: return resources.configuration.screenHeightDp
+        val insets = metrics.windowInsets.getInsetsIgnoringVisibility(
+            WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+        )
+        val heightPx = metrics.bounds.height() - insets.top - maxOf(insets.bottom, observedBottomInsetPx)
+        return (heightPx / density).toInt().coerceAtLeast(0)
     }
 
     /** フィールドごとに旧接続を破棄し、新しい編集セッションを開始する。 */
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
-        closeSession()
+        // 再開始（画面回転などの同じ欄への再接続）ではonFinishInputが呼ばれず、Editorにcomposing spanが残る。
+        // 残したまま新しいセッションで入力すると、未確定だった本文全体が新しい文字で置き換わるため、
+        // 再開始後に有効な接続（currentInputConnection）で先に確定する。
+        closeSession(restartedConnection = if (restarting) currentInputConnection else null)
+        clearInlineSuggestions()
+        candidateGrid?.hide()
+        toolbarPanel?.hide()
         currentPolicy = null
+        autoCapsMode = 0
         refreshCandidates()
         val info = attribute ?: return
         editorInOwnApp = info.packageName == packageName
@@ -249,6 +373,9 @@ class UzumiInputMethodService : InputMethodService() {
         val policy = InputFieldPolicy.fromEditorInfo(info)
             .copy(learningDisabledBySetting = LearningStores.peek()?.isEnabled != true)
         currentPolicy = policy
+        // ローマ字の層で自動大文字化を使わない判断はキーボード側が層ごとに行い、英字の層では欄の指定に従う。
+        val romaji = policy.usesRomajiInput(UzumiSettings.isRomajiInputEnabled(this))
+        autoCapsMode = info.initialCapsMode and policy.capsModeFlags
         // ライブ変換の設定は入力開始ごとに読み、設定画面での変更を次の入力欄から反映する。
         val live = policy.usesLiveConversion(UzumiSettings.isLiveConversionEnabled(this))
         // debugビルドで選んだモデル。ニューラル変換はライブ変換の要求だけに使う。releaseビルドでは常にMozcだけ。
@@ -265,10 +392,13 @@ class UzumiInputMethodService : InputMethodService() {
             // 変換結果の世代はモデルごとに変え、モデルを切り替えた前後の結果を混ぜない。
             liveCore = if (live) LiveConversionCore(initialConverterGeneration = neuralSpec?.generation ?: 0L) else null,
             liveClient = conversionWorker,
+            predictionClient = conversionWorker,
             compositionStyler = ::highlightSegment,
             evaluation = evaluation,
             correctness = CorrectnessJudge.shared,
+            romajiInputEnabled = romaji,
         )
+        if (inputViewVisible) refreshClipboardSuggestion()
         applyPolicyToKeyboard()
         refreshCandidates()
     }
@@ -276,10 +406,14 @@ class UzumiInputMethodService : InputMethodService() {
     /** 表示済みキーボードへ現在欄の種別と候補を反映する。 */
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        inputViewVisible = true
         // 設定画面で高さや反応を変えた後は、新しい設定で入力Viewを作り直す
-        if (builtPreferences != null && builtPreferences != UzumiSettings.keyboardPreferences(this)) {
+        if ((builtPreferences != null && builtPreferences != UzumiSettings.keyboardPreferences(this)) ||
+            (builtToolbarPreferences != null && builtToolbarPreferences != UzumiSettings.toolbarPreferences(this))
+        ) {
             setInputView(onCreateInputView())
         }
+        startClipboardObservation()
         applyPolicyToKeyboard()
         refreshCandidates()
     }
@@ -309,45 +443,186 @@ class UzumiInputMethodService : InputMethodService() {
             candidatesStart = candidatesStart,
             candidatesEnd = candidatesEnd,
         )
+        updateAutoCaps()
         refreshCandidates()
+    }
+
+    /**
+     * カーソル位置で欄が求める大文字化を問い合わせ、英字配列のShiftへ反映する。欄が求めない場合は問い合わせない。
+     * ローマ字の層で使わない判断はキーボード側が行う。
+     */
+    private fun updateAutoCaps() {
+        val flags = currentPolicy?.capsModeFlags ?: 0
+        autoCapsMode = if (flags == 0) 0 else currentInputConnection?.getCursorCapsMode(flags) ?: 0
+        keyboardPanel?.setAutoCapsMode(autoCapsMode)
     }
 
     /** 非表示になるキーボードの保留タッチを止める。 */
     override fun onFinishInputView(finishingInput: Boolean) {
+        inputViewVisible = false
         keyboardPanel?.cancelPendingInput()
+        candidateGrid?.hide()
+        toolbarPanel?.hide()
+        stopClipboardObservation()
+        clearInlineSuggestions()
         super.onFinishInputView(finishingInput)
     }
 
     /** 入力終了時に接続と一時compositionを無効化する。 */
     override fun onFinishInput() {
+        inputViewVisible = false
         keyboardPanel?.cancelPendingInput()
+        candidateGrid?.hide()
+        toolbarPanel?.hide()
+        stopClipboardObservation()
         closeSession()
+        clearInlineSuggestions()
         currentPolicy = null
         refreshCandidates()
         super.onFinishInput()
+    }
+
+    /**
+     * Autofill serviceへ渡すInline候補の要求を作る。札の配色はキーボードのライト／ダークに合わせ、高さは候補バーに収める。
+     * OSの描画側がv1の見た目に対応しない場合はnullを返し、従来のAutofill表示に任せる。
+     */
+    override fun onCreateInlineSuggestionsRequest(uiExtras: Bundle): InlineSuggestionsRequest? {
+        if (UiVersions.INLINE_UI_VERSION_1 !in UiVersions.getVersions(uiExtras)) return null
+        val colors = KeyboardColors.from(this)
+        val density = resources.displayMetrics.density
+        val px = { dp: Float -> (dp * density).toInt() }
+        val chipBackground = Icon.createWithResource(this, R.drawable.inline_suggestion_chip).setTint(colors.keyBackground)
+        val style = InlineSuggestionUi.newStyleBuilder()
+            .setSingleIconChipStyle(ViewStyle.Builder().setBackground(chipBackground).build())
+            .setChipStyle(
+                ViewStyle.Builder()
+                    .setBackground(chipBackground)
+                    .setPadding(px(INLINE_CHIP_PADDING_DP), 0, px(INLINE_CHIP_PADDING_DP), 0)
+                    .build(),
+            )
+            .setTitleStyle(TextViewStyle.Builder().setTextColor(colors.text).setTextSize(INLINE_TITLE_TEXT_SP).build())
+            .setSubtitleStyle(TextViewStyle.Builder().setTextColor(colors.textSecondary).setTextSize(INLINE_SUBTITLE_TEXT_SP).build())
+            .build()
+        val spec = InlinePresentationSpec.Builder(
+            Size(px(INLINE_MIN_WIDTH_DP), px(INLINE_HEIGHT_DP)),
+            Size(px(INLINE_MAX_WIDTH_DP), px(INLINE_HEIGHT_DP)),
+        ).setStyle(UiVersions.newStylesBuilder().addStyle(style).build()).build()
+        return InlineSuggestionsRequest.Builder(listOf(spec))
+            .setMaxSuggestionCount(INLINE_MAX_SUGGESTIONS)
+            .build()
+    }
+
+    /**
+     * Inline候補を展開して候補バーへ置く。全件の展開を終えた時点で、同じ欄の最新の応答である場合だけ採用する。
+     * 空の応答や入力欄のない応答では一覧を空にしてfalseを返す。候補の中身はどこへも記録しない。
+     */
+    override fun onInlineSuggestionsResponse(response: InlineSuggestionsResponse): Boolean {
+        val generation = ++inlineResponseGeneration
+        val epoch = session?.sessionEpoch
+        val suggestions = response.inlineSuggestions
+        if (epoch == null || suggestions.isEmpty()) {
+            detachInlineViews()
+            inlineSuggestions = emptyList()
+            refreshCandidates()
+            return false
+        }
+        val inflated = arrayOfNulls<InlineContentView>(suggestions.size)
+        var remaining = suggestions.size
+        val size = Size(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        suggestions.forEachIndexed { index, suggestion ->
+            suggestion.inflate(this, size, mainExecutor) { view ->
+                inflated[index] = view
+                remaining -= 1
+                if (remaining == 0 &&
+                    InlineAutofillPolicy.acceptsResponse(epoch, session?.sessionEpoch, generation, inlineResponseGeneration)
+                ) {
+                    detachInlineViews()
+                    inlineSuggestions = suggestions.indices.mapNotNull { i ->
+                        inflated[i]?.let { view ->
+                            // 展開時にframeworkが描画済みの寸法をLayoutParamsへ入れて返すため、付け直しで失わないよう保持する。
+                            val params = view.layoutParams
+                            InlineSuggestionItem(
+                                view,
+                                suggestions[i].info.isPinned,
+                                width = params?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT,
+                                height = params?.height ?: ViewGroup.LayoutParams.WRAP_CONTENT,
+                            )
+                        }
+                    }
+                    refreshCandidates()
+                }
+            }
+        }
+        return true
+    }
+
+    /** Inline候補を捨て、展開中の応答も採用しないようにする。欄の切り替えと入力の終了で呼ぶ。 */
+    private fun clearInlineSuggestions() {
+        inlineResponseGeneration += 1
+        detachInlineViews()
+        inlineSuggestions = emptyList()
+        inlineHost?.removeAllViews()
+        inlineHostItems = null
+    }
+
+    /** 表示中のInline候補の部品を親から外す。同じ部品を別の親へ付け直す前と、破棄する前に呼ぶ。 */
+    private fun detachInlineViews() {
+        inlineSuggestions.forEach { (it.view.parent as? ViewGroup)?.removeView(it.view) }
     }
 
     /** キーボード操作を現在の編集セッションへ一度だけ送る。 */
     private fun handleKeyboardAction(action: KeyboardAction) {
         val current = session ?: return
         OperationClassifier.keyboardAction(action, current.isLiveMode)?.let(evaluation::record)
-        // 左ドラッグで消した文字列は、次の操作をした時点で戻せなくする
-        if (action != KeyboardAction.DeleteToLineStart) current.forgetLineDelete()
+        // Backspaceは連続削除をまとめ、絵文字一覧の開閉中は削除Undoを保ち、ほかの編集操作で記録を終える。
+        if (action != KeyboardAction.Delete && action != KeyboardAction.DeleteToLineStart &&
+            action != KeyboardAction.OpenEmojiPicker && action != KeyboardAction.CloseEmojiPicker
+        ) current.forgetDeletionUndo()
         when (action) {
-            is KeyboardAction.Text -> current.inputText(action.value)
-            KeyboardAction.Delete -> current.deleteBackward()
-            // ライブ変換の入力中は、←→で候補バーの対象の文節を前後へ移す（Simejiの変換中の←→に当たる操作）
-            is KeyboardAction.MoveCursor -> if (current.isLiveMode && current.hasComposition) {
-                current.moveLiveFocus(action.delta)
+            // 英字配列の文字は、ローマ字かな入力が有効な欄ではかなへ組み立てる（無効な欄と英字の層では従来どおり英字）。
+            is KeyboardAction.Text -> if (keyboardPanel?.isRomajiQwertyMode == true) {
+                current.inputRomajiText(action.value)
             } else {
-                current.moveCursor(action.delta)
+                current.inputText(action.value, fromTwelveKey = keyboardPanel?.isKanaMode == true)
             }
+            is KeyboardAction.KanaTap ->
+                current.inputKanaTap(KeyboardLayoutData.toggleChars(action.type), SystemClock.uptimeMillis())
+            KeyboardAction.Delete -> current.deleteBackward()
+            is KeyboardAction.MoveCursor -> when {
+                // 12キーの連続タップの途中の→は、次のタップを新しい文字にする区切りとして使い、カーソルは動かさない。
+                action.delta > 0 && current.endKanaToggle(SystemClock.uptimeMillis()) -> Unit
+                // ライブ変換の入力中は、←→で候補バーの対象の文節を前後へ移す（Simejiの変換中の←→に当たる操作）。
+                current.isLiveMode && current.hasComposition -> current.moveLiveFocus(action.delta)
+                // 明示変換の結果の表示中も、←→で注目文節を移す（Gboardの変換中の←→に当たる操作）。
+                current.hasExplicitConversion -> current.moveConversionFocus(action.delta)
+                else -> current.moveCursor(action.delta)
+            }
+            // Space・変換キーの横ドラッグは、ライブ変換中も文節焦点ではなく実カーソルを動かす。
+            is KeyboardAction.MoveEditorCursor -> current.moveCursor(action.delta)
             KeyboardAction.Enter -> current.handleEnter()
-            KeyboardAction.Space -> current.insertSpace()
+            // ローマ字かな入力中の英字配列のSpaceは、12キーの空白キーと同じく入力中なら変換にする。
+            KeyboardAction.Space -> if (keyboardPanel?.isRomajiQwertyMode == true && current.isRomajiInputEnabled && current.hasComposition) {
+                current.convert()
+            } else {
+                current.insertSpace()
+            }
             KeyboardAction.Convert -> current.convert()
             KeyboardAction.TransformKana -> current.transformKana()
             KeyboardAction.ToKatakana -> current.toKatakana()
             KeyboardAction.DeleteToLineStart -> current.deleteToLineStart()
+            KeyboardAction.OpenEmojiPicker -> {
+                val isSensitive = currentPolicy?.isSensitive != false
+                keyboardPanel?.showEmojiPicker(if (isSensitive) emptyList() else emojiRecentStore.load())
+            }
+            KeyboardAction.CloseEmojiPicker -> keyboardPanel?.hideEmojiPicker()
+            is KeyboardAction.InsertEmoji -> {
+                val inserted = current.pasteText(action.value)
+                // 機密欄に加え、設定で学習を止めている場合も履歴へ残さない。
+                if (inserted && currentPolicy?.suppressLearning == false) {
+                    val recentValues = emojiRecentStore.record(action.value, insertionSucceeded = true, learningSuppressed = false)
+                    keyboardPanel?.setRecentEmojiValues(recentValues)
+                }
+            }
             // 変換中の←→の長押しで、文節の区切りを一文字ずつ縮める・伸ばす
             is KeyboardAction.ResizeSegment -> current.resizeSegment(action.delta)
         }
@@ -409,6 +684,13 @@ class UzumiInputMethodService : InputMethodService() {
         if (current.applyLiveCandidates(result)) refreshCandidates()
     }
 
+    /** 予測応答を現在のsessionとrevisionが受け入れた場合だけ候補バーへ反映する。 */
+    private fun deliverPredictionResult(result: PredictionResult) {
+        val current = session ?: return
+        if (current.sessionEpoch != result.request.sessionEpoch) return
+        if (current.applyPredictionResult(result)) refreshCandidates()
+    }
+
     /** 訂正中のsegmentの表示範囲へ背景色を付け、どのsegmentを直しているかをEditor上で示す。 */
     private fun highlightSegment(text: String, span: DisplaySpan?): CharSequence {
         if (span == null || span.start >= span.end || span.end > text.length) return text
@@ -429,7 +711,89 @@ class UzumiInputMethodService : InputMethodService() {
     private fun applyPolicyToKeyboard() {
         val policy = currentPolicy ?: return
         keyboardPanel?.setEditorMode(policy.isNumeric, policy.isPassword)
+        // ローマ字かな入力の欄でだけ、英字配列をローマ字と英字の層に分ける。英字の層を含めるかは設定画面で選ぶ。
+        keyboardPanel?.setRomajiInput(
+            romajiInput = session?.isRomajiInputEnabled == true,
+            includesEnglish = UzumiSettings.isRomajiEnglishQwertyIncluded(this),
+        )
         keyboardPanel?.setActionLabel(policy.actionLabel)
+        keyboardPanel?.setAutoCapsMode(autoCapsMode)
+    }
+
+    /** IME表示中だけクリップボード変更を監視し、期限付きの一時候補を更新する。 */
+    private fun startClipboardObservation() {
+        val manager = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+        val observer = recentClipboard ?: RecentClipboard(manager, onClipboardChanged = {
+            mainHandler.post {
+                if (inputViewVisible) refreshClipboardSuggestion()
+            }
+        }).also { recentClipboard = it }
+        if (observer.startObserving()) {
+            refreshClipboardSuggestion()
+        } else {
+            clipboardSuggestion = null
+            clipboardSuggestionSessionEpoch = null
+            refreshCandidates()
+        }
+    }
+
+    /** 表示中に作った候補だけを有効にし、60秒後に本文表示を含む一時状態を破棄する。 */
+    private fun refreshClipboardSuggestion() {
+        if (!inputViewVisible) return
+        clipboardExpiry?.let(mainHandler::removeCallbacks)
+        clipboardExpiry = null
+        val observer = recentClipboard ?: return
+        val suggestion = observer.currentSuggestion(sensitiveField = currentPolicy?.isSensitive == true)
+        clipboardSuggestion = suggestion
+        clipboardSuggestionSessionEpoch = session?.sessionEpoch
+        if (suggestion != null) {
+            val expiry = Runnable {
+                if (inputViewVisible && clipboardSuggestion === suggestion &&
+                    clipboardSuggestionSessionEpoch == session?.sessionEpoch
+                ) {
+                    clipboardSuggestion = null
+                    clipboardSuggestionSessionEpoch = null
+                    clipboardExpiry = null
+                    refreshCandidates()
+                }
+            }
+            clipboardExpiry = expiry
+            mainHandler.postDelayed(expiry, (suggestion.expiresAtMillis - System.currentTimeMillis()).coerceAtLeast(0L))
+        }
+        refreshCandidates()
+    }
+
+    /** キーボード非表示時に監視・期限処理・本文を参照できる候補を破棄する。 */
+    private fun stopClipboardObservation() {
+        recentClipboard?.close()
+        clearClipboardSuggestion()
+    }
+
+    /** 設定値を変えず、キーボード最小高を残した画面内のバー段数上限を返す。 */
+    private fun maximumBarRows(): Int {
+        val availableHeight = availableInputHeightDp()
+        val minimumKeyboardHeight = maxOf(
+            KeyboardPreferences.MIN_ROW_HEIGHT_DP * KANA_KEYBOARD_ROW_COUNT,
+            MIN_KEY_TOUCH_DP * QWERTY_KEYBOARD_ROW_COUNT,
+        ) + KEYBOARD_PANEL_PADDING_DP
+        return ((availableHeight - minimumKeyboardHeight) / BAR_ROW_HEIGHT_WITH_DIVIDER_DP)
+            .coerceIn(1, MAX_VISIBLE_BAR_ROWS)
+    }
+
+    /** 横画面などで画面に収めるため、保存値を変えず表示用のキーボード行高だけを下げる。 */
+    private fun displayKeyboardPreferences(
+        configured: KeyboardPreferences,
+        reservedBarRows: Int,
+    ): KeyboardPreferences {
+        val availableHeight = availableInputHeightDp()
+        val barsHeight = reservedBarRows * BAR_ROW_HEIGHT_WITH_DIVIDER_DP + KEYBOARD_PANEL_PADDING_DP
+        val keyboardHeight = (availableHeight - barsHeight).coerceAtLeast(0)
+        val qwertyHeightPerRow = KeyboardDimens.QWERTY_ROW_HEIGHT_DP / KeyboardDimens.ROW_HEIGHT_DP
+        val maximumRowHeight = (keyboardHeight / maxOf(
+            KANA_KEYBOARD_ROW_COUNT.toFloat(),
+            QWERTY_KEYBOARD_ROW_COUNT * qwertyHeightPerRow,
+        )).toInt().coerceAtLeast(KeyboardPreferences.MIN_ROW_HEIGHT_DP)
+        return configured.copy(rowHeightDp = minOf(configured.rowHeightDp.toInt(), maximumRowHeight).toFloat())
     }
 
     /**
@@ -447,34 +811,108 @@ class UzumiInputMethodService : InputMethodService() {
         leading.removeAllViews()
         trailing.removeAllViews()
         val current = session
-        if (current?.canUndoLineDelete == true) {
+        // 評価の記録中は予測を出さず、操作数を予測導入前と同じ条件で数える。
+        val predictionsShown = !evaluation.isRecording
+        if (predictionsShown) current?.refreshPredictions()
+        if (current?.hasComposition != true) addClipboardSuggestion(current, leading)
+        if (current?.canUndoDeletion == true) {
             leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.line_delete_undo_description), true) {
                 evaluation.record(OperationKind.CORRECTION)
-                if (session === current) current.undoLineDelete()
+                if (session === current) current.undoDeletion()
                 refreshCandidates()
             })
         }
-        val entries = if (current?.isLiveMode == true) liveEntries(current, leading, trailing) else explicitEntries(current)
+        val predictions = current?.predictionResult()?.takeIf { predictionsShown }?.let { result ->
+            result.candidates.map { candidate -> predictionEntry(current, result, candidate) }
+        }.orEmpty()
+        val regularEntries = if (current?.isLiveMode == true) liveEntries(current, leading, trailing) else explicitEntries(current)
+        val entries = predictions + regularEntries.mapIndexed { index, entry ->
+            CandidateEntry(
+                label = entry.label,
+                selected = entry.selected,
+                sectionBreakBefore = predictions.isNotEmpty() && index == 0,
+                onPick = entry.onPick,
+            )
+        }
+        // 次の語の予測はInline候補の右に並べるため、Inline候補の表示条件には通常候補だけを使う。
+        updateInlineHost(regularEntries.isEmpty() && current != null && InlineAutofillPolicy.shouldShow(
+            hasComposition = current.hasComposition,
+            hasRegularCandidates = false,
+            inlineCount = inlineSuggestions.size,
+        ))
         val grid = candidateGrid
+        val preferences = UzumiSettings.toolbarPreferences(this)
+        val visibleActions = availableToolbarActions(current)
+        val requestedToolbarRows = preferences.toolbarActionRows(visibleActions).size
+        val availableCandidateWidthDp = (resources.configuration.screenWidthDp - CANDIDATE_FIXED_WIDTH_DP)
+            .coerceAtLeast(MIN_CANDIDATE_SLOT_DP)
+        val maxItemsPerRow = availableCandidateWidthDp / MIN_CANDIDATE_SLOT_DP
+        // 候補の件数で候補列の高さが変わるとキーボード全体が上下し、長押し中の操作が途切れるため、設定段数で固定する。
+        val requestedCandidateRows = preferences.candidateRows
+        val effectiveRows = fitBarRows(requestedToolbarRows, requestedCandidateRows)
+        refreshToolbar(effectiveRows.first)
         if (entries.isEmpty()) {
             grid?.hide()
             if (current?.hasComposition == true) {
-                row.addView(views.hint(hintText(current.policy, current.isLiveMode)))
+                row.addView(views.hint(hintText(current.policy, current.isLiveMode)),
+                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT))
             } else {
-                showIdleBar(current, leading, trailing)
+                showIdleBar(current, trailing)
             }
+            addToolbarEntry(trailing, current)
+            resizeCandidateBar(effectiveRows.second)
             return
         }
-        if (engineHealth is EngineHealth.Unavailable && current?.policy?.suppressSuggestions == false) {
-            row.addView(views.hint(getString(R.string.candidate_status_no_dictionary)))
-        }
-        entries.forEachIndexed { index, entry ->
-            row.addView(views.item(entry.label, entry.selected) { pickCandidate(current, entry, index) })
+        val indexRows = preferences.copy(candidateRows = effectiveRows.second)
+            .candidateIndexRows(entries.size, maxItemsPerRow)
+        indexRows.forEachIndexed { rowIndex, indexes ->
+            val candidateLine = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            if (rowIndex == 0 && engineHealth is EngineHealth.Unavailable && current?.policy?.suppressSuggestions == false) {
+                candidateLine.addView(views.hint(getString(R.string.candidate_status_no_dictionary)))
+            }
+            indexes.forEach { index ->
+                val entry = entries[index]
+                if (entry.sectionBreakBefore && index != indexes.first()) candidateLine.addView(views.divider())
+                candidateLine.addView(views.item(entry.label, entry.selected, entry.isPrediction) { pickCandidate(current, entry, index) }.apply {
+                    maxLines = 1
+                })
+            }
+            row.addView(HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                // 各段の候補は従来どおり横へスクロールでき、段が増えても候補indexは元の順序を保つ
+                isHorizontalFadingEdgeEnabled = true
+                setFadingEdgeLength((CANDIDATE_FADE_DP * resources.displayMetrics.density).toInt())
+                addView(candidateLine, FrameLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                ))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                (CandidateBarViews.BAR_HEIGHT_DP * resources.displayMetrics.density).toInt()))
+            if (rowIndex < indexRows.lastIndex) {
+                row.addView(views.divider().apply {
+                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1)
+                })
+            }
         }
         // 縦線は右端の固定ボタン（末尾・∨）すべての手前に置き、候補の列がそこで終わることを示す
         trailing.addView(views.divider(), 0)
+        if (regularEntries.isEmpty() && current?.hasComposition != true) {
+            // 確定後の次の語の予測だけを並べている間は、待機中と同じくキーボードを閉じる操作を残す。
+            grid?.hide()
+            trailing.addView(views.symbolButton("⌄", getString(R.string.close_keyboard)) {
+                evaluation.record(OperationKind.OTHER)
+                requestHideSelf(0)
+            })
+            addToolbarEntry(trailing, current)
+            resizeCandidateBar(effectiveRows.second)
+            return
+        }
         trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
             evaluation.record(OperationKind.OTHER)
+            toolbarPanel?.hide()
             if (grid?.isShowing == true) {
                 grid.hide()
             } else {
@@ -484,27 +922,224 @@ class UzumiInputMethodService : InputMethodService() {
             }
             refreshCandidates()
         })
+        addToolbarEntry(trailing, current)
+        resizeCandidateBar(effectiveRows.second)
         // 一覧を開いたまま候補が変わった場合は、一覧も新しい候補で描き直す
         if (grid?.isShowing == true) showCandidateGrid(current, entries)
+    }
+
+    /** 候補バーを設定に応じた段数の高さで表示する。候補が少なくても高さを変えず、キーボードの上下動を防ぐ。 */
+    private fun resizeCandidateBar(rows: Int) {
+        val density = resources.displayMetrics.density
+        val dividerHeight = (density + 0.5f).toInt()
+        val rowHeight = (CandidateBarViews.BAR_HEIGHT_DP * density).toInt()
+        val height = rowHeight * rows + dividerHeight * (rows - 1).coerceAtLeast(0)
+        candidateBar?.layoutParams = candidateBar?.layoutParams?.apply { this.height = height }
+        candidateBar?.requestLayout()
+    }
+
+    /** 選んだショートカットを機能バーへ表示し、使えないUndoなどの空枠は省く。 */
+    private fun refreshToolbar(maxRows: Int) {
+        val parent = toolbarRow ?: return
+        val views = toolbarViews ?: return
+        val preferences = UzumiSettings.toolbarPreferences(this)
+        val visibleActions = availableToolbarActions(session)
+        val rows = if (maxRows <= 0) emptyList() else preferences.copy(toolbarRows = maxRows)
+            .toolbarActionRows(visibleActions)
+        views.addToolbarRows(parent, rows, ::toolbarActionLabel, ::handleToolbarAction)
+        val height = (ToolbarBarViews.BAR_ROW_HEIGHT_DP * resources.displayMetrics.density * rows.size).toInt()
+        parent.layoutParams = parent.layoutParams?.apply { this.height = height }
+        parent.visibility = if (rows.isEmpty()) View.GONE else View.VISIBLE
+        parent.requestLayout()
+    }
+
+
+    /** 画面高に収まらない場合、候補を最低1段残して両バーの実段数を縮める。 */
+    private fun fitBarRows(toolbarRows: Int, candidateRows: Int): Pair<Int, Int> {
+        var toolbar = toolbarRows
+        var candidates = candidateRows.coerceAtLeast(1)
+        val budget = maximumBarRows()
+        while (toolbar + candidates > budget) {
+            when {
+                candidates > 1 && (candidates >= toolbar || toolbar == 0) -> candidates -= 1
+                toolbar > 1 -> toolbar -= 1
+                candidates > 1 -> candidates -= 1
+                toolbar > 0 -> toolbar -= 1
+                else -> break
+            }
+        }
+        return toolbar to candidates
+    }
+
+    /** 機能一覧の入口を候補バーへ常時表示する。候補一覧とは同時に開かない。 */
+    private fun addToolbarEntry(trailing: LinearLayout, current: EditorSession?) {
+        val views = barViews ?: return
+        trailing.addView(views.symbolButton("▦", getString(R.string.toolbar_open)) {
+            val panel = toolbarPanel ?: return@symbolButton
+            candidateGrid?.hide()
+            if (panel.isShowing) {
+                panel.hide()
+            } else {
+                panel.show(availableToolbarActions(current), ::toolbarActionLabel) { action ->
+                    panel.hide()
+                    handleToolbarAction(action)
+                }
+            }
+        })
+    }
+
+    /** 現在実行できるタイルだけを機能バーと機能一覧へ渡す。 */
+    private fun availableToolbarActions(current: EditorSession?): List<ToolbarAction> =
+        ToolbarPreferences.AVAILABLE_ACTIONS.filter { action ->
+            when (action) {
+                // 明示的な貼り付けは60秒の自動提案期限に縛らず、テキストclipがある間は出す。
+                ToolbarAction.PASTE -> current?.isActive == true && inputViewVisible &&
+                    (hasCurrentClipboardSuggestion(current) || recentClipboard?.hasCurrentText() == true)
+                ToolbarAction.UNDO -> current?.let {
+                    it.canUndoDeletion || it.liveCandidateState()?.canUndo == true
+                } == true
+                else -> true
+            }
+        }
+
+    /** 機能タイルを現在の編集セッションへ適用する。 */
+    private fun handleToolbarAction(action: ToolbarAction) {
+        val current = session
+        when (action) {
+            ToolbarAction.PASTE -> pasteFromClipboard()
+            ToolbarAction.UNDO -> {
+                evaluation.record(OperationKind.CORRECTION)
+                if (current == null || session !== current) return
+                when {
+                    current.canUndoDeletion -> current.undoDeletion()
+                    current.liveCandidateState()?.canUndo == true -> current.undoLive()
+                }
+                scheduleConversionTimeout(current)
+            }
+            ToolbarAction.USER_DICTIONARY -> startActivity(
+                Intent(this, UserDictionaryActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+            ToolbarAction.SETTINGS -> openSettings()
+            ToolbarAction.CLOSE_KEYBOARD -> requestHideSelf(0)
+        }
+        refreshCandidates()
+    }
+
+    private fun toolbarActionLabel(action: ToolbarAction): String = when (action) {
+        // 本文の冒頭は候補バーの提案だけに出し、機能バーでは同じ本文を重ねて見せない。
+        ToolbarAction.PASTE -> getString(R.string.toolbar_paste)
+        ToolbarAction.UNDO -> getString(R.string.toolbar_undo)
+        ToolbarAction.USER_DICTIONARY -> getString(R.string.open_user_dictionary)
+        ToolbarAction.SETTINGS -> getString(R.string.open_settings)
+        ToolbarAction.CLOSE_KEYBOARD -> getString(R.string.close_keyboard)
+    }
+
+    /** ✕で閉じた提案は同じclipでは再表示せず、通常の候補バーへ戻す。 */
+    private fun dismissClipboardSuggestion() {
+        clipboardSuggestion?.let { recentClipboard?.dismiss(it) }
+        clearClipboardSuggestion()
+        refreshCandidates()
+    }
+
+    /** 表示中の提案と期限タイマーを捨てる。 */
+    private fun clearClipboardSuggestion() {
+        clipboardExpiry?.let(mainHandler::removeCallbacks)
+        clipboardExpiry = null
+        clipboardSuggestion = null
+        clipboardSuggestionSessionEpoch = null
+    }
+
+    /** 自動提案が現在の編集セッションに対して有効かを返す。 */
+    private fun hasCurrentClipboardSuggestion(current: EditorSession?): Boolean =
+        current != null && clipboardSuggestion != null && clipboardSuggestionSessionEpoch == current.sessionEpoch
+
+    /**
+     * clipをIME本文としてそのまま貼り付ける。
+     * 自動提案の表示中はラベルと同じ世代の本文だけを貼り、提案がない場合は期限にかかわらず現在の本文を貼る。
+     */
+    private fun pasteFromClipboard() {
+        val current = session ?: return
+        if (!inputViewVisible || !current.isActive) return
+        val observer = recentClipboard ?: return
+        val suggestion = clipboardSuggestion?.takeIf { hasCurrentClipboardSuggestion(current) }
+        val text = if (suggestion != null) observer.readForPaste(suggestion) else observer.readCurrentForPaste()
+        if (text == null) {
+            refreshClipboardSuggestion()
+            return
+        }
+        if (!inputViewVisible || session !== current || !current.isActive) return
+        current.pasteText(text)
+        suggestion?.let { observer.dismiss(it) }
+        clearClipboardSuggestion()
+        scheduleConversionTimeout(current)
+        refreshCandidates()
     }
 
     /** 候補一覧を開く。候補を選ぶと一覧を閉じる。 */
     private fun showCandidateGrid(current: EditorSession?, entries: List<CandidateEntry>) {
         val grid = candidateGrid ?: return
-        grid.show(entries.map { it.label }, entries.indexOfFirst { it.selected }) { index ->
+        grid.show(
+            values = entries.map { it.label },
+            selected = entries.indexOfFirst { it.selected },
+            dividerIndex = entries.indexOfFirst { it.sectionBreakBefore }.takeIf { it >= 0 },
+            predictionIndexes = entries.indices.filter { entries[it].isPrediction }.toSet(),
+        ) { index ->
             grid.hide()
             pickCandidate(current, entries[index], index)
         }
     }
 
+    /** OSが描画するInline Autofill候補一つ。[pinned]は候補バーの右端に固定する候補。 */
+    private class InlineSuggestionItem(
+        val view: InlineContentView,
+        val pinned: Boolean,
+        val width: Int,
+        val height: Int,
+    )
+
     /** 候補バーの一項目。押したときの操作を持つ。 */
-    private class CandidateEntry(val label: String, val selected: Boolean, val onPick: () -> Unit)
+    private class CandidateEntry(
+        val label: String,
+        val selected: Boolean,
+        val sectionBreakBefore: Boolean = false,
+        // 選ぶとすぐ確定する予測の候補か。選ぶだけの通常候補と見分けられるよう、色を変えて表示する。
+        val isPrediction: Boolean = false,
+        val onPick: () -> Unit,
+    )
+
+    /** 予測候補を、選ぶと未確定全体（待機中はカーソル位置）をその語で確定する候補バーの項目にする。 */
+    private fun predictionEntry(
+        current: EditorSession,
+        result: PredictionResult,
+        candidate: PredictionCandidate,
+    ): CandidateEntry = CandidateEntry(candidate.value, selected = false, isPrediction = true) {
+        current.selectPrediction(result.request, candidate.id)
+    }
+
+    /** 待機中のクリップボード提案を予測候補より左へ置き、本文貼付と提案解除を別々に押せるようにする。 */
+    private fun addClipboardSuggestion(current: EditorSession?, leading: LinearLayout) {
+        val views = barViews ?: return
+        val suggestion = clipboardSuggestion?.takeIf { hasCurrentClipboardSuggestion(current) } ?: return
+        leading.addView(views.chip(getString(R.string.clipboard_suggestion_label, suggestion.label),
+            getString(R.string.clipboard_suggestion_description), true) {
+            evaluation.record(OperationKind.OTHER)
+            pasteFromClipboard()
+        }.apply {
+            // 長い本文でもInline候補の幅を残すため、提案は画面幅の半分までに抑えて末尾を省略する。
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            maxWidth = resources.displayMetrics.widthPixels / 2
+        })
+        leading.addView(views.symbolButton("✕", getString(R.string.clipboard_suggestion_dismiss)) {
+            dismissClipboardSuggestion()
+        })
+    }
 
     /** [index]番目の候補を選ぶ。表示したときと別の編集セッションになっていれば何もしない。 */
     private fun pickCandidate(shown: EditorSession?, entry: CandidateEntry, index: Int) {
         evaluation.record(OperationClassifier.candidatePick(index))
         if (shown == null || session !== shown) return
-        shown.forgetLineDelete()
+        shown.forgetDeletionUndo()
         entry.onPick()
         refreshCandidates()
     }
@@ -516,7 +1151,7 @@ class UzumiInputMethodService : InputMethodService() {
         return current.candidateOptions().map { option ->
             val choice = option.conversionChoice
             val label = if (choice != null) option.value else getString(R.string.candidate_button_label, option.value, option.label)
-            CandidateEntry(label, selected = choice != null && option.value == snapshot.display) {
+            CandidateEntry(label, selected = choice != null && option.selected) {
                 if (choice != null) {
                     current.selectConversionCandidate(choice)
                     scheduleConversionTimeout(current)
@@ -534,7 +1169,7 @@ class UzumiInputMethodService : InputMethodService() {
     private fun liveEntries(current: EditorSession, leading: LinearLayout, trailing: LinearLayout): List<CandidateEntry> {
         val views = barViews ?: return emptyList()
         val state = current.liveCandidateState() ?: return emptyList()
-        if (state.canUndo && !current.canUndoLineDelete) {
+        if (state.canUndo && !current.canUndoDeletion) {
             leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.live_undo), true) {
                 evaluation.record(OperationKind.CORRECTION)
                 if (session === current) current.undoLive()
@@ -556,18 +1191,84 @@ class UzumiInputMethodService : InputMethodService() {
         }
     }
 
-    /** 入力していない間の候補バー。左端に設定、中央に案内、右端にキーボードを閉じるボタンを置く。 */
-    private fun showIdleBar(current: EditorSession?, leading: LinearLayout, trailing: LinearLayout) {
+    /**
+     * 入力していない間の候補バーに案内とキーボードを閉じる操作を置く。Inline Autofill候補がある間は、案内の代わりに候補を並べる。
+     */
+    private fun showIdleBar(current: EditorSession?, trailing: LinearLayout) {
         val views = barViews ?: return
-        leading.addView(views.symbolButton("⚙", getString(R.string.open_settings)) {
-            evaluation.record(OperationKind.OTHER)
-            openSettings()
-        })
-        candidateRow?.addView(views.hint(hintText(current?.policy, current?.isLiveMode == true)))
+        val row = candidateRow ?: return
+        val showInline = current != null && InlineAutofillPolicy.shouldShow(
+            hasComposition = current.hasComposition,
+            hasRegularCandidates = false,
+            inlineCount = inlineSuggestions.size,
+        )
+        val line = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        // Inline候補は常設の枠（updateInlineHost）に出すため、ここでは候補がない場合の案内だけを置く。
+        if (!showInline && !hasCurrentClipboardSuggestion(current)) {
+            line.addView(views.hint(hintText(current?.policy, current?.isLiveMode == true)))
+        }
+        row.addView(line, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            (CandidateBarViews.BAR_HEIGHT_DP * resources.displayMetrics.density).toInt(),
+        ))
         trailing.addView(views.symbolButton("⌄", getString(R.string.close_keyboard)) {
             evaluation.record(OperationKind.OTHER)
             requestHideSelf(0)
         })
+    }
+
+    /**
+     * 待機中だけInline候補の常設枠を表示する。枠の中身は候補の一覧が変わったときだけ作り直し、
+     * 候補バーの再構築では部品を付け外ししない。pinnedの候補は横スクロールの外の右端に固定する。
+     */
+    private fun updateInlineHost(show: Boolean) {
+        val host = inlineHost ?: return
+        val row = candidateRow ?: return
+        if (show && inlineHostItems !== inlineSuggestions) {
+            val density = resources.displayMetrics.density
+            val wrap = LinearLayout.LayoutParams.WRAP_CONTENT
+            val match = LinearLayout.LayoutParams.MATCH_PARENT
+            val margin = (INLINE_MARGIN_DP * density).toInt()
+            val (pinned, regular) = inlineSuggestions.partition { it.pinned }
+            detachInlineViews()
+            host.removeAllViews()
+            // 候補の中身は別プロセスのSurfaceで描かれ、部品自身は大きさを測れないため、展開時の寸法をそのまま使う。
+            val inlineParams = { item: InlineSuggestionItem ->
+                LinearLayout.LayoutParams(item.width, item.height).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    setMargins(margin, 0, margin, 0)
+                }
+            }
+            val scrolling = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                regular.forEach { addView(it.view, inlineParams(it)) }
+            }
+            host.addView(HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(scrolling, FrameLayout.LayoutParams(wrap, match))
+            }, LinearLayout.LayoutParams(0, match, 1f))
+            pinned.forEach { host.addView(it.view, inlineParams(it)) }
+            inlineHostItems = inlineSuggestions
+        }
+        // 表示中は候補行を内容の幅にして残りを枠へ回し、非表示中は候補行が残り幅を使う。
+        setBarWeight(row, if (show) 0f else 1f)
+        setBarWeight(host, if (show) 1f else 0f)
+        val visibility = if (show) View.VISIBLE else View.GONE
+        if (host.visibility != visibility) host.visibility = visibility
+    }
+
+    /** 候補バー内の子の横幅の配分を、変わる場合だけ更新する。 */
+    private fun setBarWeight(view: View, weight: Float) {
+        val params = view.layoutParams as? LinearLayout.LayoutParams ?: return
+        val width = if (weight > 0f) 0 else LinearLayout.LayoutParams.WRAP_CONTENT
+        if (params.weight == weight && params.width == width) return
+        params.weight = weight
+        params.width = width
+        view.layoutParams = params
     }
 
     /** 設定画面を開く。IMEから開くため新しいtaskで起動する。 */
@@ -609,10 +1310,17 @@ class UzumiInputMethodService : InputMethodService() {
         )
     }
 
-    /** 旧接続への書込みを禁止してセッション参照を破棄する。 */
-    private fun closeSession() {
+    /**
+     * 旧接続への書込みを禁止してセッション参照を破棄する。再開始では[restartedConnection]へ未確定の表示を確定してから閉じる。
+     */
+    private fun closeSession(restartedConnection: InputConnection? = null) {
         session?.let { conversionWorker?.endSession(it.sessionEpoch) }
-        session?.close()
+        val current = session
+        if (current != null && restartedConnection != null) {
+            current.closeForRestart(AndroidInputConnectionPort(restartedConnection))
+        } else {
+            current?.close()
+        }
         session = null
     }
 
@@ -622,6 +1330,44 @@ class UzumiInputMethodService : InputMethodService() {
 
         /** 候補の列の左右の端をぼかす幅（dp）。候補が横へ続くことを示す。 */
         const val CANDIDATE_FADE_DP = 24f
+
+        /** 候補以外のUndo・戻る・一覧・機能ボタン用に残す幅（dp）。 */
+        const val CANDIDATE_FIXED_WIDTH_DP = 192
+
+        /** 1候補の最小タップ領域（dp）。 */
+        const val MIN_CANDIDATE_SLOT_DP = 48
+
+        /** バー段数計算で確保するQWERTYの最小タップ領域（dp）。 */
+        const val MIN_KEY_TOUCH_DP = 48
+
+        /** 最大段数を見積もる英字・かなキーボードの行数。 */
+        const val QWERTY_KEYBOARD_ROW_COUNT = 5
+        const val KANA_KEYBOARD_ROW_COUNT = 4
+
+        /** キーボードパネル外周（dp）。 */
+        const val KEYBOARD_PANEL_PADDING_DP = 4
+
+        /** 設定時は両バー最大6段。表示時は画面高に応じて制限する。 */
+        const val MAX_VISIBLE_BAR_ROWS = 6
+        const val BAR_ROW_HEIGHT_WITH_DIVIDER_DP = 53
+
+        /** Inline Autofill候補の札の高さ（dp）。52dpの候補バーへ上下の余白を残して収める。 */
+        const val INLINE_HEIGHT_DP = 36f
+
+        /** Inline候補の札の幅の範囲（dp）。下限はタップ領域、上限は長い名前でも数件が並ぶ幅。 */
+        const val INLINE_MIN_WIDTH_DP = 48f
+        const val INLINE_MAX_WIDTH_DP = 240f
+
+        /** Inline候補の札の左右の内側余白と、札どうしの間隔（dp）。 */
+        const val INLINE_CHIP_PADDING_DP = 12f
+        const val INLINE_MARGIN_DP = 4f
+
+        /** Inline候補の題名と補足の文字の大きさ（sp）。候補バーの札（14dp）と揃える。 */
+        const val INLINE_TITLE_TEXT_SP = 14f
+        const val INLINE_SUBTITLE_TEXT_SP = 12f
+
+        /** Autofill serviceへ求めるInline候補の最大件数。 */
+        const val INLINE_MAX_SUGGESTIONS = 6
 
         /** 訂正中のsegmentの背景色（半透明の青）。下線だけのsegmentと区別できる濃さにする。 */
         const val FOCUSED_SEGMENT_COLOR = 0x553F7FFF

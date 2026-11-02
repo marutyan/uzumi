@@ -98,11 +98,19 @@ object KeySpeech {
      */
     fun longPressHint(text: String): String = "長押しで ${spokenText(text)}"
 
+    /** 空白・変換キーの短押し動作と、実カーソルを動かす横スライドを説明する。 */
+    fun spaceCursorDragHint(action: KeyboardAction): String = when (action) {
+        KeyboardAction.Space -> "左右へスライドしてカーソルを移動。タップで空白。操作メニューからもカーソルを移動できます"
+        KeyboardAction.Convert -> "左右へスライドしてカーソルを移動。タップで変換。操作メニューからもカーソルを移動できます"
+        else -> ""
+    }
+
     /**
      * アクションキーの操作をTalkBackで読み上げる短い名前。キーの説明と、長押しの別操作の説明に使う。
      */
     fun actionDescription(action: KeyboardAction): String = when (action) {
         is KeyboardAction.Text -> spokenText(action.value)
+        is KeyboardAction.KanaTap -> spokenText(KeyboardLayoutData.getKanaChar(action.type, FlickDirection.CENTER))
         is KeyboardAction.Delete -> "削除"
         is KeyboardAction.Enter -> "確定"
         is KeyboardAction.Space -> "空白"
@@ -111,6 +119,10 @@ object KeySpeech {
         is KeyboardAction.ToKatakana -> "カタカナにする"
         is KeyboardAction.DeleteToLineStart -> "行頭まで削除"
         is KeyboardAction.MoveCursor -> if (action.delta < 0) "カーソルを左へ移動" else "カーソルを右へ移動"
+        is KeyboardAction.MoveEditorCursor -> if (action.delta < 0) "カーソルを左へ移動" else "カーソルを右へ移動"
         is KeyboardAction.ResizeSegment -> if (action.delta < 0) "文節を縮める" else "文節を伸ばす"
+        KeyboardAction.OpenEmojiPicker -> "絵文字・顔文字一覧を開く"
+        is KeyboardAction.InsertEmoji -> "絵文字または顔文字を入力"
+        KeyboardAction.CloseEmojiPicker -> "記号の一覧へ戻る"
     }
 }

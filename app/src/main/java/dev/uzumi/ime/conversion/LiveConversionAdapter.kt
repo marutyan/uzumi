@@ -19,6 +19,7 @@ import dev.uzumi.ime.live.SegmentState
  * 部分範囲の先頭からの読みが学習した句に一致する場合は、句の終わりでも区切り、句と残りを別々に変換する。
  * 句は部分範囲の中だけで探すため、保護範囲とカーソルの境界を越える句は使われない。
  * ユーザーが伸縮で区切りを決めた範囲（fixedRanges）は、それだけを一つの部分範囲として一segmentに変換する。
+ * 顔文字・絵文字は表示値に使わず、候補の後ろへ並べる（EmoticonCandidatesの規則）。
  */
 class SegmentedLiveConverter(
     // 一つの部分範囲の読みを変換する。二つ目の引数は部分範囲より前の表示（保護範囲の表記と、同じ要求で先に変換した表記）で、
@@ -32,6 +33,8 @@ class SegmentedLiveConverter(
     private val learnedPhrases: ((String) -> List<String>)? = null,
     // ユーザーが区切りを決めた読みを必ず一segmentとして変換する。nullまたは失敗時はconvertRangeの結果を一segmentにまとめる。
     private val convertFixed: ((String) -> ResultSegment?)? = null,
+    // 顔文字・絵文字の判定と昇格の判定。既定では表記とユーザー辞書の品詞で判定し、昇格させない。
+    private val emoticons: EmoticonJudge = EmoticonJudge(userDictionary, learningStore = null),
 ) : LiveConverter {
     // 読みに完全一致する学習語と句の表記を合わせて引く。どちらも無ければnullで、学習語を合成しない。
     private val exactSurfaces: ((String) -> List<String>)? = combineExactSurfaces(learnedSurfaces, learnedPhrases)
@@ -85,11 +88,15 @@ class SegmentedLiveConverter(
     /** 部分範囲より前の表示。先に並べたsegment（保護範囲と、同じ要求で先に変換した部分範囲）の表記を連結する。 */
     private fun leftContext(segments: List<ResultSegment>): String = segments.joinToString(separator = "") { it.surface }
 
-    /** 一つの読みを変換し、「ユーザー辞書 → 学習 → エンジン」の順に候補を合成する。学習語を先に合成し、その上へ登録語を置く。 */
+    /**
+     * 一つの読みを変換し、「ユーザー辞書 → 学習 → エンジン」の順に候補を合成する。学習語を先に合成し、その上へ登録語を置く。
+     * 最後に、顔文字・絵文字を表示値から外して候補の後ろへ並べる。
+     */
     private fun convertMerged(reading: String, leftContext: String): List<ResultSegment>? {
         val converted = convertRange(reading, leftContext) ?: return null
         val learned = exactSurfaces?.let { mergeExactSurfaces(reading, converted, it) } ?: converted
         return UserDictionaryCandidates.mergeLive(reading, learned, userDictionary)
+            .map { EmoticonCandidates.arrangeLive(it, emoticons) }
     }
 
     /**
@@ -102,7 +109,7 @@ class SegmentedLiveConverter(
             ?: return null
         val learned = exactSurfaces?.let { mergeExactSurfaces(reading, listOf(single), it) } ?: listOf(single)
         val merged = UserDictionaryCandidates.mergeLive(reading, learned, userDictionary).single()
-        return merged.copy(candidatesComplete = single.candidatesComplete)
+        return EmoticonCandidates.arrangeLive(merged, emoticons).copy(candidatesComplete = single.candidatesComplete)
     }
 
     /**
@@ -159,17 +166,20 @@ fun combineExactSurfaces(
 /**
  * 注目したsegmentに取り直した候補へ、ライブ変換の部分範囲と同じ順（ユーザー辞書 → 学習 → エンジン）で
  * 登録語と学習語を合成し、候補の表記だけを返す。exactSurfacesは読みに完全一致する学習語と句の表記を返す。
+ * 顔文字・絵文字はライブ変換の部分範囲と同じ規則で並べ、先頭には置かない。
  */
 fun mergeSegmentCandidates(
     reading: String,
     engineCandidates: List<String>,
     userDictionary: UserDictionaryLookup?,
     exactSurfaces: ((String) -> List<String>)?,
+    emoticons: EmoticonJudge = EmoticonJudge(userDictionary, learningStore = null),
 ): List<String> {
     if (engineCandidates.isEmpty()) return emptyList()
     val base = listOf(ResultSegment(reading, engineCandidates.first(), engineCandidates))
     val learned = exactSurfaces?.let { mergeExactSurfaces(reading, base, it) } ?: base
-    return UserDictionaryCandidates.mergeLive(reading, learned, userDictionary).single().candidates
+    val merged = UserDictionaryCandidates.mergeLive(reading, learned, userDictionary).single()
+    return EmoticonCandidates.arrangeLive(merged, emoticons).candidates
 }
 
 /**
@@ -186,8 +196,8 @@ fun isAsciiOnly(chunk: String): Boolean = chunk.all { it.code < 0x80 }
 object UserDictionaryCandidates {
     /**
      * 明示変換の先頭文節の候補へ登録語を加える。読み全体に一致する語（確定すると読み全体を置き換える）と、
-     * 先頭文節の読みに一致する語を先頭に置く。読み全体に一致する語があれば、その最初の語を読み全体の
-     * 一文節として表示する。
+     * 先頭文節の読みに一致する語を先頭に置く。読み全体に一致する顔文字・絵文字でない語があれば、その最初の語を
+     * 読み全体の一文節として表示する。顔文字・絵文字は表示に使わないため、読み全体の一文節にはしない。
      */
     fun mergeExplicit(
         reading: String,
@@ -212,7 +222,8 @@ object UserDictionaryCandidates {
         val engine = conversion.headCandidates.filterNot { candidate ->
             registered.any { it.first == candidate.value && it.second == candidate.reading }
         }
-        val whole = user.firstOrNull { it.reading == reading }
+        val emoticons = EmoticonJudge(userDictionary, learningStore = null)
+        val whole = user.firstOrNull { it.reading == reading && !emoticons.isEmoticon(reading, it.value) }
         val segments = if (whole != null) {
             listOf(ConversionSegment(reading, whole.value, fromUserDictionary = true))
         } else {
@@ -266,7 +277,8 @@ fun mergeExactSurfaces(
 }
 
 /**
- * 明示変換の先頭文節の候補へ、IME側の学習語を合成する。表示（第一候補）は変えず、候補の並びだけを変える。
+ * 明示変換の先頭文節の候補へ、IME側の学習語を合成する。ここでは候補の並びだけを変え、学習語を表示にするかは
+ * 呼び出し側（ConversionWorkerの明示変換の統合）が決める。
  * 読み全体と先頭文節の読みに完全一致する学習語をエンジンの候補の前へ、前方一致する学習語（予測）を最後へ置く。
  * 学習語がエンジンの候補と同じ表記・読みなら、エンジンの候補を前へ移し、確定をエンジンへも学習させる。
  */

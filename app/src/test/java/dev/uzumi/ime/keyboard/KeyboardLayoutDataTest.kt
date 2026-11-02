@@ -23,6 +23,15 @@ class KeyboardLayoutDataTest {
         assertEquals("お", KeyboardLayoutData.getKanaChar(KanaKeyType.A, FlickDirection.DOWN))
     }
 
+    /** 同じキーの連続タップでは行の文字を順に切り替え、や行はフリックの括弧を含めない。 */
+    @Test
+    fun toggleCharsFollowRowOrder() {
+        assertEquals(listOf("あ", "い", "う", "え", "お"), KeyboardLayoutData.toggleChars(KanaKeyType.A))
+        assertEquals(listOf("や", "ゆ", "よ"), KeyboardLayoutData.toggleChars(KanaKeyType.YA))
+        assertEquals(listOf("わ", "を", "ん", "ー", "〜"), KeyboardLayoutData.toggleChars(KanaKeyType.WA))
+        assertEquals(listOf("、", "。", "？", "！", "…"), KeyboardLayoutData.toggleChars(KanaKeyType.PUNCT))
+    }
+
     @Test
     fun testKanaKeyKa() {
         assertEquals("か", KeyboardLayoutData.getKanaChar(KanaKeyType.KA, FlickDirection.CENTER))
@@ -205,6 +214,22 @@ class KeyboardLayoutDataTest {
     }
 
     @Test
+    fun spaceAndConvertHintsExplainCursorSwipeAndTalkBackActions() {
+        assertTrue(KeySpeech.spaceCursorDragHint(KeyboardAction.Space).contains("タップで空白"))
+        assertTrue(KeySpeech.spaceCursorDragHint(KeyboardAction.Convert).contains("タップで変換"))
+        assertEquals("カーソルを左へ移動", KeySpeech.actionDescription(KeyboardAction.MoveEditorCursor(-1)))
+        assertEquals("カーソルを右へ移動", KeySpeech.actionDescription(KeyboardAction.MoveEditorCursor(1)))
+    }
+
+    /** 顔文字・絵文字の一覧操作を読み上げ、選択値を操作名へ含めない。 */
+    @Test
+    fun emojiPickerActionsHavePrivacySafeDescriptions() {
+        assertEquals("絵文字・顔文字一覧を開く", KeySpeech.actionDescription(KeyboardAction.OpenEmojiPicker))
+        assertEquals("絵文字または顔文字を入力", KeySpeech.actionDescription(KeyboardAction.InsertEmoji("🔐")))
+        assertEquals("記号の一覧へ戻る", KeySpeech.actionDescription(KeyboardAction.CloseEmojiPicker))
+    }
+
+    @Test
     fun modeDescriptionsNameEveryMode() {
         val descriptions = KeyboardMode.entries.map(KeySpeech::modeSwitchDescription)
         assertEquals(KeyboardMode.entries.size, descriptions.toSet().size)
@@ -293,6 +318,13 @@ class KeyboardLayoutDataTest {
             assertTrue(Math.abs(prefs.rowHeightDp * 4 - prefs.qwertyRowHeightDp * 5) < 2f)
             assertTrue("タップ領域が48dp未満: $height", prefs.rowHeightDp >= 48f)
         }
+        assertEquals(52, KeyboardPreferences.normalizeRowHeightDp(1))
+        assertEquals(66, KeyboardPreferences.normalizeRowHeightDp(66))
+        assertEquals(96, KeyboardPreferences.normalizeRowHeightDp(120))
+        listOf(52, 66, 84, 96).forEach { heightDp ->
+            val prefs = KeyboardPreferences(rowHeightDp = heightDp.toFloat())
+            assertTrue(Math.abs(prefs.rowHeightDp * 4 - prefs.qwertyRowHeightDp * 5) < 2f)
+        }
     }
 
     @Test
@@ -362,5 +394,122 @@ class KeyboardLayoutDataTest {
         }
         val (high, low) = listOf(luminance(a), luminance(b)).sortedDescending()
         return (high + 0.05) / (low + 0.05)
+    }
+
+    /** ローマ字かな入力の欄では、かな → ローマ字 → 英字 → かなの順に切り替わり、空白キーに今の層が出る。 */
+    @Test
+    fun qwertyLayerCyclesKanaRomajiEnglishWhenEnglishIncluded() {
+        val layer = QwertyLayerState()
+        layer.configure(romajiInput = true, includesEnglish = true)
+
+        layer.enterFrom(KeyboardMode.KANA)
+        assertTrue(layer.isRomaji)
+        assertEquals("ローマ字", layer.spaceLabel)
+        assertEquals(KeyboardMode.QWERTY to "ABC", layer.cycleTarget to layer.cycleLabel)
+
+        layer.enterFrom(KeyboardMode.QWERTY)
+        assertFalse(layer.isRomaji)
+        assertEquals("English", layer.spaceLabel)
+        assertEquals(KeyboardMode.KANA to "あ", layer.cycleTarget to layer.cycleLabel)
+
+        // かなへ戻ってから「あA」で入ると、再びローマ字の層から始まる
+        layer.enterFrom(KeyboardMode.KANA)
+        assertTrue(layer.isRomaji)
+        // 記号・数字面の「ABC」は英字の層へ入る
+        layer.enterFrom(KeyboardMode.SYMBOL)
+        assertFalse(layer.isRomaji)
+    }
+
+    /** 英字の層を含めない設定では、英字配列は常にローマ字の層で、左下キーはかなへ戻る。 */
+    @Test
+    fun qwertyLayerStaysRomajiWhenEnglishExcluded() {
+        val layer = QwertyLayerState()
+        layer.configure(romajiInput = true, includesEnglish = true)
+        layer.enterFrom(KeyboardMode.NUMERIC)
+        assertFalse(layer.isRomaji)
+
+        layer.configure(romajiInput = true, includesEnglish = false)
+        assertTrue(layer.isRomaji)
+        layer.enterFrom(KeyboardMode.SYMBOL)
+        assertTrue(layer.isRomaji)
+        assertEquals(KeyboardMode.KANA to "あ", layer.cycleTarget to layer.cycleLabel)
+        assertEquals("ローマ字", layer.spaceLabel)
+    }
+
+    /** ローマ字かな入力を使わない欄では従来どおり、英字配列は英字で、左下キーは「あ」でかなへ戻る。 */
+    @Test
+    fun qwertyLayerWithoutRomajiKeepsPreviousSwitch() {
+        val layer = QwertyLayerState()
+        layer.configure(romajiInput = false, includesEnglish = true)
+        layer.enterFrom(KeyboardMode.KANA)
+        assertFalse(layer.isRomaji)
+        assertEquals(KeyboardMode.KANA to "あ", layer.cycleTarget to layer.cycleLabel)
+        assertEquals("space", layer.spaceLabel)
+    }
+
+    @Test
+    fun autoCapsShiftsOneLetterAndYieldsToManualShift() {
+        // 文頭で自動のShiftが入り、1文字打つと解除される
+        val state = QwertyShiftState()
+        assertTrue(state.applyAutoCaps(shift = true, characters = false))
+        assertTrue(state.isShiftActive)
+        assertTrue(state.onTextInput())
+        assertFalse(state.isShiftActive)
+        // 文の途中では自動のShiftを外すが、手動のShiftは残す
+        state.toggle(nowMillis = 0L)
+        assertFalse(state.applyAutoCaps(shift = false, characters = false))
+        assertTrue(state.isShiftActive)
+        state.onTextInput()
+        assertFalse(state.isShiftActive)
+    }
+
+    @Test
+    fun autoCapsCharactersKeepsShiftAndCapsLockWins() {
+        // すべて大文字の欄では、1文字打っても自動のShiftを続ける
+        val state = QwertyShiftState()
+        state.applyAutoCaps(shift = true, characters = true)
+        assertFalse(state.onTextInput())
+        assertTrue(state.isShiftActive)
+        // Caps Lockは自動大文字化の有無に関係なく続く
+        val locked = QwertyShiftState()
+        locked.toggle(nowMillis = 1_000L)
+        locked.toggle(nowMillis = 1_100L)
+        assertTrue(locked.isCapsLock)
+        locked.applyAutoCaps(shift = false, characters = false)
+        locked.onTextInput()
+        assertTrue(locked.isCapsLock)
+    }
+
+    @Test
+    fun shiftKeyCancelsAutoShiftWithoutTurningShiftOn() {
+        // 自動のShiftだけが入っている間にShiftを押すと、小文字に戻す
+        val state = QwertyShiftState()
+        state.applyAutoCaps(shift = true, characters = false)
+        state.toggle(nowMillis = 0L)
+        assertFalse(state.isShiftActive)
+        assertFalse(state.isCapsLock)
+        // 自動のShiftを取り消した押下から素早く続けて押すと、Caps Lockになり「ab」が「AB」になる
+        val doubled = QwertyShiftState()
+        doubled.applyAutoCaps(shift = true, characters = false)
+        doubled.toggle(nowMillis = 1_000L)
+        doubled.toggle(nowMillis = 1_200L)
+        assertTrue(doubled.isCapsLock)
+        doubled.onTextInput()
+        doubled.applyAutoCaps(shift = false, characters = false)
+        doubled.onTextInput()
+        assertTrue(doubled.isCapsLock)
+        // 間を空けて押した場合は、通常のShiftになる
+        val slow = QwertyShiftState()
+        slow.applyAutoCaps(shift = true, characters = false)
+        slow.toggle(nowMillis = 1_000L)
+        slow.toggle(nowMillis = 2_000L)
+        assertFalse(slow.isCapsLock)
+        assertTrue(slow.isShiftActive)
+        // 自動大文字化を求めない欄では、従来どおり押すたびにShiftを切り替える
+        val manual = QwertyShiftState()
+        manual.toggle(nowMillis = 0L)
+        assertTrue(manual.isShiftActive)
+        manual.toggle(nowMillis = 1_000L)
+        assertFalse(manual.isShiftActive)
     }
 }

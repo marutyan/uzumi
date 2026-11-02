@@ -116,6 +116,16 @@ class KeyView(context: Context) : View(context) {
         escapePx = DELETE_DRAG_ESCAPE_DP * density,
     )
 
+    // 空白・変換キーの横移動を、タップと区別して書記素単位の実カーソル移動にする。
+    private val spaceCursorDrag = SpaceCursorDragTracker(
+        startThresholdPx = SPACE_CURSOR_DRAG_THRESHOLD_DP * density,
+        stepPx = SPACE_CURSOR_DRAG_STEP_DP * density,
+    )
+    private var cursorDragActionSent = false
+
+    // 同じキーボードの全キーで共有する押下順。後から押したキーより先に、古い文字キーを確定するために使う。
+    private var pressOrder: KeyPressOrder<KeyView>? = null
+
     // 設定画面で選んだ反応。振動・キー音・削除の左ドラッグを使うか。
     private var vibrationEnabled = true
     private var keySoundEnabled = false
@@ -219,6 +229,11 @@ class KeyView(context: Context) : View(context) {
         }
     }
 
+    /** キーボード全体で共有する押下順を設定する。設定しなければキーごとに離した順で確定する。 */
+    fun setPressOrder(order: KeyPressOrder<KeyView>) {
+        pressOrder = order
+    }
+
     /**
      * 設定画面で選んだ振動・キー音・削除の左ドラッグの有無を反映する。
      */
@@ -271,8 +286,11 @@ class KeyView(context: Context) : View(context) {
      * 保留中のタッチ入力、長押し、連続実行を直ちに中断する。
      */
     fun cancelPendingInput() {
+        pressOrder?.release(this)
         repeatHandler.removeCallbacksAndMessages(null)
         removeCallbacks(longPressRunnable)
+        spaceCursorDrag.reset()
+        cursorDragActionSent = false
         if (gesture.isPressed) onPreview?.invoke(this, null)
         if (deleteDrag.state != DeleteDragState.NONE) onDeleteDrag?.invoke(this, DeleteDragState.NONE)
         deleteDrag.reset()
@@ -312,6 +330,22 @@ class KeyView(context: Context) : View(context) {
      */
     private fun isDeleteKey(): Boolean = (spec as? KeySpec.Action)?.action == KeyboardAction.Delete
 
+    /** 空白または変換キーとして短押しし、横ドラッグでは実カーソルを動かすキーか。 */
+    private fun supportsSpaceCursorDrag(action: KeyboardAction): Boolean =
+        action == KeyboardAction.Space || action == KeyboardAction.Convert
+
+    /** ジェスチャーの差分を一書記素ずつIMEへ送り、同じドラッグの続きは評価で重ねて数えない。 */
+    private fun dispatchCursorDrag(delta: Int) {
+        if (delta == 0) return
+        val direction = if (delta < 0) -1 else 1
+        repeat(kotlin.math.abs(delta)) {
+            if (!gesture.isPressed || activePointerId == MotionEvent.INVALID_POINTER_ID) return
+            val action = KeyboardAction.MoveEditorCursor(direction, continued = cursorDragActionSent)
+            cursorDragActionSent = true
+            onAction?.invoke(action)
+        }
+    }
+
     /** 押下中に連続実行するアクションキーであれば、そのアクションを返す。長押しの別操作を持つキーは連続実行しない。 */
     private fun repeatableAction(): KeyboardAction? {
         val currentSpec = spec as? KeySpec.Action ?: return null
@@ -343,8 +377,16 @@ class KeyView(context: Context) : View(context) {
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                // 別のキーを押したままの指があれば、このキーの処理より先にその文字を確定して押した順を保つ。
+                pressOrder?.press(this, isModifier = spec is KeySpec.Shift, isTextKey = KeyView::isTextKeyPressed)
+                    ?.forEach(KeyView::commitBeforeNewerKey)
                 activePointerId = event.getPointerId(0)
                 gesture.down(event.x, event.y)
+                spaceCursorDrag.reset()
+                cursorDragActionSent = false
+                (spec as? KeySpec.Action)?.action
+                    ?.takeIf(::supportsSpaceCursorDrag)
+                    ?.let { spaceCursorDrag.down(event.x, event.y) }
                 currentDirection = FlickDirection.CENTER
                 haptic(HapticFeedbackConstants.KEYBOARD_TAP)
                 playKeySound()
@@ -375,18 +417,24 @@ class KeyView(context: Context) : View(context) {
             }
 
             MotionEvent.ACTION_POINTER_DOWN -> {
-                // すでにアクティブポインタを追跡中の場合は別の指を無視する
+                // 空白・変換キーは2本目の指で取り消し、ポインタ交代後に意図しないタップを送らない。
+                if (spaceCursorDrag.isTracking) cancelPendingInput()
+                // それ以外は、追跡中に触れた別の指を無視する。
                 return true
             }
 
             MotionEvent.ACTION_MOVE -> {
                 if (activePointerId == MotionEvent.INVALID_POINTER_ID) return false
                 val pointerIndex = event.findPointerIndex(activePointerId)
-                if (pointerIndex == -1) return false
+                if (pointerIndex == -1) {
+                    cancelPendingInput()
+                    return true
+                }
 
                 val curX = event.getX(pointerIndex)
                 val curY = event.getY(pointerIndex)
                 gesture.move(curX, curY)
+                if (spaceCursorDrag.isTracking) dispatchCursorDrag(spaceCursorDrag.move(curX, curY))
                 if (gesture.hasMovedBeyondSlop) {
                     removeCallbacks(longPressRunnable)
                 }
@@ -418,8 +466,13 @@ class KeyView(context: Context) : View(context) {
                 val actionIndex = event.actionIndex
                 val pointerId = event.getPointerId(actionIndex)
                 if (pointerId == activePointerId) {
-                    // アクティブポインタが離脱した場合、そのポインタの座標で入力を確定
-                    handleActivePointerUp(event, actionIndex)
+                    if (spaceCursorDrag.isTracking) {
+                        // アクティブポインタの交代では空白・変換を送らず、既に動かしたカーソルだけを残す。
+                        cancelPendingInput()
+                    } else {
+                        // アクティブポインタが離脱した場合、そのポインタの座標で入力を確定
+                        handleActivePointerUp(event.getX(actionIndex), event.getY(actionIndex))
+                    }
                 }
                 return true
             }
@@ -428,7 +481,7 @@ class KeyView(context: Context) : View(context) {
                 val actionIndex = event.actionIndex
                 val pointerId = event.getPointerId(actionIndex)
                 if (pointerId == activePointerId) {
-                    handleActivePointerUp(event, actionIndex)
+                    handleActivePointerUp(event.getX(actionIndex), event.getY(actionIndex))
                 } else {
                     // 別ポインタのUPでは確定せず、安全にリセット
                     cancelPendingInput()
@@ -445,16 +498,46 @@ class KeyView(context: Context) : View(context) {
         }
     }
 
+    /** 文字を入力するキー（文字・かな）が押下中かどうか。後から押したキーより先に確定する対象を選ぶ。 */
+    private fun isTextKeyPressed(): Boolean =
+        gesture.isPressed && (spec is KeySpec.SimpleText || spec is KeySpec.Kana)
+
+    /**
+     * 後から別のキーが押されたため、指を離す前に最後の指の位置で文字を確定する。フリック中のかなキーは
+     * その時点の向きの文字、長押し成立後は長押し文字を入力する。この指が後で離れても何も送らない。
+     */
+    private fun commitBeforeNewerKey() {
+        if (!isTextKeyPressed()) return
+        handleActivePointerUp(gesture.lastX, gesture.lastY)
+    }
+
     /**
      * アクティブポインタの離脱時に文字確定またはアクション実行を行う。
      *
      * 高速なDOWN→UPでMOVEイベントが届かない場合でもUP座標から方向を再計算し、
      * タッチ経路ではperformClickによる重複送信を防ぎつつAccessibilityEventを通知する。
+     *
+     * @param upX 指を離した位置のX座標（キー内の座標）
+     * @param upY 指を離した位置のY座標（キー内の座標）
      */
-    private fun handleActivePointerUp(event: MotionEvent, pointerIndex: Int) {
+    private fun handleActivePointerUp(upX: Float, upY: Float) {
+        pressOrder?.release(this)
         repeatHandler.removeCallbacksAndMessages(null)
         removeCallbacks(longPressRunnable)
         onPreview?.invoke(this, null)
+        val finalSpecBeforeRelease = spec
+        val cursorDragDelta = if (
+            finalSpecBeforeRelease is KeySpec.Action &&
+            supportsSpaceCursorDrag(finalSpecBeforeRelease.action) &&
+            spaceCursorDrag.isTracking
+        ) {
+            spaceCursorDrag.move(upX, upY)
+        } else {
+            0
+        }
+        val cursorDragWasActive = spaceCursorDrag.hasDragged
+        dispatchCursorDrag(cursorDragDelta)
+        spaceCursorDrag.finish()
         val wasPressed = gesture.isPressed
         val wasLongPressed = gesture.isLongPressActive
         val deleteRelease = deleteDrag.release()
@@ -474,8 +557,6 @@ class KeyView(context: Context) : View(context) {
 
         if (!wasPressed || finalSpec == null) return
 
-        val upX = event.getX(pointerIndex)
-        val upY = event.getY(pointerIndex)
         val isInside = upX in 0f..width.toFloat() && upY in 0f..height.toFloat()
 
         when (finalSpec) {
@@ -484,7 +565,11 @@ class KeyView(context: Context) : View(context) {
                 val finalDirection = determineFlickDirection(upX - startX, upY - startY, thresholdPx)
                 val char = KeyboardLayoutData.getKanaChar(finalSpec.type, finalDirection)
                 if (char.isNotEmpty()) {
-                    onAction?.invoke(KeyboardAction.Text(char))
+                    onAction?.invoke(if (finalDirection == FlickDirection.CENTER) {
+                        KeyboardAction.KanaTap(finalSpec.type)
+                    } else {
+                        KeyboardAction.Text(char)
+                    })
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                 }
             }
@@ -502,7 +587,13 @@ class KeyView(context: Context) : View(context) {
                 }
             }
 
-            is KeySpec.Action -> if (finalSpec.action == KeyboardAction.Delete) {
+            is KeySpec.Action -> if (supportsSpaceCursorDrag(finalSpec.action)) {
+                // 横ドラッグが始まった後は開始点へ戻して離しても空白・変換を送らない。
+                if (shouldSendSpaceCursorKeyTap(isInside, cursorDragWasActive)) {
+                    onAction?.invoke(finalSpec.action)
+                    sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
+                }
+            } else if (finalSpec.action == KeyboardAction.Delete) {
                 // 左ドラッグはキーの外で離すことが多いため、キー内かどうかより先に判定する
                 val action = when (deleteRelease) {
                     DeleteRelease.TAP -> KeyboardAction.Delete.takeIf { isInside && !deleteRepeated }
@@ -563,7 +654,7 @@ class KeyView(context: Context) : View(context) {
             is KeySpec.Kana -> {
                 val char = KeyboardLayoutData.getKanaChar(currentSpec.type, FlickDirection.CENTER)
                 if (char.isNotEmpty()) {
-                    onAction?.invoke(KeyboardAction.Text(char))
+                    onAction?.invoke(KeyboardAction.KanaTap(currentSpec.type))
                     haptic(HapticFeedbackConstants.KEYBOARD_TAP)
                 }
             }
@@ -626,9 +717,14 @@ class KeyView(context: Context) : View(context) {
                 )
             }
 
-            is KeySpec.Action -> if (currentSpec.action == KeyboardAction.Delete) {
-                info.addAction(AccessibilityNodeInfo.AccessibilityAction(ACTION_DELETE_TO_LINE_START, "行頭まで削除"))
-            } else {
+            is KeySpec.Action -> {
+                if (currentSpec.action == KeyboardAction.Delete) {
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction(ACTION_DELETE_TO_LINE_START, "行頭まで削除"))
+                }
+                if (supportsSpaceCursorDrag(currentSpec.action)) {
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction(ACTION_CURSOR_LEFT, "カーソルを左へ移動"))
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction(ACTION_CURSOR_RIGHT, "カーソルを右へ移動"))
+                }
                 // 長押しの別操作（文節の伸縮）を、TalkBackの操作メニューから一回ずつ行えるようにする
                 currentSpec.longPressAction?.let { alt ->
                     info.addAction(
@@ -684,6 +780,19 @@ class KeyView(context: Context) : View(context) {
                     haptic(HapticFeedbackConstants.KEYBOARD_TAP)
                     sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
                     return true
+                }
+                if (supportsSpaceCursorDrag(currentSpec.action)) {
+                    val delta = when (action) {
+                        ACTION_CURSOR_LEFT -> -1
+                        ACTION_CURSOR_RIGHT -> 1
+                        else -> 0
+                    }
+                    if (delta != 0) {
+                        onAction?.invoke(KeyboardAction.MoveEditorCursor(delta))
+                        haptic(HapticFeedbackConstants.KEYBOARD_TAP)
+                        sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED)
+                        return true
+                    }
                 }
                 val alt = currentSpec.longPressAction
                 if (action == AccessibilityNodeInfo.ACTION_LONG_CLICK && alt != null) {
@@ -881,7 +990,11 @@ class KeyView(context: Context) : View(context) {
         is KeySpec.Kana -> KeySpeech.kanaHint(currentSpec.type)
         is KeySpec.SimpleText -> currentSpec.longPressText?.let(KeySpeech::longPressHint)
         is KeySpec.ModeSwitch -> currentSpec.longPressTarget?.let { "長押しで" + KeySpeech.modeSwitchDescription(it) }
-        is KeySpec.Action -> currentSpec.longPressAction?.let { "長押しで" + KeySpeech.actionDescription(it) }
+        is KeySpec.Action -> when {
+            supportsSpaceCursorDrag(currentSpec.action) -> KeySpeech.spaceCursorDragHint(currentSpec.action)
+            currentSpec.longPressAction != null -> "長押しで" + KeySpeech.actionDescription(currentSpec.longPressAction)
+            else -> null
+        }
         else -> null
     }
 
@@ -927,8 +1040,16 @@ class KeyView(context: Context) : View(context) {
         /** 削除キーの操作メニューに出す「行頭まで削除」のID。左ドラッグと同じ操作をTalkBackから行う。 */
         const val ACTION_DELETE_TO_LINE_START = 0x01000006
 
+        /** 空白・変換キーのTalkBack操作メニューから実カーソルを動かすID。 */
+        const val ACTION_CURSOR_LEFT = 0x01000007
+        const val ACTION_CURSOR_RIGHT = 0x01000008
+
         /** 削除キーをこの距離（dp）以上左へ動かして離すと行頭まで消す。 */
         private const val DELETE_DRAG_THRESHOLD_DP = 68f
+
+        /** 空白・変換キーの横ドラッグを始める距離と、以後1書記素動く距離。 */
+        private const val SPACE_CURSOR_DRAG_THRESHOLD_DP = 18f
+        private const val SPACE_CURSOR_DRAG_STEP_DP = 24f
 
         /** 削除キーを押した位置からこの距離（dp）以上上へ動かすと、左ドラッグを取り消す。 */
         private const val DELETE_DRAG_ESCAPE_DP = 60f

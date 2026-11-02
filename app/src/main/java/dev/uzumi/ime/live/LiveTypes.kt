@@ -117,6 +117,8 @@ data class ConversionRequest(
     val targetReading: String,
     /** falseなら変換器は学習・履歴・文脈保存を行わない（Mozcではincognito相当）。 */
     val learningAllowed: Boolean,
+    /** 読みが12キーだけで入力されたか。trueなら小書き・濁点・半濁点の打ち分けを区別しない変換を使う。 */
+    val kanaModifierInsensitive: Boolean = false,
 )
 
 /**
@@ -267,6 +269,8 @@ data class CandidateRequest(
     val following: String,
     /** falseなら変換器は学習・履歴を使わない。 */
     val learningAllowed: Boolean,
+    /** 読みが12キーだけで入力されたか。trueなら小書き・濁点・半濁点の打ち分けを区別しない変換を使う。 */
+    val kanaModifierInsensitive: Boolean = false,
 )
 
 /** [CandidateRequest]への結果。candidatesは対象segmentの読みだけを置き換える候補で、先頭ほど優先する。 */

@@ -20,14 +20,21 @@ class CandidateBarViews(private val context: Context) {
     private val density = context.resources.displayMetrics.density
 
     /** 候補一つ。選択中の候補は背景色で示す。 */
-    fun item(text: String, selected: Boolean, onClick: () -> Unit): TextView = TextView(context).apply {
+    fun item(text: String, selected: Boolean, prediction: Boolean = false, onClick: () -> Unit): TextView = TextView(context).apply {
         this.text = text
         setTextSize(TypedValue.COMPLEX_UNIT_DIP, CANDIDATE_TEXT_DP)
         setTextColor(colors.text)
         gravity = Gravity.CENTER
         setPadding(px(12f), 0, px(12f), 0)
         minWidth = px(MIN_TOUCH_DP)
-        if (selected) setBackgroundColor(colors.keyActive)
+        when {
+            selected -> setBackgroundColor(colors.keyActive)
+            // 予測は選ぶとすぐ確定するため、強調色を薄く敷いて、選ぶだけの通常候補と見分けられるようにする。
+            prediction -> background = GradientDrawable().apply {
+                cornerRadius = px(PREDICTION_CORNER_DP).toFloat()
+                setColor((PREDICTION_TINT_ALPHA shl 24) or (this@CandidateBarViews.colors.accent and 0x00FFFFFF))
+            }
+        }
         isClickable = true
         isFocusable = true
         setOnClickListener { onClick() }
@@ -105,6 +112,12 @@ class CandidateBarViews(private val context: Context) {
         /** 候補の文字の大きさ。 */
         private const val CANDIDATE_TEXT_DP = 16f
 
+        /** 予測の候補の背景に敷く強調色の不透明度（0〜255）。文字を読みやすく保つ薄さにする。 */
+        private const val PREDICTION_TINT_ALPHA = 0x33
+
+        /** 予測の候補の背景の角の丸み（dp）。 */
+        private const val PREDICTION_CORNER_DP = 8f
+
         /** 札の文字の大きさ。 */
         private const val CHIP_TEXT_DP = 14f
 
@@ -133,8 +146,14 @@ class CandidateGridView(context: Context) : ScrollView(context) {
         visibility = View.GONE
     }
 
-    /** 候補[values]を並べて表示する。[selected]番目を選択中として示し、押された候補の番号を[onPick]へ渡す。 */
-    fun show(values: List<String>, selected: Int, onPick: (Int) -> Unit) {
+    /** 候補[values]を並べ、[dividerIndex]の前に区切りを入れる。[selected]を示し、押された元indexを[onPick]へ渡す。 */
+    fun show(
+        values: List<String>,
+        selected: Int,
+        dividerIndex: Int? = null,
+        predictionIndexes: Set<Int> = emptySet(),
+        onPick: (Int) -> Unit,
+    ) {
         rows.removeAllViews()
         values.chunked(COLUMNS).forEachIndexed { rowIndex, chunk ->
             val row = LinearLayout(context).apply {
@@ -143,7 +162,8 @@ class CandidateGridView(context: Context) : ScrollView(context) {
             }
             chunk.forEachIndexed { column, value ->
                 val index = rowIndex * COLUMNS + column
-                row.addView(views.item(value, index == selected) { onPick(index) }.apply {
+                if (index == dividerIndex) row.addView(views.divider())
+                row.addView(views.item(value, index == selected, index in predictionIndexes) { onPick(index) }.apply {
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
                     maxLines = 1
                 })

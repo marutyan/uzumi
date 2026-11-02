@@ -2,17 +2,18 @@ package dev.uzumi.ime.keyboard
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.text.TextUtils
 import android.view.View
 import android.widget.LinearLayout
 
 /**
- * 日本語12キーフリック・英語QWERTY・数字・記号面のキーボードを提供するメインUIパネル。
+ * 日本語12キーフリック・英語QWERTY・数字・記号・顔文字・絵文字の入力面を提供するメインUIパネル。
  *
  * @param context コンテキスト
  * @param onAction キーボード操作イベントを通知するコールバック
  * @param lineDeleteLength 削除キーの左ドラッグで消える、カーソルから行頭までの文字数を返す。分からなければnull
  * @param preferences 設定画面で選んだ高さ・拡大表示・振動・キー音・削除の左ドラッグ
- * @param onPanelKey IMEへ操作を送らずパネルの中で完結するキー（面の切替、Shift、記号のページ）を押したときに呼ぶ。評価用の計数に使う
+ * @param onPanelKey IMEへ操作を送らずパネル内で完結する面・ページ・カテゴリ切替を押したときに呼ぶ。評価用の計数に使う
  */
 // 必須コールバックを伴うプログラム生成専用Viewであり、XMLからは生成しない。
 @SuppressLint("ViewConstructor")
@@ -28,20 +29,39 @@ class KeyboardPanel(
     private var currentMode = KeyboardMode.KANA
     private var lastNormalMode = KeyboardMode.KANA
 
-    private var isShifted = false
-    private var isCapsLock = false
-    private var lastShiftPressTime = 0L
+    // 英字配列のローマ字と英字の層。ローマ字かな入力の欄で、英字配列の左下キーの切替先と表示を決める。
+    private val qwertyLayer = QwertyLayerState()
+
+    /** 現在表示中の面がローマ字の層の英字QWERTYか。ローマ字変換の対象を英字の層や他の面から分ける。 */
+    val isRomajiQwertyMode: Boolean
+        get() = currentMode == KeyboardMode.QWERTY && qwertyLayer.isRomaji
+
+    /** 12キー（かな配列）を表示中か。小書き・濁点を区別しない変換は、この配列で入れた読みだけに使う。 */
+    val isKanaMode: Boolean
+        get() = currentMode == KeyboardMode.KANA
+
+    private val shiftState = QwertyShiftState()
+
+    // 入力欄が求める大文字化の種類。ローマ字の層では小文字がかなになるため使わず、英字の層へ移ったときに改めて当てる。
+    private var requestedAutoCapsMode = 0
 
     private var actionLabel = "確定"
     private var isNumericField = false
     private var isPasswordField = false
 
     private val allKeyViews = mutableListOf<KeyView>()
+
+    // 全キーで共有する押下順。二本指で続けて打っても押した順に文字を確定するために使う。
+    private val pressOrder = KeyPressOrder<KeyView>()
     private val enterKeyViews = mutableListOf<KeyView>()
     private val qwertyKeyViews = mutableListOf<KeyView>()
     private val shiftKeyViews = mutableListOf<KeyView>()
 
     private var numericSwitchKey: KeyView? = null
+
+    // 英字配列の左下の切替キー（ローマ字の層では英字の層へ、それ以外はかなへ）と、今の層を示す空白キー。
+    private var qwertyCycleKeyView: KeyView? = null
+    private var qwertySpaceKeyView: KeyView? = null
 
     // 入力中かどうかで役割が変わる12キーのキー。「123」と「カナ」、「空白」と「変換」を切り替える。
     private var kanaNumberKeyView: KeyView? = null
@@ -58,6 +78,10 @@ class KeyboardPanel(
     // 記号面で表示中のページ番号。KeyboardLayoutData.SYMBOL_PAGESの添字。
     private var symbolPageIndex = 0
     private val symbolPageContainers = mutableListOf<LinearLayout>()
+    private var symbolBottomRow: LinearLayout? = null
+    private var emojiPickerView: EmojiPickerView? = null
+    private var emojiPickerBottomRow: LinearLayout? = null
+    private var emojiPickerVisible = false
 
     // 押したキーの拡大表示。password欄では入力した文字を画面に大きく出さないため使わない。
     private val keyPreview = KeyPreviewPopup(this, KeyboardColors.from(context))
@@ -104,6 +128,15 @@ class KeyboardPanel(
     }
 
     /**
+     * この欄で英字配列のローマ字かな入力を使うか（[romajiInput]）と、配列切替に英字の層を含めるか（[includesEnglish]）を
+     * 受け取り、英字配列の切替キーと空白キーの表示を合わせる。IMEは入力欄の開始と表示のたびに呼ぶ。
+     */
+    fun setRomajiInput(romajiInput: Boolean, includesEnglish: Boolean) {
+        qwertyLayer.configure(romajiInput, includesEnglish)
+        updateQwertyLayerKeys()
+    }
+
+    /**
      * Enter/確定キーのアクションラベルを設定する（例: "検索", "改行", "確定", "次へ" など）。
      *
      * @param label 設定する文言
@@ -122,6 +155,25 @@ class KeyboardPanel(
         isComposing = composing
         kanaNumberKeyView?.replaceSpec(KeyboardLayoutData.kanaNumberKey(composing))
         kanaSpaceKeyView?.replaceSpec(KeyboardLayoutData.kanaSpaceKey(composing))
+    }
+
+    /**
+     * 入力欄がカーソル位置に求める大文字化の種類（InputConnection.getCursorCapsModeの値。0なら求めない）を受け取り、
+     * 英字配列のShiftを自動で切り替える。IMEは入力開始時とカーソル位置が変わるたびに呼ぶ。
+     */
+    fun setAutoCapsMode(capsMode: Int) {
+        requestedAutoCapsMode = capsMode
+        applyAutoCaps()
+    }
+
+    /** 欄が求める大文字化を、ローマ字の層以外の英字配列へ当てる。ローマ字の層ではGboardと同じく自動大文字化しない。 */
+    private fun applyAutoCaps() {
+        val capsMode = if (qwertyLayer.isRomaji) 0 else requestedAutoCapsMode
+        val changed = shiftState.applyAutoCaps(
+            shift = capsMode != 0,
+            characters = capsMode and TextUtils.CAP_MODE_CHARACTERS != 0,
+        )
+        if (changed) updateQwertyShiftViews()
     }
 
     /**
@@ -191,7 +243,11 @@ class KeyboardPanel(
             mode
         }
 
+        if (resolvedMode != KeyboardMode.SYMBOL || currentMode != KeyboardMode.SYMBOL) hideEmojiPicker()
+
         currentMode = resolvedMode
+        updateQwertyLayerKeys()
+        applyAutoCaps()
         if (!isNumericField && !isPasswordField && (resolvedMode == KeyboardMode.KANA || resolvedMode == KeyboardMode.QWERTY)) {
             lastNormalMode = resolvedMode
         }
@@ -209,6 +265,12 @@ class KeyboardPanel(
         }
         val kanaKeyVisibility = if (isPasswordField) View.GONE else View.VISIBLE
         kanaSwitchKeyViews.forEach { it.visibility = kanaKeyVisibility }
+    }
+
+    /** 英字配列の左下キーの行き先と表示、空白キーの層の表示を、今の層へ合わせる。 */
+    private fun updateQwertyLayerKeys() {
+        qwertyCycleKeyView?.updateModeSwitch(qwertyLayer.cycleLabel, qwertyLayer.cycleTarget)
+        qwertySpaceKeyView?.replaceSpec(KeySpec.Action(KeyboardAction.Space, qwertyLayer.spaceLabel))
     }
 
     /**
@@ -235,8 +297,69 @@ class KeyboardPanel(
      */
     private fun updateSymbolPageVisibility() {
         symbolPageContainers.forEachIndexed { index, page ->
-            page.visibility = if (index == symbolPageIndex) View.VISIBLE else View.GONE
+            page.visibility = if (!emojiPickerVisible && index == symbolPageIndex) View.VISIBLE else View.GONE
         }
+    }
+
+    /** 記号面から一覧を開き、初回だけMozcデータを読み込んで最近タブを表示する。 */
+    fun showEmojiPicker(recentValues: List<String>) {
+        cancelPendingInput()
+        if (emojiPickerView == null) {
+            val picker = EmojiPickerView(
+                context = context,
+                catalog = EmojiPickerCatalogLoader.load(context),
+                rowHeightPx = rowHeightPx(preferences.rowHeightDp),
+                recentValues = recentValues,
+                onSelect = { dispatchAction(KeyboardAction.InsertEmoji(it)) },
+                onPanelKey = onPanelKey,
+            )
+            val bottomRow = buildEmojiPickerBottomRow()
+            emojiPickerView = picker
+            emojiPickerBottomRow = bottomRow
+            symbolContainer.addView(picker, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+            // 下段はcreateRowで1段分の高さを持つ。WRAP_CONTENTで上書きすると、親いっぱいに広がるキーに合わせて画面全体まで伸びる。
+            symbolContainer.addView(bottomRow)
+        } else {
+            emojiPickerView?.setRecentValues(recentValues)
+            emojiPickerView?.showRecent()
+        }
+        emojiPickerVisible = true
+        symbolPageContainers.forEach { it.visibility = View.GONE }
+        symbolBottomRow?.visibility = View.GONE
+        emojiPickerView?.visibility = View.VISIBLE
+        emojiPickerBottomRow?.visibility = View.VISIBLE
+    }
+
+    /** 入力が成功した履歴を一覧へ渡し、最近タブの表示を同期する。 */
+    fun setRecentEmojiValues(values: List<String>) {
+        emojiPickerView?.setRecentValues(values)
+    }
+
+    /** 顔文字・絵文字一覧を閉じ、直前の記号ページへ戻る。 */
+    fun hideEmojiPicker() {
+        cancelPendingInput()
+        emojiPickerVisible = false
+        emojiPickerView?.visibility = View.GONE
+        emojiPickerBottomRow?.visibility = View.GONE
+        symbolBottomRow?.visibility = View.VISIBLE
+        updateSymbolPageVisibility()
+    }
+
+    /** 一覧用の下段を作り、記号面へ戻るキー、既存の入力面切替、削除キーを配置する。 */
+    private fun buildEmojiPickerBottomRow(): LinearLayout {
+        val row = createRow(rowHeightPx(preferences.rowHeightDp))
+        row.addView(createKey(KeySpec.Action(KeyboardAction.CloseEmojiPicker, "記号"), 1.4f))
+        val kanaKey = createKey(KeySpec.ModeSwitch("あ", KeyboardMode.KANA), 1.0f)
+        kanaSwitchKeyViews.add(kanaKey)
+        row.addView(kanaKey)
+        row.addView(createKey(KeySpec.ModeSwitch("ABC", KeyboardMode.QWERTY), 1.0f))
+        row.addView(createKey(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), 1.0f))
+        row.addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 2.0f))
+        row.addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.0f))
+        val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 2.6f)
+        enterKeyViews.add(enterKey)
+        row.addView(enterKey)
+        return row
     }
 
     /**
@@ -244,31 +367,14 @@ class KeyboardPanel(
      */
     private fun dispatchAction(action: KeyboardAction) {
         onAction(action)
-        if (action is KeyboardAction.Text && isShifted && !isCapsLock) {
-            isShifted = false
-            updateQwertyShiftViews()
-        }
+        if (action is KeyboardAction.Text && shiftState.onTextInput()) updateQwertyShiftViews()
     }
 
     /**
      * Shiftキーの押下（単押し: Shiftトグル、素早いダブルタップ: Caps Lockトグル）。
      */
     private fun toggleShift() {
-        val now = System.currentTimeMillis()
-        if (isCapsLock) {
-            isCapsLock = false
-            isShifted = false
-        } else if (isShifted) {
-            if (now - lastShiftPressTime < DOUBLE_TAP_TIMEOUT_MS) {
-                isCapsLock = true
-                isShifted = false
-            } else {
-                isShifted = false
-            }
-        } else {
-            isShifted = true
-        }
-        lastShiftPressTime = now
+        shiftState.toggle(System.currentTimeMillis())
         updateQwertyShiftViews()
     }
 
@@ -278,8 +384,10 @@ class KeyboardPanel(
      * パネル全体における英語入力状態の視覚的一貫性を保つ役割を担う。
      */
     private fun updateQwertyShiftViews() {
-        qwertyKeyViews.forEach { it.updateShiftState(isShifted, isCapsLock) }
-        shiftKeyViews.forEach { it.updateShiftState(isShifted, isCapsLock) }
+        val shifted = shiftState.isShiftActive
+        val capsLock = shiftState.isCapsLock
+        qwertyKeyViews.forEach { it.updateShiftState(shifted, capsLock) }
+        shiftKeyViews.forEach { it.updateShiftState(shifted, capsLock) }
     }
 
     /**
@@ -378,16 +486,19 @@ class KeyboardPanel(
         row3.addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.5f))
         container.addView(row3)
 
-        // Row 4: [あ] [Shift] [,] [Space] [.] [←] [→] [Enter]
+        // Row 4: [あ / ローマ字の層ではABC] [Shift] [,] [Space（層の名前）] [.] [←] [→] [Enter]
         val row4 = createRow(rowHeight)
-        val kanaKey = createKey(KeySpec.ModeSwitch("あ", KeyboardMode.KANA), 1.5f)
+        val kanaKey = createKey(KeySpec.ModeSwitch(qwertyLayer.cycleLabel, qwertyLayer.cycleTarget), 1.5f)
         kanaSwitchKeyViews.add(kanaKey)
+        qwertyCycleKeyView = kanaKey
         row4.addView(kanaKey)
         val shiftKey = createKey(KeySpec.Shift("⇧"), 1f)
         shiftKeyViews.add(shiftKey)
         row4.addView(shiftKey)
         row4.addView(createKey(KeySpec.SimpleText(","), 1f))
-        row4.addView(createKey(KeySpec.Action(KeyboardAction.Space, "space"), 2f))
+        val spaceKey = createKey(KeySpec.Action(KeyboardAction.Space, qwertyLayer.spaceLabel), 2f)
+        qwertySpaceKeyView = spaceKey
+        row4.addView(spaceKey)
         row4.addView(createKey(KeySpec.SimpleText("."), 1f))
         row4.addView(createArrowKey(-1))
         row4.addView(createArrowKey(1))
@@ -509,17 +620,19 @@ class KeyboardPanel(
         }
         updateSymbolPageVisibility()
 
-        // 最下段: [かな] [英字] [数字] [空白] [Enter]
+        // 最下段: [かな] [英字] [数字] [絵文字] [空白] [Enter]
         val bottomRow = createRow(rowHeight)
         val kanaKey = createKey(KeySpec.ModeSwitch("あ", KeyboardMode.KANA), 1.2f)
         kanaSwitchKeyViews.add(kanaKey)
         bottomRow.addView(kanaKey)
         bottomRow.addView(createKey(KeySpec.ModeSwitch("ABC", KeyboardMode.QWERTY), 1.2f))
         bottomRow.addView(createKey(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), 1.2f))
-        bottomRow.addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 3.9f))
-        val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 2.5f)
+        bottomRow.addView(createKey(KeySpec.Action(KeyboardAction.OpenEmojiPicker, "☺"), 1.2f))
+        bottomRow.addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 2.8f))
+        val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 2.4f)
         enterKeyViews.add(enterKey)
         bottomRow.addView(enterKey)
+        symbolBottomRow = bottomRow
         container.addView(bottomRow)
         return container
     }
@@ -567,6 +680,7 @@ class KeyboardPanel(
                     } else {
                         targetMode
                     }
+                    if (actualTarget == KeyboardMode.QWERTY) qwertyLayer.enterFrom(currentMode)
                     switchMode(actualTarget)
                 },
                 onShiftToggle = {
@@ -588,14 +702,144 @@ class KeyboardPanel(
             )
         }
         keyView.applyPreferences(preferences)
+        keyView.setPressOrder(pressOrder)
         allKeyViews.add(keyView)
         return keyView
     }
 
     companion object {
-        private const val DOUBLE_TAP_TIMEOUT_MS = 350L
-
         /** タップ領域の高さの下限（dp）。 */
         private const val MIN_TOUCH_DP = 48f
+    }
+}
+
+/**
+ * 英字配列の層の状態。ローマ字かな入力の欄では英字配列を「ローマ字（かなにする）」と「英字（そのまま）」の二つの層に分け、
+ * 切替の順を「かな → ローマ字 → 英字 → かな」にする（Gboardの「かな → 英字」の順に合わせ、ローマ字を間に置く）。
+ * Viewから切り離し、設定と欄の組み合わせで切替先が正しいかをJVMテストで守る。
+ */
+class QwertyLayerState {
+    // この欄で英字配列のローマ字かな入力を使うか。falseなら英字配列は常に英字で、従来どおり左下キーはかなへ戻る。
+    private var romajiInput = false
+
+    // 設定で、配列切替に英字の層を含めるか。falseならローマ字かな入力の欄の英字配列は常にローマ字の層。
+    private var includesEnglish = true
+
+    // 英字の層を表示中か。ローマ字かな入力の欄でだけ意味を持つ。
+    private var english = false
+
+    /** 英字配列で打った文字をローマ字としてかなにする層か。 */
+    val isRomaji: Boolean
+        get() = romajiInput && !english
+
+    /** 左下キーの行き先。ローマ字の層で英字の層を含むなら英字の層（同じ英字配列）、それ以外はかな。 */
+    val cycleTarget: KeyboardMode
+        get() = if (isRomaji && includesEnglish) KeyboardMode.QWERTY else KeyboardMode.KANA
+
+    /** 左下キーの表示。押すと移る先を示す（他の面の切替キーと同じ表し方）。 */
+    val cycleLabel: String
+        get() = if (cycleTarget == KeyboardMode.QWERTY) "ABC" else "あ"
+
+    /** 空白キーの表示。ローマ字かな入力の欄では今の層の名前を出し、どちらの層かを見分けられるようにする。 */
+    val spaceLabel: String
+        get() = when {
+            !romajiInput -> "space"
+            isRomaji -> "ローマ字"
+            else -> "English"
+        }
+
+    /** 入力欄ごとの可否と設定を反映する。英字の層を含めない設定なら、ローマ字の層へ戻す。 */
+    fun configure(romajiInput: Boolean, includesEnglish: Boolean) {
+        this.romajiInput = romajiInput
+        this.includesEnglish = includesEnglish
+        if (!includesEnglish) english = false
+    }
+
+    /**
+     * 利用者の切替キーで英字配列へ移るときに、どちらの層を出すかを決める。12キーの「あA」からはローマ字の層にし、
+     * 英字配列の左下キーと、記号・数字面の「ABC」からは、英字の層を含めるなら英字の層にする。
+     */
+    fun enterFrom(source: KeyboardMode) {
+        english = source != KeyboardMode.KANA && includesEnglish
+    }
+}
+
+/**
+ * 英字配列のShift状態。利用者が押したShift・Caps Lockと、入力欄の自動大文字化による一時的なShiftを分けて持ち、
+ * 手動の操作を優先する。Viewから切り離し、自動大文字化と手動操作の組み合わせをJVMテストで守る。
+ */
+class QwertyShiftState {
+    /** 利用者がShiftキーで有効にした、次の1文字だけの大文字化。 */
+    var isShifted = false
+        private set
+
+    /** 利用者がShiftキーの素早い2回押しで有効にしたCaps Lock。 */
+    var isCapsLock = false
+        private set
+
+    // 入力欄の自動大文字化による一時的なShift。手動のShiftとは別に持ち、カーソル位置が変わるたびに決め直す。
+    private var isAutoShifted = false
+
+    // 欄がすべて大文字を求めている（CAP_CHARACTERS）か。この間は1文字打っても自動のShiftを解除しない。
+    private var isAutoCharacters = false
+
+    private var lastShiftPressTime = 0L
+
+    // 直前のShiftの押下が自動のShiftを取り消したか。続けて素早く押した場合もCaps Lockにするために使う。
+    private var lastPressCanceledAutoShift = false
+
+    /** 文字キーを大文字で表示・入力するShiftが有効か（Caps Lockを除く）。 */
+    val isShiftActive: Boolean
+        get() = isShifted || isAutoShifted
+
+    /**
+     * Shiftキーの押下（単押し: Shiftトグル、素早いダブルタップ: Caps Lockトグル）を反映する。
+     * 自動のShiftだけが有効な間に押した場合は、標準のキーボードと同じく自動のShiftを取り消して小文字にする。
+     * その押下もダブルタップの1回目として扱い、続けて素早く押せばCaps Lockにする。
+     */
+    fun toggle(nowMillis: Long) {
+        val isDoubleTap = nowMillis - lastShiftPressTime < DOUBLE_TAP_TIMEOUT_MS
+        val canceledAutoShift = lastPressCanceledAutoShift
+        lastPressCanceledAutoShift = false
+        if (isCapsLock) {
+            isCapsLock = false
+            isShifted = false
+        } else if (isShifted) {
+            if (isDoubleTap) {
+                isCapsLock = true
+            }
+            isShifted = false
+        } else if (isAutoShifted) {
+            isAutoShifted = false
+            isAutoCharacters = false
+            lastPressCanceledAutoShift = true
+        } else if (canceledAutoShift && isDoubleTap) {
+            isCapsLock = true
+        } else {
+            isShifted = true
+        }
+        lastShiftPressTime = nowMillis
+    }
+
+    /** 入力欄が求める自動大文字化を反映する。表示が変わる場合はtrueを返す。 */
+    fun applyAutoCaps(shift: Boolean, characters: Boolean): Boolean {
+        val before = isShiftActive
+        isAutoShifted = shift
+        isAutoCharacters = shift && characters
+        return before != isShiftActive
+    }
+
+    /** 1文字入力した後の解除。Caps Lockと欄のすべて大文字の指定は続ける。表示が変わる場合はtrueを返す。 */
+    fun onTextInput(): Boolean {
+        if (isCapsLock) return false
+        val before = isShiftActive
+        isShifted = false
+        if (!isAutoCharacters) isAutoShifted = false
+        return before != isShiftActive
+    }
+
+    private companion object {
+        // Shiftの2回押しをCaps Lockとみなす間隔（ミリ秒）。
+        const val DOUBLE_TAP_TIMEOUT_MS = 350L
     }
 }

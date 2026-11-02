@@ -20,6 +20,8 @@ data class InputFieldPolicy(
     val isAddressLike: Boolean = false,
     // 利用者が設定で変換の学習を止めているか。欄の機密性とは別に、学習と履歴の保存だけを止める。
     val learningDisabledBySetting: Boolean = false,
+    // 欄が求める自動大文字化の種類（InputTypeのTYPE_TEXT_FLAG_CAP_*）。InputConnection.getCursorCapsModeへそのまま渡す。
+    val capsModeFlags: Int = 0,
 ) {
     /** 機密欄、明示的な学習禁止欄、または設定で学習を止めているかどうか。 */
     val suppressLearning: Boolean
@@ -39,6 +41,14 @@ data class InputFieldPolicy(
      */
     fun usesLiveConversion(liveSettingEnabled: Boolean): Boolean {
         return liveSettingEnabled && !isPassword && !isTypeNull && !isNumeric && !isAddressLike
+    }
+
+    /**
+     * ローマ字かな入力の設定がONのとき、この欄の英字配列でローマ字をかなにするか。パスワード・互換入力・数字・
+     * URL・メールの欄は英字や数字そのものを入れる欄のため、設定にかかわらず従来どおり英字を入れる。
+     */
+    fun usesRomajiInput(romajiSettingEnabled: Boolean): Boolean {
+        return romajiSettingEnabled && !isPassword && !isTypeNull && !isNumeric && !isAddressLike
     }
 
     companion object {
@@ -81,6 +91,12 @@ data class InputFieldPolicy(
             val multiLine = inputClass == InputType.TYPE_CLASS_TEXT &&
                 (inputType and InputType.TYPE_TEXT_FLAG_MULTI_LINE != 0 || noEnterAction)
             val action = actionId.takeIf { it != 0 } ?: (imeOptions and EditorInfo.IME_MASK_ACTION)
+            // 文字欄の大文字化の指定だけを使う。パスワード欄では指定があっても大文字化しない。
+            val capsModeFlags = if (inputClass == InputType.TYPE_CLASS_TEXT && !password) {
+                inputType and CAPS_MODE_FLAGS
+            } else {
+                0
+            }
 
             return InputFieldPolicy(
                 isPassword = password,
@@ -90,15 +106,21 @@ data class InputFieldPolicy(
                 isMultiLine = multiLine,
                 noEnterAction = noEnterAction,
                 imeAction = action,
-                actionLabel = if (multiLine || noEnterAction) {
+                actionLabel = if (EditorActionPolicy.insertsNewline(multiLine, noEnterAction, action)) {
                     "改行"
                 } else {
                     actionLabel?.takeIf { it.isNotBlank() }
                         ?: defaultActionLabel(action, multiLine = false)
                 },
                 isAddressLike = addressLike,
+                capsModeFlags = capsModeFlags,
             )
         }
+
+        // 自動大文字化を求めるInputTypeのフラグ。値はTextUtilsのCAP_MODE_*と同じである。
+        private const val CAPS_MODE_FLAGS = InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or
+            InputType.TYPE_TEXT_FLAG_CAP_WORDS or
+            InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
 
         private fun defaultActionLabel(action: Int, multiLine: Boolean): String {
             if (multiLine || action == EditorInfo.IME_ACTION_NONE) return "改行"
@@ -115,11 +137,43 @@ data class InputFieldPolicy(
 }
 
 /**
+ * Inline Autofill候補（パスワードやSMS認証コードなど、Autofill serviceが出す候補）を候補バーへ出すかの判定。
+ * 候補の中身はOSが描画し、IMEは中身を読まないため、判定には入力状態と件数・世代だけを使う。
+ * 機密欄でもOSの候補は出すが、通常の変換候補と学習の抑止は[InputFieldPolicy]のまま変えない。
+ */
+object InlineAutofillPolicy {
+    /** 未確定文字も通常候補もない待機中で、Inline候補が1件以上あるときだけ待機表示の代わりに並べる。 */
+    fun shouldShow(hasComposition: Boolean, hasRegularCandidates: Boolean, inlineCount: Int): Boolean {
+        return !hasComposition && !hasRegularCandidates && inlineCount > 0
+    }
+
+    /**
+     * 展開を終えた応答を表示へ採用するか。応答を受けた欄の編集セッション番号が今の番号と同じで、
+     * かつその応答が最後に受けた応答（[responseGeneration]が[latestGeneration]と同じ）である場合だけ採用する。
+     */
+    fun acceptsResponse(responseEpoch: Long?, currentEpoch: Long?, responseGeneration: Long, latestGeneration: Long): Boolean {
+        return responseEpoch != null && responseEpoch == currentEpoch && responseGeneration == latestGeneration
+    }
+}
+
+/**
  * Enter入力を改行として扱うか、editor actionとして送るかを判定する。
  */
 object EditorActionPolicy {
-    /** 改行欄やactionなしの欄では、Enterを文字として確定する。 */
-    fun shouldInsertNewline(policy: InputFieldPolicy): Boolean {
-        return policy.isMultiLine || policy.noEnterAction || policy.imeAction == EditorInfo.IME_ACTION_NONE
-    }
+    /**
+     * Enterを改行として入れるか。AndroidのTextViewは改行させたい複数行欄へ自動でNO_ENTER_ACTIONを付けるため、
+     * 標準のキーボードと同じく、NO_ENTER_ACTION・actionなし・actionの指定がない複数行欄だけを改行にする。
+     * 複数行でも検索や送信が指定された欄（WebViewやComposeの検索欄など）では、そのactionを優先する。
+     */
+    fun shouldInsertNewline(policy: InputFieldPolicy): Boolean =
+        insertsNewline(policy.isMultiLine, policy.noEnterAction, policy.imeAction)
+
+    /** [shouldInsertNewline]と同じ規則を、欄の情報を組み立てる前の値で判定する。 */
+    fun insertsNewline(multiLine: Boolean, noEnterAction: Boolean, action: Int): Boolean =
+        noEnterAction || action == EditorInfo.IME_ACTION_NONE ||
+            (multiLine && action == EditorInfo.IME_ACTION_UNSPECIFIED)
+
+    /** actionの指定がない単一行欄では、標準のキーボードと同じくEnterキーのイベントを送り、扱いを欄に任せる。 */
+    fun shouldSendEnterKey(policy: InputFieldPolicy): Boolean =
+        !shouldInsertNewline(policy) && policy.imeAction == EditorInfo.IME_ACTION_UNSPECIFIED
 }

@@ -343,9 +343,10 @@ class LiveConversionAdapterTest {
     }
 }
 
-/** 読みと表記の組を登録順に持つだけの、試験用のユーザー辞書。 */
-internal class FakeLookup(vararg entries: Pair<String, String>) : UserDictionaryLookup {
-    private val entries = entries.map { (reading, surface) -> UserDictionaryEntry(reading, surface) }
+/** 項目を登録順に持つだけの、試験用のユーザー辞書。読みと表記の組だけで作ると品詞は名詞になる。 */
+internal class FakeLookup(private val entries: List<UserDictionaryEntry>) : UserDictionaryLookup {
+    constructor(vararg entries: Pair<String, String>) :
+        this(entries.map { (reading, surface) -> UserDictionaryEntry(reading, surface) })
 
     override val generation: Long = 1
 

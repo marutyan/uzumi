@@ -11,6 +11,9 @@ sealed interface KeyboardAction {
      */
     data class Text(val value: String) : KeyboardAction
 
+    /** 12キーの中央タップ。フリック入力と区別して同じキーの行内トグルを可能にする。 */
+    data class KanaTap(val type: KanaKeyType) : KeyboardAction
+
     /**
      * 1文字（またはカーソル直前の要素）の削除。
      */
@@ -22,6 +25,14 @@ sealed interface KeyboardAction {
      * @property delta 移動量（負で左、正で右）
      */
     data class MoveCursor(val delta: Int) : KeyboardAction
+
+    /**
+     * 空白・変換キーの横ドラッグによる実カーソル移動。MoveCursorと異なり、ライブ変換中も文節焦点ではなく入力位置を動かす。
+     *
+     * @property delta 移動する書記素数（負で左、正で右）
+     * @property continued 同じ指のドラッグ中に続けて送る移動か。評価では最初の移動だけを一操作として数える
+     */
+    data class MoveEditorCursor(val delta: Int, val continued: Boolean = false) : KeyboardAction
 
     /**
      * 変換中の文節の区切りを一文字縮める・伸ばす要求。変換中に←→キーを長押ししたときに送る。
@@ -60,4 +71,16 @@ sealed interface KeyboardAction {
      * カーソルから同じ行の行頭までを一度に消す要求。削除キーを左へドラッグして離したときに送る（Simejiと同じ操作）。
      */
     data object DeleteToLineStart : KeyboardAction
+
+    /** 記号面から絵文字・顔文字の一覧を開く操作。 */
+    data object OpenEmojiPicker : KeyboardAction
+
+    /** 絵文字一覧から選んだ値を未確定文字の確定後にそのまま入力する操作。
+     *
+     * @property value 入力する絵文字または顔文字
+     */
+    data class InsertEmoji(val value: String) : KeyboardAction
+
+    /** 絵文字・顔文字一覧から記号面へ戻る操作。 */
+    data object CloseEmojiPicker : KeyboardAction
 }

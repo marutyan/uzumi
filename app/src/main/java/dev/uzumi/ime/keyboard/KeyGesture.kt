@@ -15,6 +15,14 @@ class KeyGestureState(private val slopPx: Float) {
     var startY = 0f
         private set
 
+    /** 最後に受け取った指のX座標。後から押した指の都合で先に確定するとき、離した位置の代わりに使う。 */
+    var lastX = 0f
+        private set
+
+    /** 最後に受け取った指のY座標。[lastX]と同じ用途に使う。 */
+    var lastY = 0f
+        private set
+
     /** キーが押下中かどうか。 */
     var isPressed = false
         private set
@@ -31,6 +39,8 @@ class KeyGestureState(private val slopPx: Float) {
     fun down(x: Float, y: Float) {
         startX = x
         startY = y
+        lastX = x
+        lastY = y
         isPressed = true
         hasMovedBeyondSlop = false
         isLongPressActive = false
@@ -38,7 +48,10 @@ class KeyGestureState(private val slopPx: Float) {
 
     /** 指の移動を記録する。長押し成立後の移動は長押しを取り消さない。 */
     fun move(x: Float, y: Float) {
-        if (!isPressed || isLongPressActive) return
+        if (!isPressed) return
+        lastX = x
+        lastY = y
+        if (isLongPressActive) return
         val dx = x - startX
         val dy = y - startY
         if (dx * dx + dy * dy >= slopPx * slopPx) {
@@ -64,6 +77,35 @@ class KeyGestureState(private val slopPx: Float) {
 }
 
 /**
+ * 別々のキーを押している指を押した順に覚え、新しいキーを押したときに先に確定すべき古い文字キーを返す。
+ * 各キーが指を離した順に文字を送ると、二本指で続けて打ったときに文字順が逆になるため、
+ * 標準のキーボードと同じく新しいキーの処理より前に古い文字キーを確定し、押した順を保つ。
+ * Viewに依存しない形にしてJVMテストで守る。
+ */
+class KeyPressOrder<K> {
+    // 押下中のキー。先頭ほど古い。
+    private val pressed = ArrayList<K>()
+
+    /**
+     * [key]の押下を登録し、先に確定すべき古いキーを押した順に返す。返したキーは確定済みとして一覧から外す。
+     * [isModifier]のキー（Shift）は後の文字に作用するため、古いキーを確定させない。
+     * [isTextKey]は、押下中のキーが文字を入力するキー（フリック中を含む）かどうかを返す。
+     */
+    fun press(key: K, isModifier: Boolean, isTextKey: (K) -> Boolean): List<K> {
+        pressed.remove(key)
+        val older = if (isModifier) emptyList() else pressed.filter(isTextKey)
+        pressed.removeAll(older.toSet())
+        pressed.add(key)
+        return older
+    }
+
+    /** 指を離した、または押下を取り消したキーを外す。 */
+    fun release(key: K) {
+        pressed.remove(key)
+    }
+}
+
+/**
  * 文字キーを離したときに入力する文字列を決める。キー外で離した場合は入力しない。
  * 長押しが成立していて長押し文字がある場合だけ長押し文字を返し、通常のタップと区別する。
  */
@@ -76,6 +118,75 @@ fun resolveTextKeyRelease(
     if (!isInside) return null
     return if (isLongPressActive && longPressText != null) longPressText else text
 }
+
+/**
+ * 空白・変換キー上の横ドラッグを、書記素単位のカーソル移動へ変換する。
+ * 最初の移動距離を越えた後は、開始点からの距離に応じて方向反転も差分として返す。
+ */
+class SpaceCursorDragTracker(
+    private val startThresholdPx: Float,
+    private val stepPx: Float,
+) {
+    private var startX = 0f
+    private var startY = 0f
+    private var lastSteps = 0
+
+    /** DOWNからの横ドラッグが開始したか。開始後に指を戻してもtrueを保つ。 */
+    var hasDragged = false
+        private set
+
+    /** 押下とドラッグ追跡中か。 */
+    var isTracking = false
+        private set
+
+    /** 押下開始位置を記録する。 */
+    fun down(x: Float, y: Float) {
+        startX = x
+        startY = y
+        lastSteps = 0
+        hasDragged = false
+        isTracking = true
+    }
+
+    /** 移動イベントの差分を符号付きの書記素数で返す。縦優位の動きでは開始しない。 */
+    fun move(x: Float, y: Float): Int {
+        if (!isTracking) return 0
+        val dx = x - startX
+        val dy = y - startY
+        if (!hasDragged) {
+            if (kotlin.math.abs(dx) < startThresholdPx || kotlin.math.abs(dx) <= kotlin.math.abs(dy)) return 0
+            hasDragged = true
+        }
+
+        val distance = kotlin.math.abs(dx)
+        val steps = if (distance < startThresholdPx) {
+            0
+        } else {
+            1 + ((distance - startThresholdPx) / stepPx).toInt()
+        }
+        val signedSteps = if (dx < 0f) -steps else steps
+        val delta = signedSteps - lastSteps
+        lastSteps = signedSteps
+        return delta
+    }
+
+    /** UP時にドラッグだったかを返し、次の入力のために状態を消す。 */
+    fun finish(): Boolean {
+        val dragged = hasDragged
+        reset()
+        return dragged
+    }
+
+    /** CANCEL、ポインタ交代、キー定義の変更で追跡状態を消す。 */
+    fun reset() {
+        hasDragged = false
+        isTracking = false
+        lastSteps = 0
+    }
+}
+
+/** 横ドラッグが始まらず、キー内で離したときだけ従来の空白・変換タップを送る。 */
+fun shouldSendSpaceCursorKeyTap(isInside: Boolean, dragWasActive: Boolean): Boolean = isInside && !dragWasActive
 
 /**
  * 削除・カーソルキーの連続実行の時間を決める。押下直後に一回実行し、一定時間後から繰り返す。

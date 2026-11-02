@@ -53,12 +53,20 @@ class InputFieldPolicyTest {
         assertEquals("改行", policy.actionLabel)
     }
 
-    /** 複数行とNO_ENTER_ACTIONではeditor actionより改行を優先する。 */
+    /**
+     * NO_ENTER_ACTIONとactionの指定がない複数行欄は改行し、複数行でも検索・送信が指定された欄はactionを優先する。
+     * actionの指定がない単一行欄はEnterキーのイベントを送る。
+     */
     @Test
-    fun multilineAndNoEnterActionInsertNewline() {
-        val multiline = InputFieldPolicy.fromRaw(
+    fun enterFollowsNoEnterActionAndExplicitAction() {
+        val multilineSearch = InputFieldPolicy.fromRaw(
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE,
-            EditorInfo.IME_ACTION_SEND,
+            EditorInfo.IME_ACTION_SEARCH,
+            null,
+        )
+        val multilineUnspecified = InputFieldPolicy.fromRaw(
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE,
+            EditorInfo.IME_ACTION_UNSPECIFIED,
             null,
         )
         val noEnterAction = InputFieldPolicy.fromRaw(
@@ -66,10 +74,21 @@ class InputFieldPolicyTest {
             EditorInfo.IME_ACTION_SEND or EditorInfo.IME_FLAG_NO_ENTER_ACTION,
             "送る",
         )
+        val singleLineUnspecified = InputFieldPolicy.fromRaw(
+            InputType.TYPE_CLASS_TEXT,
+            EditorInfo.IME_ACTION_UNSPECIFIED,
+            null,
+        )
 
-        assertTrue(EditorActionPolicy.shouldInsertNewline(multiline))
+        assertFalse(EditorActionPolicy.shouldInsertNewline(multilineSearch))
+        assertFalse(EditorActionPolicy.shouldSendEnterKey(multilineSearch))
+        assertEquals("検索", multilineSearch.actionLabel)
+        assertTrue(EditorActionPolicy.shouldInsertNewline(multilineUnspecified))
+        assertEquals("改行", multilineUnspecified.actionLabel)
         assertTrue(EditorActionPolicy.shouldInsertNewline(noEnterAction))
         assertEquals("改行", noEnterAction.actionLabel)
+        assertFalse(EditorActionPolicy.shouldInsertNewline(singleLineUnspecified))
+        assertTrue(EditorActionPolicy.shouldSendEnterKey(singleLineUnspecified))
     }
 
     /** 独自action IDがある場合は標準action maskより優先する。 */
@@ -123,5 +142,75 @@ class InputFieldPolicyTest {
         assertFalse(email.usesLiveConversion(liveSettingEnabled = true))
         assertFalse(typeNull.usesLiveConversion(liveSettingEnabled = true))
         assertFalse(number.usesLiveConversion(liveSettingEnabled = true))
+
+        // ローマ字かな入力も、英字や数字そのものを入れる欄では設定にかかわらず使わない。
+        assertTrue(text.usesRomajiInput(romajiSettingEnabled = true))
+        assertFalse(text.usesRomajiInput(romajiSettingEnabled = false))
+        assertTrue(noLearning.usesRomajiInput(romajiSettingEnabled = true))
+        assertFalse(hidden.usesRomajiInput(romajiSettingEnabled = true))
+        assertFalse(uri.usesRomajiInput(romajiSettingEnabled = true))
+        assertFalse(email.usesRomajiInput(romajiSettingEnabled = true))
+        assertFalse(typeNull.usesRomajiInput(romajiSettingEnabled = true))
+        assertFalse(number.usesRomajiInput(romajiSettingEnabled = true))
+    }
+
+    /** Inline候補は未確定文字も通常候補もない待機中だけ出し、入力を始めたら通常の表示を優先する。 */
+    @Test
+    fun inlineAutofillShowsOnlyWhileIdle() {
+        assertTrue(InlineAutofillPolicy.shouldShow(hasComposition = false, hasRegularCandidates = false, inlineCount = 2))
+        assertFalse(InlineAutofillPolicy.shouldShow(hasComposition = true, hasRegularCandidates = false, inlineCount = 2))
+        assertFalse(InlineAutofillPolicy.shouldShow(hasComposition = false, hasRegularCandidates = true, inlineCount = 2))
+        assertFalse(InlineAutofillPolicy.shouldShow(hasComposition = false, hasRegularCandidates = false, inlineCount = 0))
+    }
+
+    /** 機密欄でもInline候補は出せるが、通常の変換候補と学習は従来どおり止める。 */
+    @Test
+    fun sensitiveFieldKeepsSuppressionWhileAllowingInlineAutofill() {
+        val hiddenField = InputFieldPolicy.fromRaw(
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD,
+            EditorInfo.IME_ACTION_DONE,
+            null,
+        )
+
+        assertTrue(hiddenField.suppressSuggestions)
+        assertTrue(hiddenField.suppressLearning)
+        assertTrue(InlineAutofillPolicy.shouldShow(hasComposition = false, hasRegularCandidates = false, inlineCount = 1))
+    }
+
+    /** 別の欄の応答、セッションのない応答、後から来た応答に追い越された応答は捨てる。 */
+    @Test
+    fun inlineAutofillDropsStaleResponses() {
+        assertTrue(InlineAutofillPolicy.acceptsResponse(responseEpoch = 3, currentEpoch = 3, responseGeneration = 5, latestGeneration = 5))
+        assertFalse(InlineAutofillPolicy.acceptsResponse(responseEpoch = 3, currentEpoch = 4, responseGeneration = 5, latestGeneration = 5))
+        assertFalse(InlineAutofillPolicy.acceptsResponse(responseEpoch = null, currentEpoch = null, responseGeneration = 5, latestGeneration = 5))
+        assertFalse(InlineAutofillPolicy.acceptsResponse(responseEpoch = 3, currentEpoch = null, responseGeneration = 5, latestGeneration = 5))
+        assertFalse(InlineAutofillPolicy.acceptsResponse(responseEpoch = 3, currentEpoch = 3, responseGeneration = 4, latestGeneration = 5))
+    }
+    /** 文字欄の大文字化の指定だけを取り出し、パスワード欄や数字欄では大文字化しない。 */
+    @Test
+    fun capsModeFlagsFollowTextFieldRequest() {
+        val text = InputType.TYPE_CLASS_TEXT
+        assertEquals(0, InputFieldPolicy.fromRaw(text, EditorInfo.IME_ACTION_DONE, null).capsModeFlags)
+        assertEquals(
+            InputType.TYPE_TEXT_FLAG_CAP_SENTENCES,
+            InputFieldPolicy.fromRaw(
+                text or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or InputType.TYPE_TEXT_FLAG_MULTI_LINE,
+                EditorInfo.IME_ACTION_DONE,
+                null,
+            ).capsModeFlags,
+        )
+        assertEquals(
+            InputType.TYPE_TEXT_FLAG_CAP_WORDS or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS,
+            InputFieldPolicy.fromRaw(
+                text or InputType.TYPE_TEXT_FLAG_CAP_WORDS or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS,
+                EditorInfo.IME_ACTION_DONE,
+                null,
+            ).capsModeFlags,
+        )
+        val password = text or InputType.TYPE_TEXT_VARIATION_PASSWORD or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        assertEquals(0, InputFieldPolicy.fromRaw(password, EditorInfo.IME_ACTION_DONE, null).capsModeFlags)
+        // 数字欄ではCAPのビットが別の意味（符号・小数）になるため使わない
+        val number = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
+        assertEquals(0, InputFieldPolicy.fromRaw(number, EditorInfo.IME_ACTION_DONE, null).capsModeFlags)
     }
 }

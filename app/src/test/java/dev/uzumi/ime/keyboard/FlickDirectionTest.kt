@@ -137,6 +137,50 @@ class FlickDirectionTest {
     }
 
     @Test
+    fun spaceCursorDragMovesByDistanceAndReversesOneGraphemeAtATime() {
+        val drag = SpaceCursorDragTracker(startThresholdPx = 18f, stepPx = 24f)
+        drag.down(100f, 50f)
+
+        assertEquals(0, drag.move(83f, 50f))
+        assertEquals(-1, drag.move(82f, 50f))
+        assertEquals(-1, drag.move(58f, 50f))
+        assertEquals(-1, drag.move(34f, 50f))
+        assertEquals(1, drag.move(58f, 50f))
+        assertEquals(1, drag.move(82f, 50f))
+        // 開始点まで戻っても一度ドラッグした事実は残り、空白・変換タップを送らない。
+        assertEquals(1, drag.move(100f, 50f))
+        assertTrue(drag.finish())
+        assertFalse(drag.isTracking)
+        assertFalse(shouldSendSpaceCursorKeyTap(isInside = true, dragWasActive = true))
+    }
+
+    @Test
+    fun spaceCursorDragIgnoresVerticalOnlyMovementAndKeepsTap() {
+        val drag = SpaceCursorDragTracker(startThresholdPx = 18f, stepPx = 24f)
+        drag.down(50f, 50f)
+
+        assertEquals(0, drag.move(52f, 80f))
+        assertFalse(drag.finish())
+        assertTrue(shouldSendSpaceCursorKeyTap(isInside = true, dragWasActive = false))
+        assertFalse(shouldSendSpaceCursorKeyTap(isInside = false, dragWasActive = false))
+    }
+
+    @Test
+    fun spaceCursorDragUsesUpPositionWhenMoveWasNotDeliveredAndResetCancelsTracking() {
+        val drag = SpaceCursorDragTracker(startThresholdPx = 18f, stepPx = 24f)
+        drag.down(100f, 50f)
+        // ACTION_DOWNの後にACTION_UPだけ届いた場合も、UP座標をmoveとして扱える。
+        assertEquals(-2, drag.move(58f, 50f))
+        assertTrue(drag.finish())
+
+        drag.down(100f, 50f)
+        assertEquals(-1, drag.move(82f, 50f))
+        drag.reset() // ACTION_CANCEL、別ポインタ、replaceSpec、detach
+        assertEquals(0, drag.move(58f, 50f))
+        assertFalse(drag.finish())
+    }
+
+    @Test
     fun repeatStartsAfterInitialDelayAndAcceleratesModestly() {
         assertEquals(400L, KeyRepeatPolicy.INITIAL_DELAY_MS)
         assertEquals(KeyRepeatPolicy.START_INTERVAL_MS, KeyRepeatPolicy.intervalAfter(0))
@@ -163,10 +207,121 @@ class FlickDirectionTest {
         assertTrue(KeyRepeatPolicy.isRepeatable(KeyboardAction.Delete))
         assertTrue(KeyRepeatPolicy.isRepeatable(KeyboardAction.MoveCursor(-1)))
         assertTrue(KeyRepeatPolicy.isRepeatable(KeyboardAction.MoveCursor(1)))
+        assertFalse(KeyRepeatPolicy.isRepeatable(KeyboardAction.MoveEditorCursor(1)))
         assertFalse(KeyRepeatPolicy.isRepeatable(KeyboardAction.Enter))
         assertFalse(KeyRepeatPolicy.isRepeatable(KeyboardAction.Space))
         assertFalse(KeyRepeatPolicy.isRepeatable(KeyboardAction.Convert))
         assertFalse(KeyRepeatPolicy.isRepeatable(KeyboardAction.TransformKana))
         assertFalse(KeyRepeatPolicy.isRepeatable(KeyboardAction.Text("あ")))
+    }
+    /**
+     * 押下順の共有を、キーごとの押下中フラグと送った文字の列で再現する。
+     * 押したときに古い文字キーを確定し、確定済みのキーは離しても何も送らない。
+     */
+    private class TwoFingerTyping(private val textKeys: Set<String>, private val modifiers: Set<String> = emptySet()) {
+        private val order = KeyPressOrder<String>()
+        private val pressed = mutableSetOf<String>()
+        val sent = mutableListOf<String>()
+
+        fun down(key: String) {
+            order.press(key, isModifier = key in modifiers, isTextKey = { it in pressed && it in textKeys })
+                .forEach(::commit)
+            pressed += key
+        }
+
+        fun up(key: String) {
+            order.release(key)
+            commit(key)
+        }
+
+        private fun commit(key: String) {
+            if (pressed.remove(key)) sent += key
+        }
+    }
+
+    @Test
+    fun overlappingTapsKeepPressOrderWhenNewerFingerReleasesFirst() {
+        // aを押したままbを押し、bを先に離しても「ab」の順になる
+        val typing = TwoFingerTyping(textKeys = setOf("a", "b"))
+        typing.down("a")
+        typing.down("b")
+        assertEquals(listOf("a"), typing.sent)
+        typing.up("b")
+        typing.up("a")
+        assertEquals(listOf("a", "b"), typing.sent)
+    }
+
+    @Test
+    fun overlappingTapsReleasedInPressOrderAreUnchanged() {
+        val typing = TwoFingerTyping(textKeys = setOf("a", "b", "c"))
+        typing.down("a")
+        typing.down("b")
+        typing.down("c")
+        typing.up("a")
+        typing.up("c")
+        typing.up("b")
+        assertEquals(listOf("a", "b", "c"), typing.sent)
+    }
+
+    @Test
+    fun olderTextKeyCommitsBeforeSpaceOrDeleteButNotBeforeShift() {
+        // 空白や削除の前に、押したままの文字を先に入力する
+        val typing = TwoFingerTyping(textKeys = setOf("o"), modifiers = setOf("shift"))
+        typing.down("o")
+        typing.down("space")
+        assertEquals(listOf("o"), typing.sent)
+        typing.up("space")
+        assertEquals(listOf("o", "space"), typing.sent)
+
+        // Shiftは後の文字に作用するため、押しても古い文字を確定しない
+        val shifted = TwoFingerTyping(textKeys = setOf("a"), modifiers = setOf("shift"))
+        shifted.down("a")
+        shifted.down("shift")
+        assertTrue(shifted.sent.isEmpty())
+        shifted.up("shift")
+        shifted.up("a")
+        assertEquals(listOf("shift", "a"), shifted.sent)
+    }
+
+    @Test
+    fun heldFunctionKeyIsNotCommittedByNewerKey() {
+        // 削除の長押しや空白の横ドラッグなど、文字キーでない押下は後のキーで打ち切らない
+        val order = KeyPressOrder<String>()
+        assertTrue(order.press("delete", isModifier = false, isTextKey = { false }).isEmpty())
+        assertTrue(order.press("a", isModifier = false, isTextKey = { it == "a" }).isEmpty())
+        // 離したキーは一覧から外れ、後の押下で確定対象に出ない
+        order.release("a")
+        assertTrue(order.press("b", isModifier = false, isTextKey = { it == "a" }).isEmpty())
+    }
+
+    @Test
+    fun flickingKanaKeyCommitsLastDirectionWhenNewerKeyIsPressed() {
+        // フリック中に別のキーを押したら、その時点の指の位置の向きで確定する
+        val gesture = KeyGestureState(slopPx = 8f)
+        gesture.down(50f, 50f)
+        gesture.move(50f, 20f)
+        assertEquals(50f, gesture.lastX)
+        assertEquals(20f, gesture.lastY)
+        assertEquals(
+            FlickDirection.UP,
+            determineFlickDirection(gesture.lastX - gesture.startX, gesture.lastY - gesture.startY, threshold),
+        )
+        // MOVEが届く前ならタップ（中心）として確定する
+        gesture.down(10f, 10f)
+        assertEquals(
+            FlickDirection.CENTER,
+            determineFlickDirection(gesture.lastX - gesture.startX, gesture.lastY - gesture.startY, threshold),
+        )
+    }
+
+    @Test
+    fun lastPositionKeepsUpdatingAfterLongPress() {
+        // 長押し成立後もキー外へ動かしたかを判定できるよう、最後の位置は更新し続ける
+        val gesture = KeyGestureState(slopPx = 8f)
+        gesture.down(10f, 10f)
+        assertTrue(gesture.longPressTimeout())
+        gesture.move(200f, 10f)
+        assertEquals(200f, gesture.lastX)
+        assertTrue(gesture.isLongPressActive)
     }
 }

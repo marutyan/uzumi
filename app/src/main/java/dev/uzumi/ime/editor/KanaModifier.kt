@@ -37,11 +37,13 @@ object KanaModifier {
         listOf("わ", "ゎ"),
     )
 
+    // ひらがなの組と、対応するカタカナの組。
+    private val allCycles = hiraganaCycles + hiraganaCycles.map { cycle ->
+        cycle.map(BasicCandidateProvider::toKatakana)
+    }
+
     // ひらがなと対応するカタカナの両方を次の表記へ写像する。
     private val replacements = buildMap {
-        val allCycles = hiraganaCycles + hiraganaCycles.map { cycle ->
-            cycle.map(BasicCandidateProvider::toKatakana)
-        }
         allCycles.forEach { cycle ->
             cycle.forEachIndexed { index, value ->
                 put(value, cycle[(index + 1) % cycle.size])
@@ -49,6 +51,16 @@ object KanaModifier {
         }
     }
 
+    // 組の各かなを、組の先頭（小書き・濁点・半濁点の付かないかな）へ写像する。どのかなも1文字（1 UTF-16単位）である。
+    private val bases: Map<Char, Char> = buildMap {
+        allCycles.forEach { cycle -> cycle.forEach { value -> put(value.single(), cycle.first().single()) } }
+    }
+
     /** 対応する次のかなを返し、対象外の文字ではnullを返す。 */
     fun transform(value: String): String? = replacements[value]
+
+    /** 小書き・濁点・半濁点の違いを除いた表記へ揃える。打ち分けの違う読み同士を照合するために使う。 */
+    fun stripModifiers(text: String): String = buildString(text.length) {
+        text.forEach { append(bases[it] ?: it) }
+    }
 }

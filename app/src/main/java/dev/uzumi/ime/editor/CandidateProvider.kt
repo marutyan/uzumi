@@ -10,14 +10,18 @@ data class CandidateOption(
     val value: String,
     val label: String,
     val conversionChoice: ConversionChoice? = null,
+    // 注目文節で今表示している候補か。候補バーで選択中として示す。
+    val selected: Boolean = false,
 )
 
 /**
- * 変換エンジンの候補を選ぶ操作の識別子。タップ時に表示元の要求が現在の変換と一致するかを照合する。
+ * 文節候補を選ぶ操作の識別子。タップ時に変換要求と注目文節が表示時の状態と一致するか照合する。
  */
 data class ConversionChoice(
     val request: ConversionRequest,
     val candidateId: Int,
+    // 候補を表示したときの注目文節の位置。候補IDは文節ごとに振られ、別の文節と重なり得るため照合する。
+    val segmentIndex: Int = 0,
 )
 
 /**

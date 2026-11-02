@@ -1,5 +1,7 @@
 package dev.uzumi.ime.conversion
 
+import dev.uzumi.ime.dictionary.UserDictionaryCategory
+import dev.uzumi.ime.dictionary.UserDictionaryEntry
 import dev.uzumi.ime.evaluation.LiveRequestReport
 import dev.uzumi.ime.learning.LearningStore
 import dev.uzumi.ime.live.CandidateRequest
@@ -72,6 +74,31 @@ class ConversionWorkerTest {
         assertTrue(incognitoIndex < convertIndex)
     }
 
+    /** 12キーだけで入れた読みの要求には表記ゆれ変換を指定し、評価の記録中は比較条件を変えないよう指定しない。 */
+    @Test
+    fun kanaModifierInsensitiveFollowsRequestAndEvaluation() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.kanaModifierInsensitiveCalls.clear()
+
+        fixture.worker.requestConversion(request(reading = "かんじ").copy(kanaModifierInsensitive = true))
+        fixture.executor.runAll()
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "かん").copy(kanaModifierInsensitive = true))
+        fixture.executor.runAll()
+        fixture.worker.requestConversion(request(revision = 2, reading = "かんじ"))
+        fixture.executor.runAll()
+        assertEquals(listOf(true, true, false), fixture.engine.kanaModifierInsensitiveCalls)
+
+        fixture.engine.kanaModifierInsensitiveCalls.clear()
+        fixture.evaluating = true
+        fixture.worker.requestConversion(request(revision = 3, reading = "かんじ").copy(kanaModifierInsensitive = true))
+        fixture.executor.runAll()
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 2, reading = "かん").copy(kanaModifierInsensitive = true))
+        fixture.executor.runAll()
+        assertTrue(fixture.engine.kanaModifierInsensitiveCalls.isNotEmpty())
+        assertTrue(fixture.engine.kanaModifierInsensitiveCalls.none { it })
+    }
+
     /** incognitoを指定できなければ、読みをエンジンへ送らず失敗として返す。 */
     @Test
     fun incognitoFailurePreventsConversion() {
@@ -85,6 +112,108 @@ class ConversionWorkerTest {
 
         assertFalse(fixture.engine.calls.any { it.startsWith("convert") })
         assertTrue(fixture.outcomes.single() is ConversionOutcome.Failed)
+    }
+
+    /** 入力途中予測は変換sessionと分け、同じ候補IDを専用sessionで確定し、IME側の学習にも記録する。 */
+    @Test
+    fun predictionUsesDedicatedSessionAndCommitsSelectedCandidate() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.worker.requestConversion(request(reading = "かんじ"))
+        fixture.executor.runAll()
+        fixture.engine.calls.clear()
+        val prediction = PredictionRequest(sessionEpoch = 1, revision = 2, reading = "ありがと")
+
+        fixture.worker.requestPrediction(prediction)
+        fixture.executor.runAll()
+
+        assertEquals(listOf("createSession", "setIncognito(false)", "suggest(2,ありがと)"), fixture.engine.calls)
+        assertEquals(prediction, fixture.predictionResults.single().request)
+        assertEquals(listOf("ありがとう", "ありがとうございます", "助かります"),
+            fixture.predictionResults.single().candidates.map { it.value })
+
+        fixture.engine.calls.clear()
+        fixture.worker.commitPrediction(prediction, candidateId = 14)
+        fixture.executor.runAll()
+        assertEquals(listOf("setIncognito(false)", "commitPrediction(2,14)"), fixture.engine.calls)
+        assertEquals(listOf("助かります"), learning.exactMatches("たすかります").map { it.surface })
+    }
+
+    /**
+     * 連続打鍵で予測の処理がキューの先にあっても、ライブ変換の要求が待っていれば予測を後回しにし、
+     * ライブ変換を先にエンジンへ送る。予測は最新の要求だけを後で一度処理する。
+     */
+    @Test
+    fun pendingLiveConversionRunsBeforePrediction() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.calls.clear()
+
+        fixture.worker.requestPrediction(PredictionRequest(sessionEpoch = 7, revision = 1, reading = "か"))
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 2, reading = "かん"))
+        val latest = PredictionRequest(sessionEpoch = 7, revision = 2, reading = "かん")
+        fixture.worker.requestPrediction(latest)
+        fixture.executor.runAll()
+
+        val liveIndex = fixture.engine.calls.indexOf("convertSegments(1,かん)")
+        val suggestIndex = fixture.engine.calls.indexOfFirst { it.startsWith("suggest(") }
+        assertTrue(liveIndex >= 0 && liveIndex < suggestIndex)
+        assertEquals(1, fixture.engine.calls.count { it.startsWith("suggest(") })
+        assertTrue(fixture.engine.calls[suggestIndex].endsWith(",かん)"))
+        assertEquals(listOf(latest), fixture.predictionResults.map { it.request })
+        assertEquals(1, fixture.liveResults.size)
+    }
+
+    /** 学習禁止の入力途中予測はincognitoを先に指定し、選択しても確定学習を送らない。 */
+    @Test
+    fun incognitoPredictionDoesNotLearn() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.calls.clear()
+        val prediction = PredictionRequest(sessionEpoch = 1, revision = 2, reading = "ひみつ", incognito = true)
+
+        fixture.worker.requestPrediction(prediction)
+        fixture.executor.runAll()
+        fixture.worker.commitPrediction(prediction, candidateId = 11)
+        fixture.executor.runAll()
+
+        assertTrue(fixture.engine.calls.indexOf("setIncognito(true)") < fixture.engine.calls.indexOf("suggest(1,ひみつ)"))
+        assertFalse(fixture.engine.calls.any { it.startsWith("commitPrediction") })
+    }
+
+    /** incognitoの指定に失敗した予測要求は、本文を送らず空候補として返す。 */
+    @Test
+    fun incognitoFailurePreventsPredictionRequest() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.incognitoAccepted = false
+        fixture.engine.calls.clear()
+        val prediction = PredictionRequest(sessionEpoch = 1, revision = 2, reading = "ひみつ", incognito = true)
+
+        fixture.worker.requestPrediction(prediction)
+        fixture.executor.runAll()
+
+        assertEquals(listOf("createSession", "setIncognito(true)"), fixture.engine.calls)
+        assertEquals(prediction, fixture.predictionResults.single().request)
+        assertTrue(fixture.predictionResults.single().candidates.isEmpty())
+    }
+
+    /** 次の語の予測へ直前の確定文脈を渡し、空の応答は空候補のまま返す。 */
+    @Test
+    fun zeroQueryPredictionUsesContextAndAllowsEmptyFallback() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.nextWordPredictions = emptyList()
+        fixture.engine.calls.clear()
+        val prediction = PredictionRequest(sessionEpoch = 1, revision = 3, precedingText = "明日の")
+
+        fixture.worker.requestPrediction(prediction)
+        fixture.executor.runAll()
+
+        assertEquals(listOf("createSession", "setIncognito(false)", "nextWord(1,明日の)"), fixture.engine.calls)
+        assertEquals(prediction, fixture.predictionResults.single().request)
+        assertTrue(fixture.predictionResults.single().candidates.isEmpty())
     }
 
     /** 終了したフィールドの要求は、キューに残っていてもエンジンへ送らず、sessionを破棄する。 */
@@ -123,14 +252,182 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
         fixture.engine.calls.clear()
 
-        fixture.worker.commitCandidate(first, 7)
-        fixture.worker.commitCandidate(second.copy(incognito = true), 7)
-        fixture.worker.commitCandidate(second, 7)
-        fixture.worker.commitAll(second)
+        val segments = listOf(ConversionSegment("かんじ", "漢字"))
+        fixture.worker.commitAll(first, segments)
+        fixture.worker.commitAll(second.copy(incognito = true), segments)
+        fixture.worker.commitAll(second, segments)
+        fixture.worker.commitAll(second, segments)
         fixture.executor.runAll()
 
-        assertEquals(listOf("commitCandidate(1,7)"), fixture.engine.calls)
+        assertEquals(listOf("commitAll(1)"), fixture.engine.calls)
     }
+
+    /** 候補選択後の確定は元要求を照合し、更新後の全文節表記を再現してから学習させる。 */
+    @Test
+    fun selectedExplicitSegmentsCommitUsingOriginalConversionRequest() {
+        val fixture = Fixture()
+        fixture.startReady()
+        val request = request(reading = "かんじ")
+        fixture.worker.requestConversion(request)
+        fixture.executor.runAll()
+        fixture.engine.calls.clear()
+
+        fixture.worker.commitAll(
+            request,
+            listOf(ConversionSegment("かんじ", "感じ", chosen = true)),
+        )
+        fixture.executor.runAll()
+
+        assertEquals(listOf("learnSegments(1,かんじ=感じ)"), fixture.engine.calls)
+    }
+
+    /**
+     * 登録語の文節が混ざった確定でも、利用者が選んだ他の文節はIME側の学習へ記録する。
+     * 登録語の表記はエンジンが再現できないため、エンジンへは確定も学習も送らない。
+     */
+    @Test
+    fun explicitCommitWithUserDictionarySegmentRecordsOnlyChosenSegment() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        val request = request(reading = "きょうはうずみ")
+        fixture.worker.requestConversion(request)
+        fixture.executor.runAll()
+        fixture.engine.calls.clear()
+
+        fixture.worker.commitAll(
+            request,
+            listOf(
+                ConversionSegment("きょうは", "京は", chosen = true),
+                ConversionSegment("うずみ", "Uzumi", fromUserDictionary = true),
+            ),
+        )
+        fixture.executor.runAll()
+
+        assertEquals(listOf("京は"), learning.exactMatches("きょうは").map { it.surface })
+        assertTrue(learning.exactMatches("うずみ").isEmpty())
+        assertFalse(fixture.engine.calls.any { it.startsWith("commitAll") || it.startsWith("learnSegments") })
+    }
+
+    /**
+     * 複数文節の明示変換では、各文節の候補をその文節の読みだけで学習語・登録語と統合する。
+     * 読みを延ばす予測はその文節を置き換えられないため、途中の文節には出さない。
+     * 文節の読みに完全一致する学習語（「てんき」の「転機」）は、その文節の最初の表示にする。
+     */
+    @Test
+    fun explicitConversionMergesCandidatesPerSegment() {
+        val learning = learningStore().apply {
+            record("てんき", "転機")
+            record("きょうはく", "脅迫")
+        }
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.explicitSegmentsFor = { twoSegments() }
+
+        fixture.worker.requestConversion(request(reading = "きょうはてんき"))
+        fixture.executor.runAll()
+
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        assertTrue(result.isConsistent)
+        assertEquals("今日は転機", result.display)
+        assertEquals("てんき", result.segments[1].learnedReading)
+        assertEquals(listOf("今日は", "京は"), result.segments[0].candidates.map { it.value })
+        assertEquals(listOf("転機", "天気"), result.segments[1].candidates.map { it.value })
+        assertEquals(result.segments[0].candidates, result.headCandidates)
+    }
+
+    /**
+     * 読み全体に一致する登録語があれば、エンジンが複数文節に分けても一文節にまとめて登録語を表示し、
+     * エンジンの表記の連結も候補に残す。利用者が区切りを伸縮した要求ではまとめない。
+     */
+    @Test
+    fun explicitConversionShowsWholeReadingUserWordAsOneSegment() {
+        val fixture = Fixture(dictionary = FakeLookup("きょうはてんき" to "今日晴天"))
+        fixture.startReady()
+        fixture.engine.explicitSegmentsFor = { twoSegments() }
+
+        fixture.worker.requestConversion(request(reading = "きょうはてんき"))
+        fixture.executor.runAll()
+        fixture.worker.requestConversion(request(revision = 2, reading = "きょうはてんき").copy(segmentLengths = listOf(4)))
+        fixture.executor.runAll()
+
+        val whole = (fixture.outcomes[0] as ConversionOutcome.Converted).result
+        assertEquals(listOf("きょうはてんき"), whole.segments.map { it.reading })
+        assertEquals("今日晴天", whole.display)
+        assertTrue(whole.segments.single().fromUserDictionary)
+        assertEquals(listOf("今日晴天", "今日は天気"), whole.headCandidates.map { it.value })
+        val resized = (fixture.outcomes[1] as ConversionOutcome.Converted).result
+        assertEquals(listOf("きょうは", "てんき"), resized.segments.map { it.reading })
+    }
+
+    /**
+     * 読みが完全に一致する学習語は明示変換の最初の表示になり、候補の先頭と一致する（変換キーの巡回が学習語を飛ばさない）。
+     * 表示のまま確定してもエンジンへは送らない。評価の記録中はエンジンの第一候補を表示する。
+     */
+    @Test
+    fun explicitConversionShowsLearnedWordFirstExceptWhileEvaluating() {
+        val learning = learningStore().apply { record("かんじ", "幹事") }
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        val conversion = request(reading = "かんじ")
+        fixture.worker.requestConversion(conversion)
+        fixture.executor.runAll()
+
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        assertEquals("幹事", result.display)
+        assertEquals("幹事", result.headCandidates.first().value)
+        assertEquals("かんじ", result.segments.single().learnedReading)
+        fixture.engine.calls.clear()
+        fixture.worker.commitAll(conversion, result.segments)
+        fixture.executor.runAll()
+        assertTrue(fixture.engine.calls.isEmpty())
+
+        fixture.evaluating = true
+        fixture.worker.requestConversion(request(revision = 2, reading = "かんじ"))
+        fixture.executor.runAll()
+        val evaluated = (fixture.outcomes.last() as ConversionOutcome.Converted).result
+        assertEquals("漢字", evaluated.display)
+        assertEquals(null, evaluated.segments.single().learnedReading)
+    }
+
+    /**
+     * 読み全体に一致する学習語があれば、エンジンが複数文節に分けても一文節にまとめて学習語を表示し、
+     * エンジンの表記の連結も候補に残す。利用者が区切りを伸縮した要求ではまとめない。
+     */
+    @Test
+    fun explicitConversionShowsWholeReadingLearnedWordAsOneSegment() {
+        val learning = learningStore().apply { record("きょうはてんき", "今日晴天") }
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.explicitSegmentsFor = { twoSegments() }
+
+        fixture.worker.requestConversion(request(reading = "きょうはてんき"))
+        fixture.executor.runAll()
+        fixture.worker.requestConversion(request(revision = 2, reading = "きょうはてんき").copy(segmentLengths = listOf(4)))
+        fixture.executor.runAll()
+
+        val whole = (fixture.outcomes[0] as ConversionOutcome.Converted).result
+        assertEquals(listOf("きょうはてんき"), whole.segments.map { it.reading })
+        assertEquals("今日晴天", whole.display)
+        assertEquals("きょうはてんき", whole.segments.single().learnedReading)
+        assertEquals(listOf("今日晴天", "今日は天気"), whole.headCandidates.map { it.value })
+        val resized = (fixture.outcomes[1] as ConversionOutcome.Converted).result
+        assertEquals(listOf("きょうは", "てんき"), resized.segments.map { it.reading })
+    }
+
+    /** 文節ごとの候補を持つ「きょうは|てんき」の二文節。 */
+    private fun twoSegments(): List<ConversionSegment> = listOf(
+        ConversionSegment(
+            "きょうは",
+            "今日は",
+            candidates = listOf(ConversionCandidate(0, "今日は", "きょうは"), ConversionCandidate(1, "京は", "きょうは")),
+        ),
+        ConversionSegment(
+            "てんき",
+            "天気",
+            candidates = listOf(ConversionCandidate(0, "天気", "てんき"), ConversionCandidate(1, "転機", "てんき")),
+        ),
+    )
 
     /** data versionが正常でも既知の変換例に漢字が無ければ、辞書なしとして扱い変換を送らない。 */
     @Test
@@ -266,17 +563,17 @@ class ConversionWorkerTest {
         assertEquals(ResultSegment("さんじに", "三時に", listOf("三時に", "3時に"), candidatesComplete = true), fixed)
     }
 
-    /** 明示変換の文節の伸縮は、先頭文節の書記素数をエンジンへ渡して変換し直す。 */
+    /** 明示変換の文節の伸縮は、先頭から注目文節までの各文節の書記素数をエンジンへ渡して変換し直す。 */
     @Test
-    fun explicitConversionPassesHeadLength() {
+    fun explicitConversionPassesSegmentLengths() {
         val fixture = Fixture()
         fixture.startReady()
         fixture.engine.calls.clear()
 
-        fixture.worker.requestConversion(request(reading = "かんじ").copy(headLength = 2))
+        fixture.worker.requestConversion(request(reading = "かんじ").copy(segmentLengths = listOf(2)))
         fixture.executor.runAll()
 
-        assertEquals(listOf("convert(1,かんじ,2)"), fixture.engine.calls.filter { it.startsWith("convert") })
+        assertEquals(listOf("convert(1,かんじ,[2])"), fixture.engine.calls.filter { it.startsWith("convert") })
     }
 
     /** ASCIIだけの文節と、終了した編集セッションの要求はエンジンへ送らない。 */
@@ -448,9 +745,9 @@ class ConversionWorkerTest {
         assertEquals("かんじる", prediction.learnedReading)
 
         fixture.engine.calls.clear()
-        fixture.worker.commitCandidate(conversion, prediction.id)
+        fixture.worker.commitAll(conversion, chooseSegment(result, prediction))
         fixture.executor.runAll()
-        assertFalse(fixture.engine.calls.any { it.startsWith("commitCandidate") })
+        assertTrue(fixture.engine.calls.isEmpty())
         assertEquals(2, learning.exactMatches("かんじる").single().useCount)
     }
 
@@ -465,10 +762,11 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
         fixture.engine.calls.clear()
 
-        fixture.worker.commitCandidate(conversion, 1)
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        fixture.worker.commitAll(conversion, chooseSegment(result, result.headCandidates.first { it.id == 1 }))
         fixture.executor.runAll()
 
-        assertEquals(listOf("commitCandidate(1,1)"), fixture.engine.calls)
+        assertEquals(listOf("learnSegments(1,かんじ=感じ)"), fixture.engine.calls)
         assertEquals(listOf("感じ"), learning.exactMatches("かんじ").map { it.surface })
     }
 
@@ -482,10 +780,10 @@ class ConversionWorkerTest {
 
         fixture.worker.requestConversion(conversion)
         fixture.executor.runAll()
-        fixture.worker.commitCandidate(conversion, 1)
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        fixture.worker.commitAll(conversion, chooseSegment(result, result.headCandidates.first { it.id == 1 }))
         fixture.executor.runAll()
 
-        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
         assertEquals(listOf("漢字", "感じ"), result.headCandidates.map { it.value })
         assertNull(learning.exactMatches("かんじ").firstOrNull { it.surface == "感じ" })
     }
@@ -610,7 +908,7 @@ class ConversionWorkerTest {
         assertEquals(listOf("公園に", "行くよ"), fixture.liveResults[1].second.segments.map { it.surface })
     }
 
-    /** 明示変換では、読み全体に一致する句をエンジンの第一候補の前に置き、表示はエンジンの第一候補のままにする。 */
+    /** 明示変換では、読み全体に一致する句をエンジンの第一候補の前に置き、ライブ変換と同じく最初の表示にする。 */
     @Test
     fun explicitConversionPlacesWholeReadingPhraseFirst() {
         val learning = learningStore().apply { recordPhrase("こうえんにいく", "校園に行く", createIfMissing = true) }
@@ -623,7 +921,7 @@ class ConversionWorkerTest {
         val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
         assertEquals(listOf("校園に行く", "こうえんにいく"), result.headCandidates.map { it.value })
         assertEquals("こうえんにいく", result.headCandidates.first().learnedReading)
-        assertEquals("こうえんにいく", result.display)
+        assertEquals("校園に行く", result.display)
         assertTrue(result.isConsistent)
     }
 
@@ -783,6 +1081,212 @@ class ConversionWorkerTest {
         assertTrue(report.samples.isEmpty())
     }
 
+    /**
+     * 明示変換では、顔文字・絵文字はエンジンの第一候補でも6番目以降へ置き、表示する文節の値にも使わない。
+     * 2回以上選ぶと2番目へ上がるが、先頭にはならない。
+     */
+    @Test
+    fun explicitConversionKeepsEmoticonsBehindAndPromotesAfterRepeatedChoice() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.convertValuesFor = { listOf("😂", "笑い", "わらい", "ワライ", "藁い", "嗤い", "(^o^)") }
+
+        // 変換して候補一覧を返し、valueの候補を選んで確定する。
+        fun convertAndChoose(revision: Long, value: String?): List<ConversionCandidate> {
+            val request = request(revision = revision, reading = "わらい")
+            fixture.worker.requestConversion(request)
+            fixture.executor.runAll()
+            val result = (fixture.outcomes.last() as ConversionOutcome.Converted).result
+            assertEquals("笑い", result.display)
+            // エンジンの第一候補（絵文字）から表示を差し替えたため、全文確定をエンジンへ学習させない印が付く。
+            assertTrue(result.segments.single().fromUserDictionary)
+            if (value != null) {
+                fixture.worker.commitAll(request, chooseSegment(result, result.headCandidates.first { it.value == value }))
+                fixture.executor.runAll()
+            }
+            return result.headCandidates
+        }
+
+        assertEquals(
+            listOf("笑い", "わらい", "ワライ", "藁い", "嗤い", "😂", "(^o^)"),
+            convertAndChoose(revision = 1, value = "😂").map { it.value },
+        )
+        // 1回だけ選んだ段階では、学習語として先頭へ来ても6番目へ戻す。
+        assertEquals(5, convertAndChoose(revision = 2, value = "😂").indexOfFirst { it.value == "😂" })
+        assertEquals(
+            listOf("笑い", "😂", "わらい", "ワライ", "藁い", "嗤い", "(^o^)"),
+            convertAndChoose(revision = 3, value = null).map { it.value },
+        )
+    }
+
+    /** ユーザー辞書の顔文字は、読み全体に一致しても読み全体の一文節として表示せず、候補の後ろへ置く。 */
+    @Test
+    fun explicitConversionDoesNotDisplayRegisteredEmoticon() {
+        val dictionary = FakeLookup(listOf(UserDictionaryEntry("わら", "（笑）", UserDictionaryCategory.EMOTICON)))
+        val fixture = Fixture(dictionary = dictionary)
+        fixture.startReady()
+        fixture.engine.convertValuesFor = { listOf("藁", "わら") }
+
+        fixture.worker.requestConversion(request(reading = "わら"))
+        fixture.executor.runAll()
+
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        assertEquals("藁", result.display)
+        assertFalse(result.segments.single().fromUserDictionary)
+        assertEquals(listOf("藁", "わら", "（笑）"), result.headCandidates.map { it.value })
+    }
+
+    /** ライブ変換では、Mozcの第一候補が絵文字でも表示値にせず、候補の取り直しでも先頭に置かない。 */
+    @Test
+    fun liveConversionDoesNotDisplayEngineEmoji() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.segmentsFor = { listOf(EngineSegment("わらい", "😂", listOf("😂", "笑い", "わらい"))) }
+        fixture.engine.segmentFor = { _, reading, _ -> EngineSegment(reading, "😂", listOf("😂", "笑い")) }
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "わらい"))
+        fixture.worker.requestSegmentCandidates(1, candidateRequest("わらい"))
+        fixture.executor.runAll()
+
+        assertEquals(
+            listOf(ResultSegment("わらい", "笑い", listOf("笑い", "わらい", "😂"))),
+            fixture.liveResults.single().second.segments,
+        )
+        assertEquals(listOf("笑い", "😂"), fixture.candidateResults.single().second.candidates)
+    }
+
+    /** ニューラル変換の出力が絵文字でも表示値にせず、辞書の候補を表示する。 */
+    @Test
+    fun liveConversionDoesNotDisplayNeuralEmoji() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.segmentsFor = { listOf(EngineSegment("わらい", "笑い", listOf("笑い", "わらい"))) }
+        val backend = FakeNeuralBackend { _, _ -> NeuralModelOutput.Completed("😂") }
+        fixture.worker.setNeuralBackend(backend)
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "わらい"))
+        fixture.executor.runAll()
+
+        assertEquals(listOf("わらい" to ""), backend.calls)
+        val segment = fixture.liveResults.single().second.segments.single()
+        assertEquals("笑い", segment.surface)
+        assertEquals("笑い", segment.candidates.first())
+        assertTrue("😂" in segment.candidates)
+    }
+
+    /** 候補がすべて絵文字なら、読みのまま表示し、絵文字は読みの後ろの候補に残す。 */
+    @Test
+    fun liveConversionShowsReadingWhenAllCandidatesAreEmoji() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.segmentsFor = { listOf(EngineSegment("にこ", "😊", listOf("😊", "☺️"))) }
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "にこ"))
+        fixture.executor.runAll()
+
+        assertEquals(
+            listOf(ResultSegment("にこ", "にこ", listOf("にこ", "😊", "☺️"))),
+            fixture.liveResults.single().second.segments,
+        )
+    }
+
+    /** ユーザー辞書に品詞「顔文字」で登録した語は、読みに完全一致してもライブ変換の表示値にしない。 */
+    @Test
+    fun liveConversionDoesNotDisplayRegisteredEmoticon() {
+        val dictionary = FakeLookup(listOf(UserDictionaryEntry("わら", "（笑）", UserDictionaryCategory.EMOTICON)))
+        val fixture = Fixture(dictionary = dictionary)
+        fixture.startReady()
+        fixture.engine.segmentsFor = { listOf(EngineSegment("わら", "藁", listOf("藁"))) }
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "わら"))
+        fixture.executor.runAll()
+
+        assertEquals(
+            listOf(ResultSegment("わら", "藁", listOf("藁", "わら", "（笑）"))),
+            fixture.liveResults.single().second.segments,
+        )
+    }
+
+    /**
+     * ライブ変換で選んで確定した絵文字は、学習語の先頭になり、エンジンが第一候補に返しても次のライブ変換で自動表示しない。
+     * 2回確定した後は候補の2番目へ上がる。
+     */
+    @Test
+    fun liveCommittedEmojiIsNotDisplayedAutomatically() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.segmentsFor = { listOf(EngineSegment("わらい", "笑い", listOf("笑い", "わらい", "ワライ", "藁い", "嗤い", "哂い", "😂"))) }
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "わらい"))
+        fixture.executor.runAll()
+
+        fixture.worker.learnCommitted(7, listOf(listOf(LearnedSegment("わらい", "😂", chosen = true))))
+        fixture.executor.runAll()
+        // Mozcが確定を学習し、絵文字を第一候補に返すようになった場合を再現する。
+        fixture.engine.segmentsFor = { listOf(EngineSegment("わらい", "😂", listOf("😂", "笑い", "わらい", "ワライ", "藁い", "嗤い", "哂い"))) }
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 2, reading = "わらい"))
+        fixture.executor.runAll()
+
+        val once = fixture.liveResults.last().second.segments.single()
+        assertEquals("笑い", once.surface)
+        assertEquals(5, once.candidates.indexOf("😂"))
+
+        fixture.worker.learnCommitted(7, listOf(listOf(LearnedSegment("わらい", "😂", chosen = true))))
+        fixture.executor.runAll()
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 3, reading = "わらい"))
+        fixture.executor.runAll()
+
+        val twice = fixture.liveResults.last().second.segments.single()
+        assertEquals(2, learning.exactMatches("わらい").single { it.surface == "😂" }.useCount)
+        assertEquals("笑い", twice.surface)
+        assertEquals(1, twice.candidates.indexOf("😂"))
+    }
+
+    /**
+     * ライブ変換で手で選んだ顔文字の文節では句を打ち切る。「ありがとう(^^)」のような句を覚えると、句の表記は
+     * 顔文字と判定されないため次回の表示値になるからである。顔文字の文節は一語として記録し、次回も表示値にしない。
+     * 明示変換でも、その句が先頭の候補にならない。
+     */
+    @Test
+    fun phraseEndingWithChosenKaomojiIsNotLearned() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.segmentsFor = { reading ->
+            if (reading == "ありがとうにこにこ") {
+                listOf(
+                    EngineSegment("ありがとう", "ありがとう", listOf("ありがとう", "有難う")),
+                    EngineSegment("にこにこ", "ニコニコ", listOf("ニコニコ", "にこにこ", "(^^)")),
+                )
+            } else {
+                listOf(EngineSegment(reading, reading, listOf(reading)))
+            }
+        }
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "ありがとうにこにこ"))
+        fixture.executor.runAll()
+
+        fixture.worker.learnCommitted(
+            7,
+            listOf(listOf(LearnedSegment("ありがとう", "ありがとう"), LearnedSegment("にこにこ", "(^^)", chosen = true))),
+        )
+        fixture.executor.runAll()
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 2, reading = "ありがとうにこにこ"))
+        fixture.executor.runAll()
+
+        assertTrue(learning.exactPhraseMatches("ありがとうにこにこ").isEmpty())
+        assertEquals(listOf("(^^)"), learning.exactMatches("にこにこ").map { it.surface })
+        val segments = fixture.liveResults.last().second.segments
+        assertEquals("ありがとうニコニコ", segments.joinToString("") { it.surface })
+        assertEquals(listOf("ニコニコ", "にこにこ", "(^^)"), segments.last().candidates)
+
+        fixture.worker.requestConversion(request(reading = "ありがとうにこにこ"))
+        fixture.executor.runAll()
+        val explicit = (fixture.outcomes.last() as ConversionOutcome.Converted).result
+        assertFalse(EmoticonText.isEmoticon(explicit.headCandidates.first().value))
+        assertTrue(explicit.headCandidates.none { it.value == "ありがとう(^^)" })
+    }
+
     // 学習キャッシュのテスト用の保存先と時計。
     private val learningDirectory: File = Files.createTempDirectory("worker-learning").toFile().apply { deleteOnExit() }
     private val learningFile = File(learningDirectory, "learning.tsv")
@@ -821,6 +1325,17 @@ class ConversionWorkerTest {
         incognito: Boolean = false,
     ) = ConversionRequest(epoch, revision, reading, incognito)
 
+    /** 一文節の変換結果で候補を選んだときに編集セッションが確定へ渡す文節列を作る。 */
+    private fun chooseSegment(result: ConversionResult, candidate: ConversionCandidate): List<ConversionSegment> =
+        listOf(
+            result.segments.single().copy(
+                value = candidate.value,
+                fromUserDictionary = candidate.fromUserDictionary,
+                chosen = true,
+                learnedReading = candidate.learnedReading,
+            ),
+        )
+
     /** テストごとのworker、偽エンジン、手動executorの組。 */
     private class Fixture(dictionary: FakeLookup? = null, learning: LearningStore? = null) {
         val engine = FakeConversionEngine()
@@ -829,6 +1344,7 @@ class ConversionWorkerTest {
         val healthChanges = mutableListOf<EngineHealth>()
         val liveResults = mutableListOf<Pair<Long, LiveResult>>()
         val candidateResults = mutableListOf<Pair<Long, CandidateResult>>()
+        val predictionResults = mutableListOf<PredictionResult>()
         val reports = mutableListOf<Pair<Long, LiveRequestReport>>()
         var evaluating = false
         val worker = ConversionWorker(
@@ -838,6 +1354,7 @@ class ConversionWorkerTest {
             onOutcome = { outcomes += it },
             onLiveResult = { epoch, result -> liveResults += epoch to result },
             onCandidateResult = { epoch, result -> candidateResults += epoch to result },
+            onPredictionResult = predictionResults::add,
             userDictionary = { dictionary },
             learningStore = { learning },
             onLiveReport = { epoch, report -> reports += epoch to report },
@@ -902,6 +1419,17 @@ private class FakeConversionEngine : ConversionEngine {
     var nextSessionId = 100L
     var knownConversionValues = listOf("漢字", "感じ")
     var segmentReadingOverride: String? = null
+    var predictions = listOf(
+        PredictionCandidate(11, "ありがとう", "ありがとう"),
+        PredictionCandidate(12, "☺", "えがお"),
+        PredictionCandidate(13, "ありがとうございます", "ありがとうございます"),
+        PredictionCandidate(14, "助かります", "たすかります"),
+        PredictionCandidate(15, "助かった", "たすかった"),
+    )
+    var nextWordPredictions = listOf(PredictionCandidate(21, "天気", "てんき"))
+
+    // 明示変換で返す先頭文節の候補の表記。既定では「かんじ」だけknownConversionValuesを返し、他は読みをそのまま返す。
+    var convertValuesFor: (String) -> List<String> = { reading -> if (reading == "かんじ") knownConversionValues else listOf(reading) }
 
     override fun load(): EngineHealth = loadResult()
 
@@ -914,14 +1442,24 @@ private class FakeConversionEngine : ConversionEngine {
         calls += "deleteSession($sessionId)"
     }
 
-    override fun setIncognito(incognito: Boolean): Boolean {
+    // setIncognitoで受け取った表記ゆれ変換の有無。呼び出しの記録の形を変えないよう別に残す。
+    val kanaModifierInsensitiveCalls = mutableListOf<Boolean>()
+
+    override fun setIncognito(incognito: Boolean, kanaModifierInsensitive: Boolean): Boolean {
         calls += "setIncognito($incognito)"
+        kanaModifierInsensitiveCalls += kanaModifierInsensitive
         return incognitoAccepted
     }
 
-    override fun convert(sessionId: Long, reading: String, headLength: Int?): EngineConversion {
-        calls += if (headLength == null) "convert($sessionId,$reading)" else "convert($sessionId,$reading,$headLength)"
-        val values = if (reading == "かんじ") knownConversionValues else listOf(reading)
+    // 明示変換で複数文節を返す場合の文節。nullなら読み全体（またはsegmentReadingOverride）を一文節として返す。
+    var explicitSegmentsFor: (String) -> List<ConversionSegment>? = { null }
+
+    override fun convert(sessionId: Long, reading: String, segmentLengths: List<Int>?): EngineConversion {
+        calls += if (segmentLengths == null) "convert($sessionId,$reading)" else "convert($sessionId,$reading,$segmentLengths)"
+        explicitSegmentsFor(reading)?.let { segments ->
+            return EngineConversion(segments = segments, headCandidates = segments.first().candidates)
+        }
+        val values = convertValuesFor(reading)
         val segmentReading = segmentReadingOverride ?: reading
         return EngineConversion(
             segments = listOf(ConversionSegment(segmentReading, values.first())),
@@ -929,8 +1467,20 @@ private class FakeConversionEngine : ConversionEngine {
         )
     }
 
-    override fun commitCandidate(sessionId: Long, candidateId: Int): Boolean {
-        calls += "commitCandidate($sessionId,$candidateId)"
+    /** 入力途中予測の引数を記録し、テストが指定した候補を返す。 */
+    override fun suggest(sessionId: Long, reading: String): List<PredictionCandidate> {
+        calls += "suggest($sessionId,$reading)"
+        return predictions
+    }
+
+    /** ゼロクエリ予測の文脈を記録し、テストが指定した候補を返す。 */
+    override fun requestNextWordPrediction(sessionId: Long, precedingText: String): List<PredictionCandidate> {
+        calls += "nextWord($sessionId,$precedingText)"
+        return nextWordPredictions
+    }
+
+    override fun commitPrediction(sessionId: Long, candidateId: Int): Boolean {
+        calls += "commitPrediction($sessionId,$candidateId)"
         return true
     }
 

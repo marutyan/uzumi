@@ -32,6 +32,12 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
     var fieldPolicy: LiveFieldPolicy = LiveFieldPolicy.NORMAL
         private set
 
+    /**
+     * 今の読みが12キーだけで入力されたか。編集セッションが入力元から決めて設定し、以後に出す変換要求と
+     * 候補の取り直し要求へ写す。trueなら小書き・濁点・半濁点の打ち分けを区別しない変換を使う。
+     */
+    var kanaModifierInsensitive: Boolean = false
+
     private var state = CompositionState.EMPTY
 
     // 読みの変更だけで進む版。stable判定で「独立した読みrevision」を数えるために使う。
@@ -197,6 +203,17 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
         if (!applyReadingEdit(cursor - 1, cursor, replacement, OperationKind.KANA_TRANSFORM)) {
             return LiveUpdate.NO_CHANGE
         }
+        return compositionUpdate(buildRequest())
+    }
+
+    /** 入力カーソル直前の指定読みを一度の編集として置き換える。想定した末尾と異なる場合は扱わない。 */
+    fun replaceBeforeCursor(expected: String, replacement: String): LiveUpdate {
+        if (!acceptsInput() || expected.isEmpty()) return LiveUpdate.NOT_HANDLED
+        val expectedClusters = GraphemeClusters.split(expected)
+        val cursor = state.inputCursor
+        val start = cursor - expectedClusters.size
+        if (start < 0 || state.clusters.subList(start, cursor) != expectedClusters) return LiveUpdate.NOT_HANDLED
+        if (!applyReadingEdit(start, cursor, replacement, OperationKind.INPUT)) return LiveUpdate.NO_CHANGE
         return compositionUpdate(buildRequest())
     }
 
@@ -647,6 +664,7 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
             identity = identity,
             targetReading = state.clusters.subList(identity.targetStart, identity.targetEnd).joinToString(separator = ""),
             learningAllowed = fieldPolicy.learningAllowed,
+            kanaModifierInsensitive = kanaModifierInsensitive,
         )
     }
 
@@ -691,6 +709,7 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
             preceding = contextOf(state.segments.getOrNull(index - 1)),
             following = contextOf(state.segments.getOrNull(index + 1)),
             learningAllowed = fieldPolicy.learningAllowed,
+            kanaModifierInsensitive = kanaModifierInsensitive,
         )
     }
 

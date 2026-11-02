@@ -14,17 +14,29 @@ interface ConversionEngine {
     /** エンジン側のsessionを破棄する。 */
     fun deleteSession(sessionId: Long)
 
-    /** 以後の変換で学習・履歴を使うかを切り替える。変換を送る前に呼ぶ。 */
-    fun setIncognito(incognito: Boolean): Boolean
+    /**
+     * 以後の変換で学習・履歴を使うかと、小書き・濁点・半濁点の打ち分けを区別しない変換（表記ゆれ変換）を使うかを
+     * 切り替える。変換を送る前に呼ぶ。表記ゆれ変換は12キーだけで入れた読みに使う。
+     */
+    fun setIncognito(incognito: Boolean, kanaModifierInsensitive: Boolean = false): Boolean
 
     /**
-     * sessionの状態を読みだけから作り直して変換し、文節と先頭文節の候補を返す。
-     * headLengthを渡すと、先頭文節の読みをその書記素数へ伸縮してから候補を集める（明示変換の文節の伸縮）。
+     * sessionの状態を読みだけから作り直して変換し、文節と各文節の候補を返す。
+     * segmentLengthsを渡すと、先頭から順に各文節をその書記素数へ伸縮してから候補を集める（明示変換の文節の伸縮）。
      */
-    fun convert(sessionId: Long, reading: String, headLength: Int? = null): EngineConversion?
+    fun convert(sessionId: Long, reading: String, segmentLengths: List<Int>? = null): EngineConversion?
 
-    /** 直前の変換の先頭文節を指定候補で確定し、エンジンへ選択を学習させる。 */
-    fun commitCandidate(sessionId: Long, candidateId: Int): Boolean
+    /** 入力途中の読み全体に対するMozc予測を返す。変換候補と予測候補を分けるため別sessionで呼ぶ。 */
+    fun suggest(sessionId: Long, reading: String): List<PredictionCandidate>
+
+    /** 確定済みの周辺文字列から、次の語のゼロクエリ予測を返す。 */
+    fun requestNextWordPrediction(sessionId: Long, precedingText: String): List<PredictionCandidate>
+
+    /**
+     * 予測sessionで直前に返した予測候補を確定し、エンジンの履歴へ選択を学習させる。
+     * 明示変換の候補確定はcommitAllとlearnSegmentsで行うため、予測の選択だけに使う。
+     */
+    fun commitPrediction(sessionId: Long, candidateId: Int): Boolean
 
     /** 直前の変換の全文節を第一候補のまま確定し、エンジンへ学習させる。 */
     fun commitAll(sessionId: Long): Boolean

@@ -1,9 +1,11 @@
 package dev.uzumi.ime.conversion
 
 import dev.uzumi.ime.editor.GraphemeClusters
+import dev.uzumi.ime.editor.KanaModifier
 import java.io.File
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCandidateWindow.CandidateWord
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Command
+import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Context
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Input
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.KeyEvent
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Output
@@ -41,6 +43,10 @@ class MozcConversionEngine(
 ) : ConversionEngine {
     // 直前の応答にpreeditが残っていたsession。worker threadだけが読み書きする。
     private val sessionsWithPreedit = mutableSetOf<Long>()
+    // SET_REQUESTは全sessionへ適用されるため、予測要求の一時設定を戻す際にincognitoを保つ。
+    private var incognitoMode = false
+    // 直前のsetIncognitoで決めた表記ゆれ変換の有無。予測の一時設定とその後の復元でも同じ値を使う。
+    private var kanaModifierInsensitiveMode = false
 
     override fun load(): EngineHealth {
         if (!native.loadLibrary()) {
@@ -56,7 +62,21 @@ class MozcConversionEngine(
         if (version.isBlank() || version == MINIMAL_ENGINE_DATA_VERSION) {
             return EngineHealth.Unavailable(EngineUnavailableReason.MINIMAL_ENGINE)
         }
+        if (!enableKanaModifierInsensitiveConfig()) {
+            return EngineHealth.Unavailable(EngineUnavailableReason.INITIALIZATION_FAILED)
+        }
         return EngineHealth.Ready(version)
+    }
+
+    /**
+     * 表記ゆれ変換は、Mozcの設定（Config）と要求（Request）の両方が有効なときだけ働く（論理積）。
+     * 設定は保存されるため一度だけ有効にし、使うかどうかは要求の側で切り替える。
+     */
+    private fun enableKanaModifierInsensitiveConfig(): Boolean {
+        val current = eval(Input.newBuilder().setType(Input.CommandType.GET_CONFIG)) ?: return false
+        if (current.config.useKanaModifierInsensitiveConversion) return true
+        val config = current.config.toBuilder().setUseKanaModifierInsensitiveConversion(true)
+        return eval(Input.newBuilder().setType(Input.CommandType.SET_CONFIG).setConfig(config)) != null
     }
 
     override fun createSession(): Long? {
@@ -69,20 +89,98 @@ class MozcConversionEngine(
         eval(Input.newBuilder().setType(Input.CommandType.DELETE_SESSION).setId(sessionId))
     }
 
-    override fun setIncognito(incognito: Boolean): Boolean {
-        val input = Input.newBuilder()
-            .setType(Input.CommandType.SET_REQUEST)
-            .setRequest(Request.newBuilder().setIsIncognitoMode(incognito))
-        return eval(input) != null
+    /**
+     * 学習の有無と表記ゆれ変換の有無だけの要求へ戻し、予測用requestの全sessionへの残留を防ぐ。
+     * 表記ゆれ変換の有無は次のsetIncognitoまでの変換・予測・復元で同じ値を使う。
+     */
+    override fun setIncognito(incognito: Boolean, kanaModifierInsensitive: Boolean): Boolean {
+        if (!setRequest(request(incognito, kanaModifierInsensitive))) return false
+        incognitoMode = incognito
+        kanaModifierInsensitiveMode = kanaModifierInsensitive
+        return true
     }
 
-    override fun convert(sessionId: Long, reading: String, headLength: Int?): EngineConversion? {
+    /**
+     * 明示変換する。segmentLengthsがあれば先頭から順に各文節の幅を合わせ、利用者が伸縮した区切りを再現する。
+     * 最後に各文節へfocusを移して、その文節の読みだけを置き換える候補を集める。
+     */
+    override fun convert(sessionId: Long, reading: String, segmentLengths: List<Int>?): EngineConversion? {
         var output = composeAndConvert(sessionId, reading, requestSuggestion = true) ?: return null
-        if (headLength != null) {
-            val head = GraphemeClusters.split(reading).take(headLength).joinToString(separator = "")
-            output = alignFocusedSegment(sessionId, output, 0, head) ?: return null
+        if (segmentLengths != null) output = alignSegments(sessionId, output, reading, segmentLengths) ?: return null
+        if (!output.hasPreedit()) return null
+        val candidates = collectSegmentCandidates(sessionId, output) ?: return null
+        val segments = output.preedit.segmentList.mapIndexed { index, segment ->
+            ConversionSegment(reading = segment.key, value = segment.value, candidates = candidates[index])
         }
-        return toConversion(sessionId, output)
+        return EngineConversion(segments = segments, headCandidates = segments.first().candidates)
+    }
+
+    /**
+     * 変換直後（先頭文節にfocus）の状態から、先頭からi番目の文節の読みをlengths[i]書記素へ順に合わせる。
+     * Mozcは伸縮した文節より後ろだけを区切り直すため、前の文節から順に合わせれば先に合わせた区切りは保たれる。
+     */
+    private fun alignSegments(sessionId: Long, start: Output, reading: String, lengths: List<Int>): Output? {
+        val clusters = GraphemeClusters.split(reading)
+        var output = start
+        var offset = 0
+        for ((index, length) in lengths.withIndex()) {
+            if (length < 1 || offset + length > clusters.size) return null
+            if (index > 0) {
+                output = sendKey(sessionId, KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.RIGHT)) ?: return null
+            }
+            val target = clusters.subList(offset, offset + length).joinToString(separator = "")
+            output = alignFocusedSegment(sessionId, output, index, target) ?: return null
+            offset += length
+        }
+        return output
+    }
+
+    /**
+     * 読みを入力し、入力した読みを補う予測だけを候補IDとともに返す。予測の計算は重いため、
+     * 途中のキーではsuggestionを求めず、最後のキーでだけ求める。
+     */
+    override fun suggest(sessionId: Long, reading: String): List<PredictionCandidate> {
+        if (reading.isEmpty()) return emptyList()
+        if (sessionId in sessionsWithPreedit) {
+            sendCommand(sessionId, SessionCommand.CommandType.REVERT) ?: return emptyList()
+        }
+        if (!setRequest(request(incognitoMode, kanaModifierInsensitiveMode, prediction = true, zeroQuery = false))) {
+            return emptyList()
+        }
+        var output: Output? = null
+        var failed = false
+        val characters = GraphemeClusters.split(reading)
+        for ((index, character) in characters.withIndex()) {
+            val key = KeyEvent.newBuilder()
+                .setKeyString(character)
+                .setInputStyle(KeyEvent.InputStyle.AS_IS)
+            output = sendKey(sessionId, key, requestSuggestion = index == characters.lastIndex)
+            if (output == null || !output.consumed) {
+                failed = true
+                break
+            }
+        }
+        val candidates = if (failed) emptyList() else output?.let { predictionCandidates(it, reading) }.orEmpty()
+        return candidates.takeIf { restoreRequest() }.orEmpty()
+    }
+
+    /** 直前の確定文字をcontextに設定し、Mozcの専用NWP命令で次の語を求める。 */
+    override fun requestNextWordPrediction(sessionId: Long, precedingText: String): List<PredictionCandidate> {
+        if (precedingText.isBlank()) return emptyList()
+        if (sessionId in sessionsWithPreedit) {
+            sendCommand(sessionId, SessionCommand.CommandType.REVERT) ?: return emptyList()
+        }
+        if (!setRequest(request(incognitoMode, kanaModifierInsensitiveMode, prediction = true, zeroQuery = true))) {
+            return emptyList()
+        }
+        val output = sendCommand(
+            sessionId = sessionId,
+            type = SessionCommand.CommandType.REQUEST_NWP,
+            context = Context.newBuilder().setPrecedingText(precedingText),
+            requestSuggestion = true,
+        )
+        val candidates = output?.let { predictionCandidates(it, reading = null) }.orEmpty()
+        return candidates.takeIf { restoreRequest() }.orEmpty()
     }
 
     override fun convertSegment(sessionId: Long, preceding: String, reading: String, following: String): EngineSegment? {
@@ -227,6 +325,99 @@ class MozcConversionEngine(
             .distinct()
     }
 
+    /** Mozcの候補窓から、入力途中の予測として出せる候補を最大9件先読みする。readingがnullなら次の語の予測。 */
+    private fun predictionCandidates(output: Output, reading: String?): List<PredictionCandidate> {
+        if (!output.hasAllCandidateWords()) return emptyList()
+        return output.allCandidateWords.candidatesList
+            .asSequence()
+            .filter { it.hasId() && it.hasValue() && it.value.isNotBlank() }
+            .mapNotNull { word ->
+                if (reading == null) PredictionCandidate(word.id, word.value, word.key.takeIf { word.hasKey() })
+                else readingPrediction(word, reading)
+            }
+            .distinctBy { it.value }
+            .take(MAX_PREDICTIONS)
+            .toList()
+    }
+
+    /**
+     * 入力途中の候補を残すか決め、残すなら学習に使う読みを付けて返す。残すのは、(a) keyが入力した読みの続きである予測と、
+     * (b) 入力した読み全体の変換結果。Mozcは候補の自立語部分の読み（content_key）が入力と違うときだけkeyを付けるため、
+     * keyが無い候補は読み全体の変換で、その読みは入力と同じ。keyが入力の接頭辞の候補（「了解しました」のkey「りょうかいし」）は
+     * 表記の読み全体が分からないため、IME側の学習へは記録しない（読みをnullにする）。表記ゆれ変換が有効な間は、
+     * keyと入力を小書き・濁点・半濁点の違いを除いて比べる。打ったとおりのひらがなは候補にしない。
+     */
+    private fun readingPrediction(word: CandidateWord, reading: String): PredictionCandidate? {
+        if (word.value == reading) return null
+        if (!word.hasKey()) return PredictionCandidate(word.id, word.value, reading)
+        val key = comparableReading(word.key)
+        val typed = comparableReading(reading)
+        return when {
+            key.startsWith(typed) -> PredictionCandidate(word.id, word.value, word.key)
+            typed.startsWith(key) -> PredictionCandidate(word.id, word.value, null)
+            else -> null
+        }
+    }
+
+    /** 読み同士を比べる形。表記ゆれ変換が有効な間だけ、小書き・濁点・半濁点の違いを除く。 */
+    private fun comparableReading(reading: String): String =
+        if (kanaModifierInsensitiveMode) KanaModifier.stripModifiers(reading) else reading
+
+    /**
+     * Uzumiが送るRequestを1か所で組み立てる。通常は学習の有無と表記ゆれ変換の有無だけを指定し、
+     * 予測の間だけAndroid向けの混合候補（mixed_conversion）とゼロクエリの取得方式を加える。
+     */
+    private fun request(
+        incognito: Boolean,
+        kanaModifierInsensitive: Boolean,
+        prediction: Boolean = false,
+        zeroQuery: Boolean = false,
+    ): Request {
+        val builder = Request.newBuilder()
+            .setIsIncognitoMode(incognito)
+            .setKanaModifierInsensitiveConversion(kanaModifierInsensitive)
+        if (prediction) builder.setZeroQuerySuggestion(zeroQuery).setMixedConversion(true)
+        return builder.build()
+    }
+
+    /** 予測の一時設定を、直前のsetIncognitoと同じ通常の要求へ戻す。 */
+    private fun restoreRequest(): Boolean = setRequest(request(incognitoMode, kanaModifierInsensitiveMode))
+
+    /** SET_REQUESTでMozc全sessionのrequest設定を差し替える。予測設定は直後に通常設定へ戻す。 */
+    private fun setRequest(request: Request): Boolean = eval(
+        Input.newBuilder()
+            .setType(Input.CommandType.SET_REQUEST)
+            .setRequest(request),
+    ) != null
+
+    /**
+     * focusを先頭文節へ戻してから右へ一つずつ動かし、各文節の読みだけを置き換える候補を集める。
+     * focusの移動は文節を仮に固定するだけで確定しないため、学習は起きない。候補が無い文節は表示中の表記だけにする。
+     */
+    private fun collectSegmentCandidates(sessionId: Long, start: Output): List<List<ConversionCandidate>>? {
+        val segmentCount = start.preedit.segmentCount
+        var output = start
+        // 戻す回数は文節数を上限にし、Mozcがfocusを動かさない場合も止まるようにする。
+        repeat(segmentCount) {
+            if (focusedSegmentIndex(output) <= 0) return@repeat
+            output = sendKey(sessionId, KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.LEFT)) ?: return null
+        }
+        val candidates = mutableListOf<List<ConversionCandidate>>()
+        for (index in 0 until segmentCount) {
+            if (index > 0) {
+                output = sendKey(sessionId, KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.RIGHT)) ?: return null
+            }
+            if (focusedSegmentIndex(output) != index) return null
+            val segment = output.preedit.getSegment(index)
+            val words = output.allCandidateWords.candidatesList
+                .filter { it.hasValue() && it.value.isNotEmpty() && replacesOnlySegment(it, segment.key) }
+                .map { ConversionCandidate(id = it.id, value = it.value, reading = segment.key) }
+                .distinctBy { it.value }
+            candidates += words.ifEmpty { listOf(ConversionCandidate(ConversionCandidate.DISPLAYED_VALUE_ID, segment.value, segment.key)) }
+        }
+        return candidates
+    }
+
     /**
      * 候補が文節の読みだけを置き換えるかを、候補の情報だけで安く判定する。
      * Mozcは候補の自立語部分の読み（content_key、「講演に」なら「こうえん」）が文節の読みと違うとkeyへ入れる
@@ -235,7 +426,8 @@ class MozcConversionEngine(
      * 複数の文節をまとめる候補も除く。どちらもsegment境界を壊すためである。
      */
     private fun replacesOnlySegment(word: CandidateWord, segmentReading: String): Boolean {
-        val sameReading = !word.hasKey() || segmentReading.startsWith(word.key)
+        // 表記ゆれ変換の候補（入力「りようかいし」に対するkey「りょうかい」）も、文節の読みを置き換える候補として扱う。
+        val sameReading = !word.hasKey() || comparableReading(segmentReading).startsWith(comparableReading(word.key))
         return sameReading && word.numSegmentsInCandidate <= 1
     }
 
@@ -246,38 +438,14 @@ class MozcConversionEngine(
         return history && prediction
     }
 
-    override fun commitCandidate(sessionId: Long, candidateId: Int): Boolean {
-        val output = sendCommand(sessionId, SessionCommand.CommandType.SUBMIT_CANDIDATE, candidateId)
-        return output?.consumed == true
-    }
-
     override fun commitAll(sessionId: Long): Boolean {
         return sendCommand(sessionId, SessionCommand.CommandType.SUBMIT)?.consumed == true
     }
 
-    /**
-     * 変換状態のOutputから文節と先頭文節の候補を取り出す。変換状態でなければnullを返す。
-     * 候補には複数の文節をまとめて置き換えるもの（全文候補など）が混ざり、候補の情報だけでは
-     * 覆う読みを確実に判別できない。そこで各候補を一時的に選び、preeditの先頭文節の読みを
-     * その候補が確定する読みとして記録し、最後に元の候補へ選択を戻す。
-     */
-    private fun toConversion(sessionId: Long, output: Output): EngineConversion? {
-        if (!output.hasPreedit() || !output.hasAllCandidateWords()) return null
-        val segments = output.preedit.segmentList.map { ConversionSegment(reading = it.key, value = it.value) }
-        val words = output.allCandidateWords.candidatesList
-            .filter { it.hasValue() && it.value.isNotEmpty() }
-        val focusedId = output.allCandidateWords.candidatesList
-            .getOrNull(output.allCandidateWords.focusedIndex)
-            ?.id
-        val candidates = words.mapNotNull { word ->
-            val selected = sendCommand(sessionId, SessionCommand.CommandType.SELECT_CANDIDATE, word.id)
-            val headReading = selected?.preedit?.segmentList?.firstOrNull()?.key
-            headReading?.let { ConversionCandidate(id = word.id, value = word.value, reading = it) }
-        }.distinctBy { it.value to it.reading }
-        if (focusedId != null) {
-            sendCommand(sessionId, SessionCommand.CommandType.SELECT_CANDIDATE, focusedId) ?: return null
-        }
-        return EngineConversion(segments = segments, headCandidates = candidates)
+    /** 予測sessionの候補窓にある予測候補をSUBMIT_CANDIDATEで確定し、Mozcの履歴へ学習させる。 */
+    override fun commitPrediction(sessionId: Long, candidateId: Int): Boolean {
+        val output = sendCommand(sessionId, SessionCommand.CommandType.SUBMIT_CANDIDATE, candidateId)
+        return output?.consumed == true
     }
 
     /** 指定sessionへキー入力を一つ送る。requestSuggestionがfalseなら入力途中の予測を求めない。 */
@@ -300,15 +468,18 @@ class MozcConversionEngine(
         sessionId: Long,
         type: SessionCommand.CommandType,
         candidateId: Int? = null,
+        context: Context.Builder? = null,
+        requestSuggestion: Boolean? = null,
     ): Output? {
         val command = SessionCommand.newBuilder().setType(type)
         candidateId?.let(command::setId)
-        return eval(
-            Input.newBuilder()
-                .setType(Input.CommandType.SEND_COMMAND)
-                .setId(sessionId)
-                .setCommand(command),
-        )?.also { recordPreedit(sessionId, it) }
+        val input = Input.newBuilder()
+            .setType(Input.CommandType.SEND_COMMAND)
+            .setId(sessionId)
+            .setCommand(command)
+        context?.let(input::setContext)
+        requestSuggestion?.let(input::setRequestSuggestion)
+        return eval(input)?.also { recordPreedit(sessionId, it) }
     }
 
     /** Commandを一つ評価し、失敗の応答や解析できない応答ならnullを返す。 */
@@ -327,5 +498,8 @@ class MozcConversionEngine(
 
         /** APKに辞書が無い場合にnativeへ渡す、存在しないfileの名前。 */
         const val MISSING_DATA_FILE_NAME = "mozc-data-missing"
+
+        /** 顔文字・絵文字を除いた後も候補を揃えられるようMozcから先読みする件数。 */
+        private const val MAX_PREDICTIONS = 9
     }
 }

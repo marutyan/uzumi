@@ -1,13 +1,15 @@
 package dev.uzumi.ime.evaluation
 
 import dev.uzumi.ime.keyboard.KeyboardAction
+import dev.uzumi.ime.keyboard.FlickDirection
+import dev.uzumi.ime.keyboard.KeyboardLayoutData
 
 /**
  * Phase 2cの評価で数える操作の種類。押下1回を一つの種類へ分け、入力した本文や候補の文字列は持たない。
  * 定義は`docs/phase2c-evaluation-protocol.md`の「指標」に従う。
  */
 enum class OperationKind {
-    /** 読み・英数字・読点・空白の入力と、小゛゜による文字の切り替え。 */
+    /** 読み・英数字・読点・空白・絵文字の入力と、小゛゜による文字の切り替え。 */
     INPUT,
 
     /** 誤りのない表示を確定するためだけの操作。明示変換の変換キーと、第一候補の選択。 */
@@ -22,7 +24,7 @@ enum class OperationKind {
     /** 本来の終端操作。句点の入力とEnter（改行・送信）。どの操作数にも含めない。 */
     TERMINATOR,
 
-    /** 上のどれにも当たらない押下。面の切替、Shift、候補一覧の開閉など。キー操作数だけに数える。 */
+    /** 上のどれにも当たらない押下。面の切替、Shift、候補一覧や絵文字一覧の開閉など。キー操作数だけに数える。 */
     OTHER,
 }
 
@@ -58,10 +60,12 @@ object OperationClassifier {
     /**
      * キーボードの操作[action]の種類。変換キーは、明示変換（[liveMode]がfalse）では変換を始める確定操作、
      * ライブ変換では次の候補へ切り替える訂正操作とする。Enterは入力中でも確定と改行・送信を一度に行うため終端操作とする。
-     * キー操作数は画面に指が触れた回数なので、同じ長押しで繰り返した文節の伸縮（2回目以降）は数えずnullを返す。
+     * 顔文字・絵文字の選択は入力、一覧の開閉はその他の操作とする。同じ長押しの文節伸縮と、カーソルドラッグの
+     * 2回目以降の書記素移動は一回の操作として数え、続きにnullを返す。
      */
     fun keyboardAction(action: KeyboardAction, liveMode: Boolean): OperationKind? = when (action) {
         is KeyboardAction.Text -> text(action.value)
+        is KeyboardAction.KanaTap -> text(KeyboardLayoutData.getKanaChar(action.type, FlickDirection.CENTER))
         KeyboardAction.Space, KeyboardAction.TransformKana -> OperationKind.INPUT
         KeyboardAction.Convert -> if (liveMode) OperationKind.CORRECTION else OperationKind.COMMIT
         KeyboardAction.Delete,
@@ -69,7 +73,10 @@ object OperationClassifier {
         is KeyboardAction.MoveCursor,
         KeyboardAction.ToKatakana,
         -> OperationKind.CORRECTION
+        is KeyboardAction.MoveEditorCursor -> if (action.continued) null else OperationKind.CORRECTION
         is KeyboardAction.ResizeSegment -> if (action.continued) null else OperationKind.CORRECTION
+        is KeyboardAction.InsertEmoji -> OperationKind.INPUT
+        KeyboardAction.OpenEmojiPicker, KeyboardAction.CloseEmojiPicker -> OperationKind.OTHER
         KeyboardAction.Enter -> OperationKind.TERMINATOR
     }
 

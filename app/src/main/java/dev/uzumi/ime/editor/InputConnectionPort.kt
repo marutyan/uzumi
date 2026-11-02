@@ -1,5 +1,7 @@
 package dev.uzumi.ime.editor
 
+import android.os.SystemClock
+import android.view.KeyEvent
 import android.view.inputmethod.InputConnection
 
 /**
@@ -27,11 +29,20 @@ interface EditorConnectionPort {
     /** editor actionを送る。 */
     fun performEditorAction(actionCode: Int): Boolean
 
+    /** actionの指定がない欄へ、ソフトキーボードのEnterキーの押下と解放を送る。 */
+    fun sendEnterKey(): Boolean
+
+    /** 周辺文字列を読めない互換入力欄（TYPE_NULL）へ、Deleteキーの押下と解放を送る。 */
+    fun sendDeleteKey(): Boolean
+
     /** 削除範囲計算に使う直前の文字列を取得する。 */
     fun textBeforeCursor(maxChars: Int): CharSequence?
 
     /** カーソル移動に使う直後の文字列を取得する。 */
     fun textAfterCursor(maxChars: Int): CharSequence?
+
+    /** 選択範囲の文字列を取得する。取得できないEditorではnullを返す。 */
+    fun selectedText(): CharSequence?
 
     /** 接続を無効にする。 */
     fun invalidate()
@@ -85,6 +96,21 @@ class AndroidInputConnectionPort(
         return call { delegate.performEditorAction(actionCode) }
     }
 
+    override fun sendEnterKey(): Boolean = sendDownUpKey(KeyEvent.KEYCODE_ENTER)
+
+    override fun sendDeleteKey(): Boolean = sendDownUpKey(KeyEvent.KEYCODE_DEL)
+
+    /** 指定したキーの押下と解放を、ソフトキーボードからの入力として送る。 */
+    private fun sendDownUpKey(keyCode: Int): Boolean {
+        val time = SystemClock.uptimeMillis()
+        // InputMethodService.sendDownUpKeyEventsと同じ印を付け、ソフトキーボード由来の入力として扱わせる。
+        val flags = KeyEvent.FLAG_SOFT_KEYBOARD or KeyEvent.FLAG_KEEP_TOUCH_MODE
+        return call {
+            delegate.sendKeyEvent(KeyEvent(time, time, KeyEvent.ACTION_DOWN, keyCode, 0, 0, -1, 0, flags)) &&
+                delegate.sendKeyEvent(KeyEvent(time, time, KeyEvent.ACTION_UP, keyCode, 0, 0, -1, 0, flags))
+        }
+    }
+
     override fun textBeforeCursor(maxChars: Int): CharSequence? {
         if (!active) return null
         return runCatching { delegate.getTextBeforeCursor(maxChars, 0) }.getOrNull()
@@ -93,6 +119,11 @@ class AndroidInputConnectionPort(
     override fun textAfterCursor(maxChars: Int): CharSequence? {
         if (!active) return null
         return runCatching { delegate.getTextAfterCursor(maxChars, 0) }.getOrNull()
+    }
+
+    override fun selectedText(): CharSequence? {
+        if (!active) return null
+        return runCatching { delegate.getSelectedText(0) }.getOrNull()
     }
 
     private fun call(operation: () -> Boolean): Boolean {

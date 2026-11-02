@@ -144,6 +144,21 @@ class CompositionBuffer {
         return true
     }
 
+    /** 読みカーソル直前の指定文字列を一度に置き換える。範囲や内容が異なる場合は変更しない。 */
+    fun replaceBeforeCursor(expected: String, replacement: String): Boolean {
+        if (hasSelection || expected.isEmpty() || selectionEnd == 0) return false
+        val expectedClusters = GraphemeClusters.split(expected)
+        val start = selectionEnd - expectedClusters.size
+        if (start < 0 || clusters.subList(start, selectionEnd) != expectedClusters) return false
+        clusters.subList(start, selectionEnd).clear()
+        val replacementClusters = GraphemeClusters.split(replacement)
+        clusters.addAll(start, replacementClusters)
+        selectionStart = start + replacementClusters.size
+        selectionEnd = selectionStart
+        displayOverride = null
+        return true
+    }
+
     /**
      * 読みを変えずに表示文字列だけを候補へ差し替える。
      */
