@@ -419,6 +419,23 @@ class KeyboardLayoutDataTest {
         state.toggle(nowMillis = 0L)
         assertFalse(state.isShiftActive)
         assertFalse(state.isCapsLock)
+        // 自動のShiftを取り消した押下から素早く続けて押すと、Caps Lockになり「ab」が「AB」になる
+        val doubled = QwertyShiftState()
+        doubled.applyAutoCaps(shift = true, characters = false)
+        doubled.toggle(nowMillis = 1_000L)
+        doubled.toggle(nowMillis = 1_200L)
+        assertTrue(doubled.isCapsLock)
+        doubled.onTextInput()
+        doubled.applyAutoCaps(shift = false, characters = false)
+        doubled.onTextInput()
+        assertTrue(doubled.isCapsLock)
+        // 間を空けて押した場合は、通常のShiftになる
+        val slow = QwertyShiftState()
+        slow.applyAutoCaps(shift = true, characters = false)
+        slow.toggle(nowMillis = 1_000L)
+        slow.toggle(nowMillis = 2_000L)
+        assertFalse(slow.isCapsLock)
+        assertTrue(slow.isShiftActive)
         // 自動大文字化を求めない欄では、従来どおり押すたびにShiftを切り替える
         val manual = QwertyShiftState()
         manual.toggle(nowMillis = 0L)

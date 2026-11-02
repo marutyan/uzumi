@@ -619,6 +619,9 @@ class QwertyShiftState {
 
     private var lastShiftPressTime = 0L
 
+    // 直前のShiftの押下が自動のShiftを取り消したか。続けて素早く押した場合もCaps Lockにするために使う。
+    private var lastPressCanceledAutoShift = false
+
     /** 文字キーを大文字で表示・入力するShiftが有効か（Caps Lockを除く）。 */
     val isShiftActive: Boolean
         get() = isShifted || isAutoShifted
@@ -626,19 +629,26 @@ class QwertyShiftState {
     /**
      * Shiftキーの押下（単押し: Shiftトグル、素早いダブルタップ: Caps Lockトグル）を反映する。
      * 自動のShiftだけが有効な間に押した場合は、標準のキーボードと同じく自動のShiftを取り消して小文字にする。
+     * その押下もダブルタップの1回目として扱い、続けて素早く押せばCaps Lockにする。
      */
     fun toggle(nowMillis: Long) {
+        val isDoubleTap = nowMillis - lastShiftPressTime < DOUBLE_TAP_TIMEOUT_MS
+        val canceledAutoShift = lastPressCanceledAutoShift
+        lastPressCanceledAutoShift = false
         if (isCapsLock) {
             isCapsLock = false
             isShifted = false
         } else if (isShifted) {
-            if (nowMillis - lastShiftPressTime < DOUBLE_TAP_TIMEOUT_MS) {
+            if (isDoubleTap) {
                 isCapsLock = true
             }
             isShifted = false
         } else if (isAutoShifted) {
             isAutoShifted = false
             isAutoCharacters = false
+            lastPressCanceledAutoShift = true
+        } else if (canceledAutoShift && isDoubleTap) {
+            isCapsLock = true
         } else {
             isShifted = true
         }
