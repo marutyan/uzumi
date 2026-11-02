@@ -178,6 +178,8 @@ class UzumiInputMethodService : InputMethodService() {
                 native = JniMozcNativeBridge(),
                 profileDirectory = installer::profileDirectory,
                 dataFile = installer::install,
+                // 評価の記録中は表記ゆれ変換を使わず、変換結果を評価の比較条件から変えない。
+                kanaModifierInsensitive = { !evaluation.isRecording },
             ),
             executor = countingExecutor,
             onHealthChanged = { health ->

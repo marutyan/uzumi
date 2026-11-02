@@ -15,6 +15,7 @@ import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.KeyEvent
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Output
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Preedit
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.SessionCommand
+import org.mozc.android.inputmethod.japanese.protobuf.ProtoConfig.Config
 
 /** Mozc protocolの命令列と、辞書なし状態の検出を偽のnativeで検証する。 */
 class MozcConversionEngineTest {
@@ -59,7 +60,138 @@ class MozcConversionEngineTest {
         assertTrue(requests.last().isIncognitoMode)
         assertFalse(requests.last().mixedConversion)
         assertFalse(requests.last().zeroQuerySuggestion)
+        // 予測の一時設定と、その後の通常設定への復元のどちらでも表記ゆれ変換を保つ。
+        assertTrue(requests.all { it.kanaModifierInsensitiveConversion })
         assertFalse(native.inputs.any { it.key.specialKey == KeyEvent.SpecialKey.SPACE })
+    }
+
+    /**
+     * 表記ゆれ変換が有効なら、小書きを打ち分けなかった読み（「りようかいしました」）に対し、読み全体の変換結果と
+     * 小書き・濁点の違いを除いて続く予測も残す。候補はsession_handler_mainで実際のMozcが返した形を写したもの。
+     */
+    @Test
+    fun suggestKeepsWholeReadingAndKanaVariantCandidates() {
+        val native = kanaVariantPredictionNative()
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+        assertTrue(engine.setIncognito(false))
+
+        assertEquals(
+            listOf(
+                // keyが入力の接頭辞の候補は表記の読み全体が分からないため、IME側の学習へ読みを渡さない。
+                PredictionCandidate(0, "了解しました", null),
+                PredictionCandidate(1, "利用介しました", "りようかいしました"),
+                PredictionCandidate(4, "利用開始ました", null),
+                PredictionCandidate(5, "リヨウカイシマシタ", "りようかいしました"),
+                PredictionCandidate(6, "領解しました", "りょうかいしました"),
+                PredictionCandidate(7, "りょうかいしました", "りょうかいしました"),
+            ),
+            engine.suggest(sessionId = 5, reading = "りようかいしました"),
+        )
+    }
+
+    /** 評価の記録中など表記ゆれ変換を使わない間は、Requestで無効にし、読みの違う候補を従来どおり除く。 */
+    @Test
+    fun suggestWithoutKanaModifierInsensitiveDropsVariantReadings() {
+        val native = kanaVariantPredictionNative()
+        val engine = MozcConversionEngine(native, { File("profile") }, { null }, kanaModifierInsensitive = { false })
+        assertTrue(engine.setIncognito(false))
+
+        assertEquals(
+            listOf(
+                PredictionCandidate(1, "利用介しました", "りようかいしました"),
+                PredictionCandidate(4, "利用開始ました", null),
+                PredictionCandidate(5, "リヨウカイシマシタ", "りようかいしました"),
+            ),
+            engine.suggest(sessionId = 5, reading = "りようかいしました"),
+        )
+        val requests = native.inputs.filter { it.type == Input.CommandType.SET_REQUEST }.map { it.request }
+        assertEquals(3, requests.size)
+        assertTrue(requests.none { it.kanaModifierInsensitiveConversion })
+    }
+
+    /** 実際のMozcが「りようかいしました」の入力途中に返した候補窓（表記ゆれ変換あり）を写した偽native。 */
+    private fun kanaVariantPredictionNative() = FakeMozcNative().apply {
+        respond = { input ->
+            if (input.type == Input.CommandType.SEND_KEY && input.key.hasKeyString()) {
+                predictionOutput(
+                    CandidateWord.newBuilder().setId(0).setKey("りょうかいし").setValue("了解しました"),
+                    CandidateWord.newBuilder().setId(1).setValue("利用介しました").setNumSegmentsInCandidate(2),
+                    CandidateWord.newBuilder().setId(4).setKey("りようかいし").setValue("利用開始ました"),
+                    CandidateWord.newBuilder().setId(5).setValue("リヨウカイシマシタ"),
+                    CandidateWord.newBuilder().setId(6).setKey("りょうかいしました").setValue("領解しました"),
+                    CandidateWord.newBuilder().setId(7).setKey("りょうかいしました").setValue("りょうかいしました"),
+                    // 打ったとおりのひらがなと、読みが入力と関係しない候補は出さない。
+                    CandidateWord.newBuilder().setId(8).setValue("りようかいしました"),
+                    CandidateWord.newBuilder().setId(9).setKey("りんご").setValue("林檎"),
+                )
+            } else {
+                Output.newBuilder().setConsumed(true).build()
+            }
+        }
+    }
+
+    /** 表記ゆれ変換の候補（keyが小書きの違う読み）も、文節の読みだけを置き換える候補として文節の候補へ入れる。 */
+    @Test
+    fun convertSegmentsKeepsKanaVariantCandidatesOnlyWhenEnabled() {
+        val respond: (Input) -> Output = { input ->
+            if (input.key.specialKey == KeyEvent.SpecialKey.SPACE) {
+                Output.newBuilder().setConsumed(true)
+                    .setPreedit(
+                        Preedit.newBuilder().setCursor(0).addSegment(
+                            Preedit.Segment.newBuilder().setKey("りようかいしました").setValue("了解しました")
+                                .setValueLength(6).setAnnotation(Preedit.Segment.Annotation.HIGHLIGHT),
+                        ),
+                    )
+                    .setAllCandidateWords(
+                        CandidateList.newBuilder()
+                            .addCandidates(CandidateWord.newBuilder().setId(0).setKey("りょうかいし").setValue("了解しました"))
+                            .addCandidates(CandidateWord.newBuilder().setId(1).setKey("りようかいし").setValue("利用開始ました")),
+                    )
+                    .build()
+            } else {
+                Output.newBuilder().setConsumed(true).build()
+            }
+        }
+        val enabled = MozcConversionEngine(FakeMozcNative().apply { this.respond = respond }, { File("profile") }, { null })
+        assertTrue(enabled.setIncognito(false))
+        assertEquals(
+            listOf("了解しました", "利用開始ました"),
+            enabled.convertSegments(sessionId = 5, reading = "りようかいしました")!!.single().candidates,
+        )
+
+        val disabled = MozcConversionEngine(
+            FakeMozcNative().apply { this.respond = respond }, { File("profile") }, { null }, kanaModifierInsensitive = { false },
+        )
+        assertTrue(disabled.setIncognito(false))
+        assertEquals(
+            listOf("利用開始ました"),
+            disabled.convertSegments(sessionId = 5, reading = "りようかいしました")!!.single().candidates,
+        )
+    }
+
+    /** 表記ゆれ変換はConfigとRequestの論理積で働くため、読み込み時にConfigを一度だけ有効にする。 */
+    @Test
+    fun loadEnablesKanaModifierInsensitiveConfigOnce() {
+        val profile = createTempDir()
+        val native = FakeMozcNative().apply { version = "2.31.0" }
+        val engine = MozcConversionEngine(native, { profile }, { File(profile, "mozc.data") })
+
+        assertEquals(EngineHealth.Ready("2.31.0"), engine.load())
+        assertEquals(listOf(Input.CommandType.GET_CONFIG, Input.CommandType.SET_CONFIG), native.inputs.map { it.type })
+        assertTrue(native.inputs.last().config.useKanaModifierInsensitiveConversion)
+
+        // 保存済みの設定で既に有効なら、設定を書き直さない。
+        native.inputs.clear()
+        native.respond = { input ->
+            if (input.type == Input.CommandType.GET_CONFIG) {
+                Output.newBuilder().setConfig(Config.newBuilder().setUseKanaModifierInsensitiveConversion(true)).build()
+            } else {
+                Output.newBuilder().setConsumed(true).build()
+            }
+        }
+        assertEquals(EngineHealth.Ready("2.31.0"), engine.load())
+        assertEquals(listOf(Input.CommandType.GET_CONFIG), native.inputs.map { it.type })
+        profile.deleteRecursively()
     }
 
     /** 次の語の要求は専用NWP命令へ確定文脈を載せ、Mozcが返した候補をそのまま識別する。 */
@@ -214,7 +346,7 @@ class MozcConversionEngineTest {
         assertNull(engine.createSession())
     }
 
-    /** incognitoはSET_REQUESTのRequest.is_incognito_modeで指定する。 */
+    /** incognitoと表記ゆれ変換の有無は、SET_REQUESTのRequestで一緒に指定する。 */
     @Test
     fun incognitoUsesSetRequest() {
         val native = FakeMozcNative()
@@ -225,6 +357,8 @@ class MozcConversionEngineTest {
         val input = native.inputs.single()
         assertEquals(Input.CommandType.SET_REQUEST, input.type)
         assertTrue(input.request.isIncognitoMode)
+        assertTrue(input.request.kanaModifierInsensitiveConversion)
+        assertFalse(input.request.mixedConversion)
     }
 
     /** 学習の消去は、文節履歴と予測の履歴を消す二つの命令をsessionなしで送る。 */

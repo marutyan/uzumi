@@ -23,4 +23,13 @@ class KanaModifierTest {
         assertEquals("ヅ", KanaModifier.transform("ッ"))
         assertNull(KanaModifier.transform("A"))
     }
+
+    /** 小書き・濁点・半濁点を清音の大きいかなへ揃え、対象外の文字はそのまま残す。 */
+    @Test
+    fun stripModifiersUnifiesKanaVariants() {
+        assertEquals("りようかいしました", KanaModifier.stripModifiers("りょうかいしました"))
+        assertEquals("かつこう", KanaModifier.stripModifiers("がっこう"))
+        assertEquals("ハツヒ", KanaModifier.stripModifiers("パッピ"))
+        assertEquals("漢字A", KanaModifier.stripModifiers("漢字A"))
+    }
 }
