@@ -62,6 +62,8 @@
     <string name="live_conversion_switch">ライブ変換</string>
     <string name="live_conversion_description">入力中の読みを自動で変換し、句点・改行・送信などで確定します。OFFにすると変換キーで変換します。切り替えは次に入力欄を開いたときから反映されます。</string>
     <string name="settings_romaji_input">英字配列でローマ字かな入力</string>
+    <string name="settings_romaji_english_qwerty">配列の切替に英字入力を含める</string>
+    <string name="settings_romaji_english_qwerty_description">ローマ字かな入力がONのとき、英字配列の左下のキー（ABC）で、ローマ字をかなにしない英字入力へ切り替えられるようにします。切替の順は、かな、ローマ字、英字、かなです。空白キーに今の配列（ローマ字またはEnglish）を表示します。OFFにすると英字配列は常にローマ字かな入力になります。ローマ字かな入力がOFFのときは影響しません。</string>
     <string name="settings_romaji_input_description">英字配列で打ったローマ字をかなとして入力し、変換します。Shiftで打った大文字と数字は英字のまま入ります。パスワード、URL、メール、数字、電話番号、日時の欄では従来どおり英字を入力します。切り替えは次に入力欄を開いたときから反映されます。</string>
     <string name="open_licenses">第三者ライセンス</string>
     <string name="licenses_title">第三者ライセンス</string>

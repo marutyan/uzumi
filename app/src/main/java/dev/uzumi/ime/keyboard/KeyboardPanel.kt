@@ -29,9 +29,12 @@ class KeyboardPanel(
     private var currentMode = KeyboardMode.KANA
     private var lastNormalMode = KeyboardMode.KANA
 
-    /** 現在表示中の面が英字QWERTYか。ローマ字変換の対象を他の面から分ける。 */
-    val isQwertyMode: Boolean
-        get() = currentMode == KeyboardMode.QWERTY
+    // 英字配列のローマ字と英字の層。ローマ字かな入力の欄で、英字配列の左下キーの切替先と表示を決める。
+    private val qwertyLayer = QwertyLayerState()
+
+    /** 現在表示中の面がローマ字の層の英字QWERTYか。ローマ字変換の対象を英字の層や他の面から分ける。 */
+    val isRomajiQwertyMode: Boolean
+        get() = currentMode == KeyboardMode.QWERTY && qwertyLayer.isRomaji
 
     private val shiftState = QwertyShiftState()
 
@@ -48,6 +51,10 @@ class KeyboardPanel(
     private val shiftKeyViews = mutableListOf<KeyView>()
 
     private var numericSwitchKey: KeyView? = null
+
+    // 英字配列の左下の切替キー（ローマ字の層では英字の層へ、それ以外はかなへ）と、今の層を示す空白キー。
+    private var qwertyCycleKeyView: KeyView? = null
+    private var qwertySpaceKeyView: KeyView? = null
 
     // 入力中かどうかで役割が変わる12キーのキー。「123」と「カナ」、「空白」と「変換」を切り替える。
     private var kanaNumberKeyView: KeyView? = null
@@ -111,6 +118,15 @@ class KeyboardPanel(
         } else {
             switchMode(lastNormalMode)
         }
+    }
+
+    /**
+     * この欄で英字配列のローマ字かな入力を使うか（[romajiInput]）と、配列切替に英字の層を含めるか（[includesEnglish]）を
+     * 受け取り、英字配列の切替キーと空白キーの表示を合わせる。IMEは入力欄の開始と表示のたびに呼ぶ。
+     */
+    fun setRomajiInput(romajiInput: Boolean, includesEnglish: Boolean) {
+        qwertyLayer.configure(romajiInput, includesEnglish)
+        updateQwertyLayerKeys()
     }
 
     /**
@@ -216,6 +232,7 @@ class KeyboardPanel(
         if (resolvedMode != KeyboardMode.SYMBOL || currentMode != KeyboardMode.SYMBOL) hideEmojiPicker()
 
         currentMode = resolvedMode
+        updateQwertyLayerKeys()
         if (!isNumericField && !isPasswordField && (resolvedMode == KeyboardMode.KANA || resolvedMode == KeyboardMode.QWERTY)) {
             lastNormalMode = resolvedMode
         }
@@ -233,6 +250,12 @@ class KeyboardPanel(
         }
         val kanaKeyVisibility = if (isPasswordField) View.GONE else View.VISIBLE
         kanaSwitchKeyViews.forEach { it.visibility = kanaKeyVisibility }
+    }
+
+    /** 英字配列の左下キーの行き先と表示、空白キーの層の表示を、今の層へ合わせる。 */
+    private fun updateQwertyLayerKeys() {
+        qwertyCycleKeyView?.updateModeSwitch(qwertyLayer.cycleLabel, qwertyLayer.cycleTarget)
+        qwertySpaceKeyView?.replaceSpec(KeySpec.Action(KeyboardAction.Space, qwertyLayer.spaceLabel))
     }
 
     /**
@@ -447,16 +470,19 @@ class KeyboardPanel(
         row3.addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.5f))
         container.addView(row3)
 
-        // Row 4: [あ] [Shift] [,] [Space] [.] [←] [→] [Enter]
+        // Row 4: [あ / ローマ字の層ではABC] [Shift] [,] [Space（層の名前）] [.] [←] [→] [Enter]
         val row4 = createRow(rowHeight)
-        val kanaKey = createKey(KeySpec.ModeSwitch("あ", KeyboardMode.KANA), 1.5f)
+        val kanaKey = createKey(KeySpec.ModeSwitch(qwertyLayer.cycleLabel, qwertyLayer.cycleTarget), 1.5f)
         kanaSwitchKeyViews.add(kanaKey)
+        qwertyCycleKeyView = kanaKey
         row4.addView(kanaKey)
         val shiftKey = createKey(KeySpec.Shift("⇧"), 1f)
         shiftKeyViews.add(shiftKey)
         row4.addView(shiftKey)
         row4.addView(createKey(KeySpec.SimpleText(","), 1f))
-        row4.addView(createKey(KeySpec.Action(KeyboardAction.Space, "space"), 2f))
+        val spaceKey = createKey(KeySpec.Action(KeyboardAction.Space, qwertyLayer.spaceLabel), 2f)
+        qwertySpaceKeyView = spaceKey
+        row4.addView(spaceKey)
         row4.addView(createKey(KeySpec.SimpleText("."), 1f))
         row4.addView(createArrowKey(-1))
         row4.addView(createArrowKey(1))
@@ -638,6 +664,7 @@ class KeyboardPanel(
                     } else {
                         targetMode
                     }
+                    if (actualTarget == KeyboardMode.QWERTY) qwertyLayer.enterFrom(currentMode)
                     switchMode(actualTarget)
                 },
                 onShiftToggle = {
@@ -667,6 +694,57 @@ class KeyboardPanel(
     companion object {
         /** タップ領域の高さの下限（dp）。 */
         private const val MIN_TOUCH_DP = 48f
+    }
+}
+
+/**
+ * 英字配列の層の状態。ローマ字かな入力の欄では英字配列を「ローマ字（かなにする）」と「英字（そのまま）」の二つの層に分け、
+ * 切替の順を「かな → ローマ字 → 英字 → かな」にする（Gboardの「かな → 英字」の順に合わせ、ローマ字を間に置く）。
+ * Viewから切り離し、設定と欄の組み合わせで切替先が正しいかをJVMテストで守る。
+ */
+class QwertyLayerState {
+    // この欄で英字配列のローマ字かな入力を使うか。falseなら英字配列は常に英字で、従来どおり左下キーはかなへ戻る。
+    private var romajiInput = false
+
+    // 設定で、配列切替に英字の層を含めるか。falseならローマ字かな入力の欄の英字配列は常にローマ字の層。
+    private var includesEnglish = true
+
+    // 英字の層を表示中か。ローマ字かな入力の欄でだけ意味を持つ。
+    private var english = false
+
+    /** 英字配列で打った文字をローマ字としてかなにする層か。 */
+    val isRomaji: Boolean
+        get() = romajiInput && !english
+
+    /** 左下キーの行き先。ローマ字の層で英字の層を含むなら英字の層（同じ英字配列）、それ以外はかな。 */
+    val cycleTarget: KeyboardMode
+        get() = if (isRomaji && includesEnglish) KeyboardMode.QWERTY else KeyboardMode.KANA
+
+    /** 左下キーの表示。押すと移る先を示す（他の面の切替キーと同じ表し方）。 */
+    val cycleLabel: String
+        get() = if (cycleTarget == KeyboardMode.QWERTY) "ABC" else "あ"
+
+    /** 空白キーの表示。ローマ字かな入力の欄では今の層の名前を出し、どちらの層かを見分けられるようにする。 */
+    val spaceLabel: String
+        get() = when {
+            !romajiInput -> "space"
+            isRomaji -> "ローマ字"
+            else -> "English"
+        }
+
+    /** 入力欄ごとの可否と設定を反映する。英字の層を含めない設定なら、ローマ字の層へ戻す。 */
+    fun configure(romajiInput: Boolean, includesEnglish: Boolean) {
+        this.romajiInput = romajiInput
+        this.includesEnglish = includesEnglish
+        if (!includesEnglish) english = false
+    }
+
+    /**
+     * 利用者の切替キーで英字配列へ移るときに、どちらの層を出すかを決める。12キーの「あA」からはローマ字の層にし、
+     * 英字配列の左下キーと、記号・数字面の「ABC」からは、英字の層を含めるなら英字の層にする。
+     */
+    fun enterFrom(source: KeyboardMode) {
+        english = source != KeyboardMode.KANA && includesEnglish
     }
 }
 

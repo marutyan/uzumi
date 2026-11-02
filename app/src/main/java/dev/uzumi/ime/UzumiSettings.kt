@@ -21,11 +21,17 @@ object UzumiSettings {
     // QWERTYでローマ字をかなへ変換する設定を保存するキー。
     private const val KEY_ROMAJI_INPUT = "romaji_input_enabled"
 
+    // ローマ字かな入力がONのとき、配列切替に英字QWERTY（ローマ字変換しない）を含めるかを保存するキー。
+    private const val KEY_ROMAJI_ENGLISH_QWERTY = "romaji_english_qwerty"
+
     /** ライブ変換の既定値。確定操作を省ける入力から始められるようONにする。 */
     const val DEFAULT_LIVE_CONVERSION = true
 
     /** QWERTYのローマ字入力は、既存の英字入力を保つため既定ではOFFにする。 */
     const val DEFAULT_ROMAJI_INPUT = false
+
+    /** ローマ字かな入力がONでも小文字の英語を打てるよう、英字QWERTYは既定で切替に含める。 */
+    const val DEFAULT_ROMAJI_ENGLISH_QWERTY = true
 
     // キーボードの高さ（dp）、拡大表示、振動、キー音、削除ドラッグを保存するキー。
     private const val KEY_HEIGHT = "keyboard_height"
@@ -137,6 +143,14 @@ object UzumiSettings {
     /** QWERTYのローマ字入力のON/OFFを保存する。 */
     fun setRomajiInputEnabled(context: Context, enabled: Boolean) =
         putBoolean(context, KEY_ROMAJI_INPUT, enabled)
+
+    /** ローマ字かな入力がONのとき、配列切替に英字QWERTYを含めるか。 */
+    fun isRomajiEnglishQwertyIncluded(context: Context): Boolean =
+        preferences(context).getBoolean(KEY_ROMAJI_ENGLISH_QWERTY, DEFAULT_ROMAJI_ENGLISH_QWERTY)
+
+    /** 配列切替に英字QWERTYを含めるかを保存する。 */
+    fun setRomajiEnglishQwertyIncluded(context: Context, included: Boolean) =
+        putBoolean(context, KEY_ROMAJI_ENGLISH_QWERTY, included)
 
     /** 設定の保存先。 */
     private fun preferences(context: Context): SharedPreferences =

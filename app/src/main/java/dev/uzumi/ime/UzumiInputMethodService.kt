@@ -579,8 +579,8 @@ class UzumiInputMethodService : InputMethodService() {
             action != KeyboardAction.OpenEmojiPicker && action != KeyboardAction.CloseEmojiPicker
         ) current.forgetDeletionUndo()
         when (action) {
-            // 英字配列の文字は、ローマ字かな入力が有効な欄ではかなへ組み立てる（無効な欄では従来どおり英字）。
-            is KeyboardAction.Text -> if (keyboardPanel?.isQwertyMode == true) {
+            // 英字配列の文字は、ローマ字かな入力が有効な欄ではかなへ組み立てる（無効な欄と英字の層では従来どおり英字）。
+            is KeyboardAction.Text -> if (keyboardPanel?.isRomajiQwertyMode == true) {
                 current.inputRomajiText(action.value)
             } else {
                 current.inputText(action.value)
@@ -601,7 +601,7 @@ class UzumiInputMethodService : InputMethodService() {
             is KeyboardAction.MoveEditorCursor -> current.moveCursor(action.delta)
             KeyboardAction.Enter -> current.handleEnter()
             // ローマ字かな入力中の英字配列のSpaceは、12キーの空白キーと同じく入力中なら変換にする。
-            KeyboardAction.Space -> if (keyboardPanel?.isQwertyMode == true && current.isRomajiInputEnabled && current.hasComposition) {
+            KeyboardAction.Space -> if (keyboardPanel?.isRomajiQwertyMode == true && current.isRomajiInputEnabled && current.hasComposition) {
                 current.convert()
             } else {
                 current.insertSpace()
@@ -711,6 +711,11 @@ class UzumiInputMethodService : InputMethodService() {
     private fun applyPolicyToKeyboard() {
         val policy = currentPolicy ?: return
         keyboardPanel?.setEditorMode(policy.isNumeric, policy.isPassword)
+        // ローマ字かな入力の欄でだけ、英字配列をローマ字と英字の層に分ける。英字の層を含めるかは設定画面で選ぶ。
+        keyboardPanel?.setRomajiInput(
+            romajiInput = session?.isRomajiInputEnabled == true,
+            includesEnglish = UzumiSettings.isRomajiEnglishQwertyIncluded(this),
+        )
         keyboardPanel?.setActionLabel(policy.actionLabel)
         keyboardPanel?.setAutoCapsMode(autoCapsMode)
     }

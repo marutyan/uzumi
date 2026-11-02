@@ -395,6 +395,58 @@ class KeyboardLayoutDataTest {
         val (high, low) = listOf(luminance(a), luminance(b)).sortedDescending()
         return (high + 0.05) / (low + 0.05)
     }
+
+    /** ローマ字かな入力の欄では、かな → ローマ字 → 英字 → かなの順に切り替わり、空白キーに今の層が出る。 */
+    @Test
+    fun qwertyLayerCyclesKanaRomajiEnglishWhenEnglishIncluded() {
+        val layer = QwertyLayerState()
+        layer.configure(romajiInput = true, includesEnglish = true)
+
+        layer.enterFrom(KeyboardMode.KANA)
+        assertTrue(layer.isRomaji)
+        assertEquals("ローマ字", layer.spaceLabel)
+        assertEquals(KeyboardMode.QWERTY to "ABC", layer.cycleTarget to layer.cycleLabel)
+
+        layer.enterFrom(KeyboardMode.QWERTY)
+        assertFalse(layer.isRomaji)
+        assertEquals("English", layer.spaceLabel)
+        assertEquals(KeyboardMode.KANA to "あ", layer.cycleTarget to layer.cycleLabel)
+
+        // かなへ戻ってから「あA」で入ると、再びローマ字の層から始まる
+        layer.enterFrom(KeyboardMode.KANA)
+        assertTrue(layer.isRomaji)
+        // 記号・数字面の「ABC」は英字の層へ入る
+        layer.enterFrom(KeyboardMode.SYMBOL)
+        assertFalse(layer.isRomaji)
+    }
+
+    /** 英字の層を含めない設定では、英字配列は常にローマ字の層で、左下キーはかなへ戻る。 */
+    @Test
+    fun qwertyLayerStaysRomajiWhenEnglishExcluded() {
+        val layer = QwertyLayerState()
+        layer.configure(romajiInput = true, includesEnglish = true)
+        layer.enterFrom(KeyboardMode.NUMERIC)
+        assertFalse(layer.isRomaji)
+
+        layer.configure(romajiInput = true, includesEnglish = false)
+        assertTrue(layer.isRomaji)
+        layer.enterFrom(KeyboardMode.SYMBOL)
+        assertTrue(layer.isRomaji)
+        assertEquals(KeyboardMode.KANA to "あ", layer.cycleTarget to layer.cycleLabel)
+        assertEquals("ローマ字", layer.spaceLabel)
+    }
+
+    /** ローマ字かな入力を使わない欄では従来どおり、英字配列は英字で、左下キーは「あ」でかなへ戻る。 */
+    @Test
+    fun qwertyLayerWithoutRomajiKeepsPreviousSwitch() {
+        val layer = QwertyLayerState()
+        layer.configure(romajiInput = false, includesEnglish = true)
+        layer.enterFrom(KeyboardMode.KANA)
+        assertFalse(layer.isRomaji)
+        assertEquals(KeyboardMode.KANA to "あ", layer.cycleTarget to layer.cycleLabel)
+        assertEquals("space", layer.spaceLabel)
+    }
+
     @Test
     fun autoCapsShiftsOneLetterAndYieldsToManualShift() {
         // 文頭で自動のShiftが入り、1文字打つと解除される
