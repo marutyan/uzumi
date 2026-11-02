@@ -38,6 +38,9 @@ class KeyboardPanel(
 
     private val shiftState = QwertyShiftState()
 
+    // 入力欄が求める大文字化の種類。ローマ字の層では小文字がかなになるため使わず、英字の層へ移ったときに改めて当てる。
+    private var requestedAutoCapsMode = 0
+
     private var actionLabel = "確定"
     private var isNumericField = false
     private var isPasswordField = false
@@ -155,6 +158,13 @@ class KeyboardPanel(
      * 英字配列のShiftを自動で切り替える。IMEは入力開始時とカーソル位置が変わるたびに呼ぶ。
      */
     fun setAutoCapsMode(capsMode: Int) {
+        requestedAutoCapsMode = capsMode
+        applyAutoCaps()
+    }
+
+    /** 欄が求める大文字化を、ローマ字の層以外の英字配列へ当てる。ローマ字の層ではGboardと同じく自動大文字化しない。 */
+    private fun applyAutoCaps() {
+        val capsMode = if (qwertyLayer.isRomaji) 0 else requestedAutoCapsMode
         val changed = shiftState.applyAutoCaps(
             shift = capsMode != 0,
             characters = capsMode and TextUtils.CAP_MODE_CHARACTERS != 0,
@@ -233,6 +243,7 @@ class KeyboardPanel(
 
         currentMode = resolvedMode
         updateQwertyLayerKeys()
+        applyAutoCaps()
         if (!isNumericField && !isPasswordField && (resolvedMode == KeyboardMode.KANA || resolvedMode == KeyboardMode.QWERTY)) {
             lastNormalMode = resolvedMode
         }

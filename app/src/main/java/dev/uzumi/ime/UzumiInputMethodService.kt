@@ -373,9 +373,9 @@ class UzumiInputMethodService : InputMethodService() {
         val policy = InputFieldPolicy.fromEditorInfo(info)
             .copy(learningDisabledBySetting = LearningStores.peek()?.isEnabled != true)
         currentPolicy = policy
-        // ローマ字かな入力の欄では、英字配列の小文字がかなの入力になるため自動大文字化を使わない（Gboardと同じ）。
+        // ローマ字の層で自動大文字化を使わない判断はキーボード側が層ごとに行い、英字の層では欄の指定に従う。
         val romaji = policy.usesRomajiInput(UzumiSettings.isRomajiInputEnabled(this))
-        autoCapsMode = if (romaji) 0 else info.initialCapsMode and policy.capsModeFlags
+        autoCapsMode = info.initialCapsMode and policy.capsModeFlags
         // ライブ変換の設定は入力開始ごとに読み、設定画面での変更を次の入力欄から反映する。
         val live = policy.usesLiveConversion(UzumiSettings.isLiveConversionEnabled(this))
         // debugビルドで選んだモデル。ニューラル変換はライブ変換の要求だけに使う。releaseビルドでは常にMozcだけ。
@@ -448,12 +448,12 @@ class UzumiInputMethodService : InputMethodService() {
     }
 
     /**
-     * カーソル位置で欄が求める大文字化を問い合わせ、英字配列のShiftへ反映する。欄が求めない場合と、
-     * ローマ字かな入力の欄では問い合わせない。
+     * カーソル位置で欄が求める大文字化を問い合わせ、英字配列のShiftへ反映する。欄が求めない場合は問い合わせない。
+     * ローマ字の層で使わない判断はキーボード側が行う。
      */
     private fun updateAutoCaps() {
         val flags = currentPolicy?.capsModeFlags ?: 0
-        autoCapsMode = if (session?.isRomajiInputEnabled == true || flags == 0) 0 else currentInputConnection?.getCursorCapsMode(flags) ?: 0
+        autoCapsMode = if (flags == 0) 0 else currentInputConnection?.getCursorCapsMode(flags) ?: 0
         keyboardPanel?.setAutoCapsMode(autoCapsMode)
     }
 
