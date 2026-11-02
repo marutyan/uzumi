@@ -232,6 +232,34 @@ class ConversionWorkerTest {
     }
 
     /**
+     * 登録語の文節が混ざった確定でも、利用者が選んだ他の文節はIME側の学習へ記録する。
+     * 登録語の表記はエンジンが再現できないため、エンジンへは確定も学習も送らない。
+     */
+    @Test
+    fun explicitCommitWithUserDictionarySegmentRecordsOnlyChosenSegment() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        val request = request(reading = "きょうはうずみ")
+        fixture.worker.requestConversion(request)
+        fixture.executor.runAll()
+        fixture.engine.calls.clear()
+
+        fixture.worker.commitAll(
+            request,
+            listOf(
+                ConversionSegment("きょうは", "京は", chosen = true),
+                ConversionSegment("うずみ", "Uzumi", fromUserDictionary = true),
+            ),
+        )
+        fixture.executor.runAll()
+
+        assertEquals(listOf("京は"), learning.exactMatches("きょうは").map { it.surface })
+        assertTrue(learning.exactMatches("うずみ").isEmpty())
+        assertFalse(fixture.engine.calls.any { it.startsWith("commitAll") || it.startsWith("learnSegments") })
+    }
+
+    /**
      * 複数文節の明示変換では、各文節の候補をその文節の読みだけで学習語・登録語と統合する。
      * 読みを延ばす予測はその文節を置き換えられないため、途中の文節には出さない。
      */

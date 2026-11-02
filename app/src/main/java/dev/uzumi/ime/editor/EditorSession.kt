@@ -979,8 +979,9 @@ class EditorSession(
         val conversion = currentConversion()
         val commitRequest = appliedConversionCommitRequest ?: conversion?.request
         if (!commitCompositionAs(buffer.display)) return false
-        // 登録語を表示していた場合、エンジン側の変換とは表記が違うため、確定をエンジンへ学習させない。
-        if (conversion?.segments?.none { it.fromUserDictionary } == true && commitRequest != null) {
+        // 登録語・学習語の文節を学習から除くか、エンジンへ送るかはworkerが文節ごとに判定する。
+        // ここで除くと、同じ確定で利用者が選んだ他の文節の学習まで失われる。
+        if (conversion != null && commitRequest != null) {
             conversionClient?.commitAll(commitRequest, conversion.segments)
         }
         return true

@@ -1270,7 +1270,10 @@ class EditorSessionTest {
         assertEquals(0, live.stableOverwrites + live.chosenOverwrites)
     }
 
-    /** 明示変換で登録語の候補を選んでもcompositionに残し、Mozcへ確定を通知しない。 */
+    /**
+     * 明示変換で登録語の候補を選んでもcompositionに残す。確定はworkerへ渡し、登録語の文節であることを示して
+     * エンジンへの学習はworkerに止めさせる。
+     */
     @Test
     fun explicitUserDictionaryCandidateIsNotReportedToEngine() {
         val connection = FakeEditorConnection()
@@ -1297,7 +1300,10 @@ class EditorSessionTest {
         assertTrue(connection.committedTexts.isEmpty())
         assertTrue(session.commitComposition())
         assertEquals(listOf("幹事"), connection.committedTexts)
-        assertTrue(client.committedAll.isEmpty())
+        val committed = client.committedAllSegments.single().second.single()
+        assertEquals("幹事", committed.value)
+        assertTrue(committed.fromUserDictionary)
+        assertFalse(committed.engineCandidate)
     }
 
     /** 明示変換中の一回目Backspaceは読みへ戻し、二回目は一字削除して読みをUndo可能にする。 */
@@ -1371,7 +1377,10 @@ class EditorSessionTest {
         assertTrue(session.canUndoDeletion)
     }
 
-    /** 明示変換で読み全体の登録語を表示したまま確定しても、エンジンへ確定を学習させない。 */
+    /**
+     * 明示変換で読み全体の登録語を表示したまま確定すると、文節をそのままworkerへ渡す。
+     * 登録語の文節はエンジンの候補ではないため、エンジンへの学習はworkerが止める。
+     */
     @Test
     fun explicitCommitOfUserDictionaryDisplayIsNotReportedToEngine() {
         val connection = FakeEditorConnection()
@@ -1389,7 +1398,9 @@ class EditorSessionTest {
 
         assertTrue(session.commitComposition())
         assertEquals(listOf("Uzumi"), connection.committedTexts)
-        assertTrue(client.committedAll.isEmpty())
+        val committed = client.committedAllSegments.single().second.single()
+        assertTrue(committed.fromUserDictionary)
+        assertFalse(committed.engineCandidate)
     }
 
     /** 12キーの「カナ」は、変換前の読みをカタカナにし、入力中の状態をキーボードへ伝えられる。 */
