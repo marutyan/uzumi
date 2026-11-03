@@ -83,6 +83,33 @@ class NeuralRangeConverterTest {
         )
     }
 
+    /** 結合した文節へ一文節変換の候補を加え、モデルの表記を表示値と候補の先頭に保つ。 */
+    @Test
+    fun joinedSegmentsAddMozcCandidatesWithoutChangingNeuralSurface() {
+        val joinedLookups = mutableListOf<Pair<String, String>>()
+        val dictionary = { reading: String ->
+            if (reading == "あい") {
+                listOf(ResultSegment("あ", "亜", listOf("亜", "阿")), ResultSegment("い", "胃", listOf("胃", "井")))
+            } else {
+                null
+            }
+        }
+        val converter = NeuralRangeConverter(
+            model = fixedModel("あい" to "愛"),
+            dictionary = dictionary,
+            joinedCandidates = { reading, surface ->
+                joinedLookups += reading to surface
+                listOf("愛", "藍", "合い")
+            },
+        )
+
+        val segment = converter.convert("あい").single()
+
+        assertEquals("愛", segment.surface)
+        assertEquals(listOf("愛", "亜胃", "藍", "合い"), segment.candidates)
+        assertEquals(listOf("あい" to "愛"), joinedLookups)
+    }
+
     /**
      * かなの読みから生まれた数字の表記は、同じ読みに重なる辞書の文節の候補にある場合だけ使う。
      * 辞書にない数字（「じゅうじ」から「11時」、「にせんにじゅうろくねん」から「1999年」）は辞書の結果へ戻し、

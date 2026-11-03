@@ -102,6 +102,8 @@ class NeuralRangeConverter(
     private val checkDigitsWithDictionary: Boolean = true,
     // 左文脈をモデルへ渡すか。学習禁止欄と機密欄ではfalseにし、保護範囲や先に変換した表記をモデルへ渡さない。
     private val useLeftContext: Boolean = true,
+    // Mozcの複数文節を結合したとき、一文節として得た候補を補う。引数の表記が顔文字なら呼び出し側でnullを返す。
+    private val joinedCandidates: ((reading: String, surface: String) -> List<String>?)? = null,
 ) {
     /**
      * 部分範囲の読みを、読みの連結が部分範囲と一致するsegment列へ変換する。モデルと辞書が使えなくても読みのまま返す。
@@ -201,7 +203,8 @@ class NeuralRangeConverter(
 
     /**
      * 読みに対応づけたモデルの表記を、辞書の文節境界のうち切れる点に当たるものだけで切る。切れない境界の両側はつなぐ。
-     * 候補は、つながなかった文節ではモデルの表記の後に辞書の候補を続け、つないだ文節ではモデルの表記と辞書の表記の連結にする。
+     * 候補は、つながなかった文節ではモデルの表記の後に辞書の候補を続ける。つないだ文節ではモデルの表記、
+     * 辞書の表記の連結、一文節変換で取れた候補の順に並べる。
      */
     private fun splitByDictionary(
         reading: String,
@@ -224,7 +227,10 @@ class NeuralRangeConverter(
             val candidates = if (group.size == 1) {
                 listOf(surface) + segment.candidates
             } else {
-                listOf(surface, group.joinToString(separator = "") { it.surface })
+                val reading = group.joinToString(separator = "") { it.reading }
+                val mozcSurface = group.joinToString(separator = "") { it.surface }
+                val additional = runCatching { joinedCandidates?.invoke(reading, surface) }.getOrNull().orEmpty()
+                listOf(surface, mozcSurface) + additional
             }
             result += ResultSegment(group.joinToString(separator = "") { it.reading }, surface, candidates.distinct())
             group.clear()
