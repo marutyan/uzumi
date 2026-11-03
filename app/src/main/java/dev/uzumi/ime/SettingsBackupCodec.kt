@@ -1,5 +1,7 @@
 package dev.uzumi.ime
 
+import dev.uzumi.ime.dictionary.UserDictionaryRules
+
 /** JSON内の値を表し、AndroidのJSON実装へ依存せず設定バックアップを検証する。 */
 sealed interface BackupJsonValue {
     /** JSON objectをキーと値の組として保持する。 */
@@ -70,7 +72,12 @@ object SettingsBackupCodec {
             ?: throw SettingsBackupException("settingsがありません")
         val dictionary = when (val value = root.values["userDictionaryTsv"]) {
             null -> null
-            is BackupJsonValue.StringValue -> value.value
+            is BackupJsonValue.StringValue -> value.value.also { tsv ->
+                // ファイルからの辞書importと同じ上限を超える辞書は、解析してメモリを使い切る前に拒否する。
+                if (tsv.toByteArray(Charsets.UTF_8).size > UserDictionaryRules.MAX_IMPORT_BYTES) {
+                    throw SettingsBackupException("userDictionaryTsvが大きすぎます")
+                }
+            }
             else -> throw SettingsBackupException("userDictionaryTsvの型が正しくありません")
         }
         return SettingsBackupDocument(settings.values, dictionary)

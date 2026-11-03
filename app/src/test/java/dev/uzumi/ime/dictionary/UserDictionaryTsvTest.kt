@@ -175,6 +175,19 @@ class UserDictionaryTsvTest {
         assertThrows(SettingsBackupException::class.java) { SettingsBackupCodec.decode(nestedJson) }
     }
 
+    /** バックアップ内の辞書TSVは、ファイルからのimportと同じbyte数の上限を超えると読み込みを拒否する。 */
+    @Test
+    fun settingsBackupRejectsDictionaryLargerThanImportLimit() {
+        val limit = UserDictionaryRules.MAX_IMPORT_BYTES
+        val accepted = SettingsBackupDocument(emptyMap(), userDictionaryTsv = "a".repeat(limit))
+        val rejected = SettingsBackupDocument(emptyMap(), userDictionaryTsv = "a".repeat(limit + 1))
+
+        assertEquals(limit, SettingsBackupCodec.decode(SettingsBackupCodec.encode(accepted)).userDictionaryTsv!!.length)
+        assertThrows(SettingsBackupException::class.java) {
+            SettingsBackupCodec.decode(SettingsBackupCodec.encode(rejected))
+        }
+    }
+
     /** 範囲外の数値は既存設定の範囲へ丸め、未知の機能タイルは除く。 */
     @Test
     fun settingsBackupNormalizesOutOfRangeValuesAndToolbarActions() {

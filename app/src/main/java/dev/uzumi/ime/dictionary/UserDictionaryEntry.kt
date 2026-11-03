@@ -68,6 +68,12 @@ object UserDictionaryRules {
     /** 登録できる総数。IMEのプロセスが全項目をメモリ上のindexへ保持するため上限を置く。 */
     const val MAX_ENTRY_COUNT = 50_000
 
+    /**
+     * importで読むTSVの最大byte数（UTF-8）。登録上限の件数を十分に収め、巨大な入力でメモリを使い切らないようにする。
+     * ファイルからのimportと、設定バックアップに含めた辞書の両方に使う。
+     */
+    const val MAX_IMPORT_BYTES = 8 * 1024 * 1024
+
     /** 読みはNFCへ揃え、通常語は前後を整える。定型文本文は空白やUnicodeの結合形を含め入力どおり残す。 */
     fun normalize(entry: UserDictionaryEntry): UserDictionaryEntry = entry.copy(
         reading = normalizeReading(entry.reading),

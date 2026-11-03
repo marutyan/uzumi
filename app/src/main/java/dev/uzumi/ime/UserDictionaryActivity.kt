@@ -314,7 +314,7 @@ class UserDictionaryActivity : Activity() {
         }, onFailure = { toast(getString(R.string.dictionary_import_read_failed)) }) { outcome ->
             when (outcome) {
                 ImportOutcome.TooLarge ->
-                    toast(getString(R.string.dictionary_import_too_large, MAX_IMPORT_BYTES / BYTES_PER_MEGABYTE))
+                    toast(getString(R.string.dictionary_import_too_large, UserDictionaryRules.MAX_IMPORT_BYTES / BYTES_PER_MEGABYTE))
                 ImportOutcome.NotUtf8 -> toast(getString(R.string.dictionary_import_not_utf8))
                 is ImportOutcome.Done -> {
                     refreshList()
@@ -347,7 +347,7 @@ class UserDictionaryActivity : Activity() {
                 val read = stream.read(chunk)
                 if (read < 0) break
                 buffer.write(chunk, 0, read)
-                if (buffer.size() > MAX_IMPORT_BYTES) return null
+                if (buffer.size() > UserDictionaryRules.MAX_IMPORT_BYTES) return null
             }
             buffer.toByteArray()
         }
@@ -467,8 +467,6 @@ class UserDictionaryActivity : Activity() {
         /** import結果に列挙する失敗行の最大数。 */
         const val MAX_REPORTED_FAILURES = 20
 
-        /** importで読むファイルの最大byte数。登録上限の件数を十分に収め、巨大ファイルでメモリを使い切らないようにする。 */
-        const val MAX_IMPORT_BYTES = 8 * 1024 * 1024
         const val BYTES_PER_MEGABYTE = 1024 * 1024
 
         /** 定型文編集欄に表示する最小行数。複数行の入力欄だと分かる高さを確保する。 */
