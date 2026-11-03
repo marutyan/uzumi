@@ -11,14 +11,18 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import dev.uzumi.ime.R
+import dev.uzumi.ime.UzumiSettings
 
 /**
  * 候補バーに並べる部品（候補、札、案内、記号のボタン）を、キーボードと同じ配色と寸法で作る。
  * 候補バーの中身はIMEが入力状態に応じて組み立て、見た目の決まりはここへ集める。
  */
 class CandidateBarViews(private val context: Context) {
-    /** 端末のライト／ダーク設定に合う配色。 */
+    /** きせかえの設定と端末のライト／ダーク設定に合う配色。 */
     val colors = KeyboardColors.from(context)
+
+    // 候補の文字の書体。きせかえで選んだキーの書体にそろえる。
+    private val candidateTypeface = KeyView.keyTypeface(UzumiSettings.keyboardAppearance(context).keyFont)
     private val density = context.resources.displayMetrics.density
 
     /** 候補一つ。選択中の候補は背景色で示し、指定があれば長押しメニューを開く。 */
@@ -32,6 +36,7 @@ class CandidateBarViews(private val context: Context) {
         this.text = text
         setTextSize(TypedValue.COMPLEX_UNIT_DIP, CANDIDATE_TEXT_DP)
         setTextColor(colors.text)
+        typeface = candidateTypeface
         gravity = Gravity.CENTER
         setPadding(px(12f), 0, px(12f), 0)
         minWidth = px(MIN_TOUCH_DP)

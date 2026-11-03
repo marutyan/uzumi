@@ -5,6 +5,12 @@ import dev.uzumi.ime.SettingsBackupCodec
 import dev.uzumi.ime.SettingsBackupDocument
 import dev.uzumi.ime.SettingsBackupException
 import dev.uzumi.ime.UzumiSettings
+import dev.uzumi.ime.keyboard.FlickBubbleShape
+import dev.uzumi.ime.keyboard.FlickJudge
+import dev.uzumi.ime.keyboard.InputTuning
+import dev.uzumi.ime.keyboard.KeyShape
+import dev.uzumi.ime.keyboard.KeyboardAppearance
+import dev.uzumi.ime.keyboard.ThemePreset
 import dev.uzumi.ime.keyboard.ToolbarAction
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -135,6 +141,15 @@ class UserDictionaryTsvTest {
                 "romajiInput" to BackupJsonValue.BooleanValue(true),
                 "romajiEnglishQwerty" to BackupJsonValue.BooleanValue(false),
                 "clipboardHistory" to BackupJsonValue.BooleanValue(false),
+                "appearance" to stringObject(
+                    KeyboardAppearance(
+                        preset = ThemePreset.AI,
+                        keyShape = KeyShape.SQUARE,
+                        flickShape = FlickBubbleShape.STAR,
+                        textColor = 0xFF283593.toInt(),
+                    ).toCustom().toStorage(),
+                ),
+                "inputTuning" to stringObject(InputTuning().simejiLike().copy(longPressMillis = 300).toStorage()),
             ),
             userDictionaryTsv = UserDictionaryTsv.format(entries),
         )
@@ -209,6 +224,38 @@ class UserDictionaryTsvTest {
             listOf(BackupJsonValue.StringValue(ToolbarAction.SETTINGS.name)),
             (normalized.getValue("toolbarActions") as BackupJsonValue.ArrayValue).values,
         )
+    }
+
+    /** 文字列の組をバックアップのJSON objectにする。 */
+    private fun stringObject(values: Map<String, String>): BackupJsonValue =
+        BackupJsonValue.ObjectValue(values.mapValues { BackupJsonValue.StringValue(it.value) })
+
+    /** きせかえと入力の操作は、知らない項目を捨て、範囲外を収め、型の違う値を含むと読み込み全体を拒否する。 */
+    @Test
+    fun settingsBackupNormalizesAppearanceAndInputTuning() {
+        val normalized = UzumiSettings.normalizeBackupSettings(
+            mapOf(
+                "appearance" to BackupJsonValue.ObjectValue(
+                    mapOf(
+                        "keyOpacity" to BackupJsonValue.StringValue("500"),
+                        "futureField" to BackupJsonValue.StringValue("x"),
+                    ),
+                ),
+                "inputTuning" to BackupJsonValue.ObjectValue(
+                    mapOf("flickJudge" to BackupJsonValue.StringValue("AXIS")),
+                ),
+            ),
+        )
+        assertEquals(stringObject(KeyboardAppearance(keyOpacity = 100).toStorage()), normalized.getValue("appearance"))
+        assertEquals(stringObject(InputTuning(flickJudge = FlickJudge.AXIS).toStorage()), normalized.getValue("inputTuning"))
+        assertThrows(SettingsBackupException::class.java) {
+            UzumiSettings.normalizeBackupSettings(
+                mapOf("appearance" to BackupJsonValue.ObjectValue(mapOf("keyOpacity" to BackupJsonValue.NumberValue("50")))),
+            )
+        }
+        assertThrows(SettingsBackupException::class.java) {
+            UzumiSettings.normalizeBackupSettings(mapOf("inputTuning" to BackupJsonValue.StringValue("AXIS")))
+        }
     }
 
     /** 既知項目の型が違う場合は他の設定も含めて反映しないために失敗する。 */

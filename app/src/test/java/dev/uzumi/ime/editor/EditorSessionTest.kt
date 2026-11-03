@@ -2453,6 +2453,20 @@ class EditorSessionTest {
         assertEquals("ああかあ", connection.text)
     }
 
+    /** 設定の「トグルの区切り」を渡すと、その時間までの連続タップだけを同じ文字の切り替えとして扱う。 */
+    @Test
+    fun kanaToggleUsesConfiguredWindow() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy(), kanaToggleWindowMillis = 400)
+
+        session.inputKanaTap(A_ROW, 0)
+        session.inputKanaTap(A_ROW, 400)
+        assertEquals("い", connection.text)
+        // 既定の1秒以内でも、設定の400msを過ぎたタップは新しい文字になる
+        session.inputKanaTap(A_ROW, 900)
+        assertEquals("いあ", connection.text)
+    }
+
     /** →は連続タップの途中だけ区切りとして使われ、フリック・小゛゜・削除の後のタップも新しい文字になる。 */
     @Test
     fun kanaToggleEndsAtArrowFlickTransformAndDelete() {

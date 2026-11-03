@@ -512,4 +512,222 @@ class KeyboardLayoutDataTest {
         manual.toggle(nowMillis = 1_000L)
         assertFalse(manual.isShiftActive)
     }
+
+    /**
+     * フリックの吹き出しの文字は、離したときに入る文字（配列定義の同じ方向の文字）と一致する。
+     * 12キーは中央があ段、左がい段、上がう段、右がえ段、下がお段（例: な・に・ぬ・ね・の）。
+     */
+    @Test
+    fun flickBubbleTextMatchesInputForEveryDirection() {
+        val na = mapOf(
+            FlickDirection.LEFT to "に",
+            FlickDirection.UP to "ぬ",
+            FlickDirection.RIGHT to "ね",
+            FlickDirection.DOWN to "の",
+        )
+        na.forEach { (direction, expected) ->
+            val preview = flickPreview(KanaKeyType.NA, direction, FlickDisplayMode.BUBBLE)
+            assertEquals(listOf(FlickBubbleLabel(direction, expected)), preview.bubbles)
+            assertNull(preview.centerText)
+        }
+        assertEquals(FlickPreview("な", emptyList()), flickPreview(KanaKeyType.NA, FlickDirection.CENTER, FlickDisplayMode.BUBBLE))
+
+        val directions = listOf(FlickDirection.LEFT, FlickDirection.UP, FlickDirection.RIGHT, FlickDirection.DOWN)
+        KanaKeyType.entries.forEach { type ->
+            directions.forEach { direction ->
+                // KeyViewは離したときにgetKanaChar(type, 方向)の文字を入力する。吹き出しの文字はそれと同じでなければならない。
+                val input = KeyboardLayoutData.getKanaChar(type, direction)
+                assertEquals(input, flickPreview(type, direction, FlickDisplayMode.BUBBLE).bubbles.single().text)
+                val cross = flickPreview(type, direction, FlickDisplayMode.CROSS)
+                assertEquals(input, cross.bubbles.single { it.direction == direction }.text)
+                assertNull(cross.centerText)
+                assertEquals(input, flickPreview(type, direction, FlickDisplayMode.IN_KEY).centerText)
+                assertTrue(flickPreview(type, direction, FlickDisplayMode.IN_KEY).bubbles.isEmpty())
+                assertEquals(FlickPreview(null, emptyList()), flickPreview(type, direction, FlickDisplayMode.NONE))
+            }
+            // 十字のガイドは四方向の吹き出しを、それぞれの方向の文字で出す
+            val cross = flickPreview(type, FlickDirection.CENTER, FlickDisplayMode.CROSS)
+            assertEquals(directions.toSet(), cross.bubbles.map { it.direction }.toSet())
+            cross.bubbles.forEach { assertEquals(KeyboardLayoutData.getKanaChar(type, it.direction), it.text) }
+        }
+    }
+
+    /** 吹き出しは押している方向の側に出し、先をキーの縁から内側へ重ねる。大きさの設定は寸法に比例する。 */
+    @Test
+    fun flickBubbleGeometryPlacesBubbleOnDirectionSide() {
+        // 1dp=1pxのキー（左上100,200、幅80、高さ66）
+        val up = flickBubbleGeometry(FlickDirection.UP, 100f, 200f, 80f, 66f, density = 1f, scale = 1f)
+        assertEquals(140f, up.centerX)
+        assertEquals(66f, up.width)
+        assertEquals(54f, up.height)
+        assertEquals(0f, up.rotation)
+        // 先の端（中心+高さ/2）はキーの上端から18dp内側
+        assertEquals(218f, up.centerY + up.height / 2f)
+        val down = flickBubbleGeometry(FlickDirection.DOWN, 100f, 200f, 80f, 66f, density = 1f, scale = 1f)
+        assertEquals(180f, down.rotation)
+        assertTrue(down.centerY > 266f - 18f)
+        val left = flickBubbleGeometry(FlickDirection.LEFT, 100f, 200f, 80f, 66f, density = 1f, scale = 1f)
+        // 左右の吹き出しは実測68×47dpを90度回して描くため、上向きの形では幅47・高さ68になる
+        assertEquals(47f, left.width)
+        assertEquals(68f, left.height)
+        assertEquals(270f, left.rotation)
+        assertEquals(233f, left.centerY)
+        assertTrue(left.centerX < 100f)
+        val right = flickBubbleGeometry(FlickDirection.RIGHT, 100f, 200f, 80f, 66f, density = 1f, scale = 1f)
+        assertEquals(90f, right.rotation)
+        assertTrue(right.centerX > 180f)
+        val large = flickBubbleGeometry(FlickDirection.UP, 100f, 200f, 80f, 66f, density = 2f, scale = 1.4f)
+        assertEquals(66f * 2.8f, large.width, 0.001f)
+    }
+
+    /** きせかえの設定は保存値で往復し、範囲外の数値は範囲へ収め、知らない値は既定値にする。既定値は試作のとおり。 */
+    @Test
+    fun appearanceStorageRoundTripAndDefaults() {
+        val defaults = KeyboardAppearance()
+        assertEquals(ThemePreset.STANDARD, defaults.preset)
+        assertEquals(ThemeMode.SYSTEM, defaults.mode)
+        assertEquals(85, defaults.backgroundBrightness)
+        assertEquals(100, defaults.keyOpacity)
+        assertEquals(FlickDisplayMode.BUBBLE, defaults.flickMode)
+        assertEquals(FlickBubbleShape.PENTAGON, defaults.flickShape)
+        assertFalse(defaults.hasBackgroundImage)
+        assertEquals(defaults, KeyboardAppearance.fromStorage(emptyMap()))
+
+        val custom = KeyboardAppearance(
+            preset = ThemePreset.SAKURA,
+            mode = ThemeMode.DARK,
+            textColor = 0xFF123456.toInt(),
+            flickColor = 0xFFABCDEF.toInt(),
+            backgroundBrightness = 120,
+            backgroundBlur = 4,
+            keyShape = KeyShape.PILL,
+            keyOpacity = 40,
+            keyBorder = true,
+            keyFont = KeyFont.MINCHO,
+            keyTextScale = 110,
+            flickMode = FlickDisplayMode.CROSS,
+            flickShape = FlickBubbleShape.HEART,
+            flickSize = 130,
+            flickOpacity = 60,
+            flickGuide = true,
+        ).toCustom()
+        assertEquals(ThemePreset.CUSTOM, custom.preset)
+        assertEquals(ThemePreset.SAKURA.light!!.roles(), custom.customLight)
+        assertEquals(ThemePreset.SAKURA.dark!!.roles(), custom.customDark)
+        assertEquals(custom, KeyboardAppearance.fromStorage(custom.toStorage()))
+        // 画像の有無は保存値に含めず、読み込み時に渡す
+        assertTrue(KeyboardAppearance.fromStorage(custom.toStorage(), backgroundStamp = 5L).hasBackgroundImage)
+
+        val clamped = KeyboardAppearance.fromStorage(
+            mapOf(
+                KeyboardAppearance.KEY_PRESET to "FUTURE",
+                KeyboardAppearance.KEY_BACKGROUND_BRIGHTNESS to "999",
+                KeyboardAppearance.KEY_FLICK_SIZE to "10",
+                KeyboardAppearance.KEY_TEXT_COLOR to "red",
+                KeyboardAppearance.KEY_CUSTOM_LIGHT to "#FFFFFF",
+                KeyboardAppearance.KEY_BORDER to "yes",
+            ),
+        )
+        assertEquals(ThemePreset.STANDARD, clamped.preset)
+        assertEquals(130, clamped.backgroundBrightness)
+        assertEquals(70, clamped.flickSize)
+        assertNull(clamped.textColor)
+        assertNull(clamped.customLight)
+        assertFalse(clamped.keyBorder)
+    }
+
+    /**
+     * プリセットの配色から導く色は、強調色・吹き出しの上の文字が読める明るさになる。標準のプリセット値はresの色と同じで、
+     * 押下中は明るいテーマで暗く、暗いテーマで明るくする。
+     */
+    @Test
+    fun derivedThemeColorsKeepReadableContrast() {
+        ThemePreset.entries.filter { it != ThemePreset.CUSTOM }.forEach { preset ->
+            listOf(false, true).forEach { dark ->
+                val palette = preset.palette(dark)!!
+                val colors = deriveKeyboardColors(palette, danger = 0xFFB3261E.toInt(), onDanger = 0xFFFFFFFF.toInt())
+                assertTrue("$preset $dark", ThemeColorMath.contrast(colors.accent, colors.onAccent) >= 4.5)
+                assertTrue("$preset $dark", ThemeColorMath.contrast(colors.flick, colors.onFlick) >= LARGE_TEXT_CONTRAST)
+                val keyLuminance = ThemeColorMath.luminance(colors.keyBackground)
+                val pressedLuminance = ThemeColorMath.luminance(colors.keyPressed)
+                if (dark) assertTrue(pressedLuminance > keyLuminance) else assertTrue(pressedLuminance < keyLuminance)
+            }
+        }
+        // Simejiと同じ灰色の吹き出しには白い文字を使う
+        assertEquals(ThemeColorMath.LIGHT_ON_COLOR, ThemeColorMath.onColor(ThemeColorMath.parseHex("#8A8A8A")!!, LARGE_TEXT_CONTRAST))
+        // 明るい黄色の上では濃い文字にする
+        assertEquals(ThemeColorMath.DARK_ON_COLOR, ThemeColorMath.onColor(ThemeColorMath.parseHex("#FDD835")!!, LARGE_TEXT_CONTRAST))
+
+        val resColors = File("src/main/res/values/colors.xml").readText()
+        val standard = ThemePreset.STANDARD.light!!
+        listOf(
+            "kb_background" to standard.background, "kb_key" to standard.key, "kb_function" to standard.function,
+            "kb_key_active" to standard.active, "kb_accent" to standard.accent, "kb_text" to standard.text,
+            "kb_bar" to standard.bar, "kb_divider" to standard.divider, "kb_flick" to standard.flick,
+        ).forEach { (name, color) ->
+            assertTrue(name, resColors.contains("<color name=\"$name\">#FF${ThemeColorMath.toHex(color).removePrefix("#")}</color>"))
+        }
+    }
+
+    /** カスタムでは試作と同じ規則で候補バー・区切り線・有効なキーを導き、文字とフリックは個別の指定を優先する。 */
+    @Test
+    fun customPaletteDerivesBarDividerAndActive() {
+        val light = ThemePreset.STANDARD.light!!.roles()
+        val palette = customPalette(light)
+        assertEquals(ThemeColorMath.shiftLightness(light.background, 5f), palette.bar)
+        assertEquals(ThemeColorMath.shiftLightness(light.background, -10f), palette.divider)
+        assertEquals(ThemeColorMath.shiftLightness(light.accent, 38f), palette.active)
+        val dark = ThemePreset.SUMI.dark!!.roles()
+        val darkPalette = customPalette(dark)
+        assertEquals(ThemeColorMath.shiftLightness(dark.background, 3f), darkPalette.bar)
+        assertEquals(ThemeColorMath.shiftLightness(dark.accent, -25f), darkPalette.active)
+
+        val appearance = KeyboardAppearance(preset = ThemePreset.CUSTOM, customLight = light.with(ColorRole.ACCENT, 0xFF00AA00.toInt()))
+        assertEquals(0xFF00AA00.toInt(), themePalette(appearance, dark = false)!!.accent)
+        // ダークのカスタムが無ければ標準のダークを使う
+        assertEquals(ThemePreset.STANDARD.dark!!.background, themePalette(appearance, dark = true)!!.background)
+        // 標準はresourceの色を使うためnull
+        assertNull(themePalette(KeyboardAppearance(), dark = false))
+        val colors = deriveKeyboardColors(palette, 0, 0).withOverrides(textColor = 0xFFE53935.toInt(), flickColor = null)
+        assertEquals(0xFFE53935.toInt(), colors.text)
+        assertEquals(palette.flick, colors.flick)
+    }
+
+    /** 色の計算: #RRGGBBの読み書き、HSLの往復、コントラスト比。 */
+    @Test
+    fun themeColorMathConvertsColors() {
+        assertEquals(0xFF345995.toInt(), ThemeColorMath.parseHex("#345995"))
+        assertNull(ThemeColorMath.parseHex("345995"))
+        assertNull(ThemeColorMath.parseHex("#34599G"))
+        assertEquals("#345995", ThemeColorMath.toHex(0xFF345995.toInt()))
+        COLOR_CHIP_PALETTE.forEach { color ->
+            val (h, s, l) = ThemeColorMath.toHsl(color)
+            assertTrue(ThemeColorMath.isClose(color, ThemeColorMath.fromHsl(h, s, l)))
+        }
+        assertEquals(21.0, ThemeColorMath.contrast(0xFF000000.toInt(), 0xFFFFFFFF.toInt()), 0.01)
+        assertEquals(0x80FFFFFF.toInt(), ThemeColorMath.withAlpha(0xFFFFFFFF.toInt(), 128f / 255f))
+        assertEquals(15, COLOR_CHIP_PALETTE.size)
+    }
+
+    /** 背景画像はキーボードの縦横比で中央を切り抜き、ぼかしは平均を保って端を同じ色で延ばす。 */
+    @Test
+    fun backgroundCropAndBlur() {
+        // 横長の写真（4000×3000）をキーボード（1080×400）へ: 上下を削る
+        assertEquals(CropRect(0, 759, 4000, 1481), centerCropRect(4000, 3000, 1080, 400))
+        // 縦長のキーボード比より横長の写真: 左右を削る
+        assertEquals(CropRect(500, 0, 1000, 1000), centerCropRect(2000, 1000, 1, 1))
+        assertEquals(0.27f, coverScale(4000, 3000, 1080, 400), 0.001f)
+        assertEquals(2f, coverScale(500, 100, 1000, 100), 0.001f)
+
+        val white = 0xFFFFFFFF.toInt()
+        val black = 0xFF000000.toInt()
+        // 一様な画像はぼかしても変わらない
+        assertTrue(boxBlur(IntArray(9) { white }, 3, 3, 1).all { it == white })
+        // 一画素だけ白い画像は、周りへ広がる
+        val dot = IntArray(25) { black }.also { it[12] = white }
+        val blurred = boxBlur(dot, 5, 5, 1)
+        assertNotEquals(black, blurred[6])
+        assertEquals(black, blurred[0])
+        assertTrue(boxBlur(dot, 5, 5, 0).contentEquals(dot))
+    }
 }

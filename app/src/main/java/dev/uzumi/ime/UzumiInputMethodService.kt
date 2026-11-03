@@ -79,6 +79,8 @@ import dev.uzumi.ime.keyboard.ClipboardHistoryPanel
 import dev.uzumi.ime.keyboard.EditPanelView
 import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardAction
+import dev.uzumi.ime.keyboard.KeyboardBackgroundDrawable
+import dev.uzumi.ime.keyboard.KeyboardBackgroundImage
 import dev.uzumi.ime.keyboard.KeyboardColors
 import dev.uzumi.ime.keyboard.KeyboardDimens
 import dev.uzumi.ime.keyboard.KeyboardLayoutData
@@ -89,6 +91,7 @@ import dev.uzumi.ime.keyboard.ToolbarBarViews
 import dev.uzumi.ime.keyboard.ToolbarPreferences
 import dev.uzumi.ime.keyboard.ToolbarTilePanel
 import dev.uzumi.ime.keyboard.TemplatePickerPanel
+import dev.uzumi.ime.keyboard.ThemeColorMath
 import dev.uzumi.ime.learning.LearningStores
 import dev.uzumi.ime.learning.HiddenCandidateStores
 import dev.uzumi.ime.live.CandidateResult
@@ -268,13 +271,26 @@ class UzumiInputMethodService : InputMethodService() {
         val views = CandidateBarViews(this)
         barViews = views
         hideKeyboardOverlays()
+        val preferences = UzumiSettings.keyboardPreferences(this)
+        val appearance = preferences.appearance
+        // きせかえの背景画像。あれば入力View全体に敷き、候補バーとキーを設定の不透明度で重ねる。
+        val backgroundImage = KeyboardBackgroundImage.load(this, appearance.backgroundStamp, appearance.backgroundBlur)
+        val barColor = if (backgroundImage != null) {
+            ThemeColorMath.withAlpha(views.colors.bar, maxOf(MIN_BAR_ALPHA_WITH_IMAGE, appearance.keyOpacity / 100f))
+        } else {
+            views.colors.bar
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(views.colors.keyboardBackground)
+            if (backgroundImage != null) {
+                background = KeyboardBackgroundDrawable(backgroundImage, appearance.backgroundBrightness, views.colors.keyboardBackground)
+            } else {
+                setBackgroundColor(views.colors.keyboardBackground)
+            }
         }
         val toolbar = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(views.colors.bar)
+            setBackgroundColor(barColor)
         }
         toolbarRow = toolbar
         toolbarViews = ToolbarBarViews(this)
@@ -284,9 +300,9 @@ class UzumiInputMethodService : InputMethodService() {
             LinearLayout.LayoutParams.MATCH_PARENT,
             0,
         ))
+        // 候補の列は候補バーの地の上に重ねるため、地を塗らない（背景画像の透け方を候補バー全体でそろえる）。
         val candidates = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(views.colors.bar)
         }
         candidateRow = candidates
         val leading = LinearLayout(this).apply {
@@ -302,7 +318,7 @@ class UzumiInputMethodService : InputMethodService() {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(views.colors.bar)
+            setBackgroundColor(barColor)
         }
         candidateBar = bar
         val match = LinearLayout.LayoutParams.MATCH_PARENT
@@ -320,7 +336,6 @@ class UzumiInputMethodService : InputMethodService() {
 
         // 候補一覧はキーボードの面と同じ場所に重ね、開いている間はキーを覆う
         val keyboardArea = FrameLayout(this)
-        val preferences = UzumiSettings.keyboardPreferences(this)
         builtPreferences = preferences
         val rowBudget = maximumBarRows()
         val reservedBarRows = minOf(toolbarPreferences.toolbarRows + toolbarPreferences.candidateRows, rowBudget)
@@ -451,6 +466,7 @@ class UzumiInputMethodService : InputMethodService() {
             evaluation = evaluation,
             correctness = CorrectnessJudge.shared,
             romajiInputEnabled = romaji,
+            kanaToggleWindowMillis = UzumiSettings.inputTuning(this).toggleWindowMillis.toLong(),
         )
         if (inputViewVisible) refreshClipboardSuggestion()
         applyPolicyToKeyboard()
@@ -1831,6 +1847,9 @@ class UzumiInputMethodService : InputMethodService() {
 
         /** キーボードパネル外周（dp）。 */
         const val KEYBOARD_PANEL_PADDING_DP = 4
+
+        /** 背景画像があるとき、候補バーの地に残す最小の不透明度。キーを透かしても候補の文字を読めるようにする（試作と同じ55%）。 */
+        const val MIN_BAR_ALPHA_WITH_IMAGE = 0.55f
 
         /** 設定時は両バー最大6段。表示時は画面高に応じて制限する。 */
         const val MAX_VISIBLE_BAR_ROWS = 6

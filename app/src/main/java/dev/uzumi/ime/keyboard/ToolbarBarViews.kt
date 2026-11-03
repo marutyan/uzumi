@@ -1,6 +1,7 @@
 package dev.uzumi.ime.keyboard
 
 import android.content.Context
+import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.util.TypedValue
@@ -34,8 +35,9 @@ class ToolbarBarViews(private val context: Context) {
         minWidth = px(MIN_TOUCH_DP)
         minHeight = px(MIN_TOUCH_DP)
         setPadding(px(3f), 0, px(3f), 0)
+        // 地は置き場所（機能バー、機能一覧）の色に任せ、枠だけを描く。背景画像の上では機能バーの透け方に合わせる。
         background = GradientDrawable().apply {
-            setColor(this@ToolbarBarViews.colors.bar)
+            setColor(Color.TRANSPARENT)
             setStroke(px(1f), this@ToolbarBarViews.colors.divider)
         }
         isEnabled = enabled
@@ -56,10 +58,10 @@ class ToolbarBarViews(private val context: Context) {
     ) {
         parent.removeAllViews()
         rows.forEach { actions ->
+            // 段の地は親（機能バー）の色をそのまま見せる。
             parent.addView(LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setBackgroundColor(colors.bar)
                 actions.forEach { action -> addView(tile(action, labelFor(action)) { onAction(action) }) }
             }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, px(BAR_ROW_HEIGHT_DP)))
         }
