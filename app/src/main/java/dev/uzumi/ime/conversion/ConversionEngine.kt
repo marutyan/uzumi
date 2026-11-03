@@ -60,6 +60,12 @@ interface ConversionEngine {
      */
     fun learnSegments(sessionId: Long, segments: List<LearnedSegment>): Boolean
 
+    /**
+     * 読みと表記の組を、エンジンが確定から学習した内容から消す。sessionの状態は読みから作り直し、確定はしない。
+     * 消す命令を送ったかを返す。
+     */
+    fun deleteFromHistory(sessionId: Long, reading: String, surface: String): Boolean
+
     /** エンジンが確定から学習した内容（文節履歴と予測の履歴）をすべて消す。 */
     fun clearLearning(): Boolean
 }

@@ -1587,19 +1587,25 @@ class UzumiInputMethodService : InputMethodService() {
         return true
     }
 
-    /** 学習行の削除をworker threadで行い、現セッションに残る同じ由来の候補も取り除く。 */
+    /**
+     * 学習行とMozcの履歴の削除を変換worker threadで行い、現セッションに残る同じ由来の候補も取り除く。
+     * 学習禁止欄と評価の記録中はworkerが何もしない。
+     */
     private fun removeLearnedCandidate(current: EditorSession, reading: String, surface: String) {
-        Thread({
-            if (!evaluation.isRecording && !current.policy.suppressLearning) {
-                val removed = LearningStores.get(applicationContext).remove(reading, surface)
-                mainHandler.post {
-                    if (session === current) {
-                        if (removed) current.removeLearnedCandidate(reading, surface)
-                        refreshCandidates()
-                    }
+        val worker = conversionWorker ?: return refreshCandidates()
+        worker.deleteLearning(
+            sessionEpoch = current.sessionEpoch,
+            reading = reading,
+            surface = surface,
+            learningAllowed = !evaluation.isRecording && !current.policy.suppressLearning,
+        ) { removed ->
+            mainHandler.post {
+                if (session === current) {
+                    if (removed) current.removeLearnedCandidate(reading, surface)
+                    refreshCandidates()
                 }
             }
-        }, "uzumi-learning-remove").start()
+        }
     }
 
     /** 非表示表記をworker threadで保存し、同じ欄の候補と表示値へすぐ反映する。 */

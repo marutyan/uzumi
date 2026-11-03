@@ -147,21 +147,25 @@ class MozcConversionEngine(
         if (!setRequest(request(incognitoMode, kanaModifierInsensitiveMode, prediction = true, zeroQuery = false))) {
             return emptyList()
         }
+        val candidates = typeForSuggestion(sessionId, reading)?.let { predictionCandidates(it, reading) }.orEmpty()
+        return candidates.takeIf { restoreRequest() }.orEmpty()
+    }
+
+    /**
+     * 予測用のrequestを設定した後に、読みを一文字ずつcompositionへ積み、最後のキーの応答（候補窓に予測を含む）を返す。
+     * 予測の計算は重いため、途中のキーではsuggestionを求めない。キーを受け付けなければnull。
+     */
+    private fun typeForSuggestion(sessionId: Long, reading: String): Output? {
         var output: Output? = null
-        var failed = false
         val characters = GraphemeClusters.split(reading)
         for ((index, character) in characters.withIndex()) {
             val key = KeyEvent.newBuilder()
                 .setKeyString(character)
                 .setInputStyle(KeyEvent.InputStyle.AS_IS)
             output = sendKey(sessionId, key, requestSuggestion = index == characters.lastIndex)
-            if (output == null || !output.consumed) {
-                failed = true
-                break
-            }
+            if (output == null || !output.consumed) return null
         }
-        val candidates = if (failed) emptyList() else output?.let { predictionCandidates(it, reading) }.orEmpty()
-        return candidates.takeIf { restoreRequest() }.orEmpty()
+        return output
     }
 
     /** 直前の確定文字をcontextに設定し、Mozcの専用NWP命令で次の語を求める。 */
@@ -436,6 +440,48 @@ class MozcConversionEngine(
         val history = eval(Input.newBuilder().setType(Input.CommandType.CLEAR_USER_HISTORY)) != null
         val prediction = eval(Input.newBuilder().setType(Input.CommandType.CLEAR_USER_PREDICTION)) != null
         return history && prediction
+    }
+
+    /**
+     * 読みと表記の組をMozcの履歴（文節履歴と予測の履歴）から消す。読み全体を一文節にした変換で表記が第一候補なら、
+     * その候補IDでDELETE_CANDIDATE_FROM_HISTORYを送る。第一候補でなければ、同じ読みの入力途中の予測で同じ判定をする。
+     * 第一候補に限るのは、Mozcの文節履歴の削除がIDの候補ではなく文節の第一候補の表記を消すためである
+     * （rewriter/user_segment_history_rewriter.ccのClearHistoryEntry）。ほかの語の学習を消さないよう、それ以外では送らない。
+     * 確定はしないため新たな学習は起きない。送ったかを返す（Mozcは消せたかを応答で区別しない）。
+     */
+    override fun deleteFromHistory(sessionId: Long, reading: String, surface: String): Boolean {
+        if (reading.isEmpty() || surface.isEmpty()) return false
+        val deleted = deleteTopConversionCandidate(sessionId, reading, surface) ||
+            deleteTopSuggestion(sessionId, reading, surface)
+        if (sessionId in sessionsWithPreedit) sendCommand(sessionId, SessionCommand.CommandType.REVERT)
+        return deleted
+    }
+
+    /** 読み全体を一文節に合わせて変換し、表記が第一候補なら履歴から消す。 */
+    private fun deleteTopConversionCandidate(sessionId: Long, reading: String, surface: String): Boolean {
+        val converted = composeAndConvert(sessionId, reading, requestSuggestion = false) ?: return false
+        if (!converted.hasPreedit()) return false
+        val output = alignFocusedSegment(sessionId, converted, 0, reading) ?: return false
+        return deleteIfTopCandidate(sessionId, output, surface)
+    }
+
+    /** 読みを予測用のrequestで入力し、予測の第一候補が表記と同じなら履歴から消す。requestは通常の設定へ戻す。 */
+    private fun deleteTopSuggestion(sessionId: Long, reading: String, surface: String): Boolean {
+        if (sessionId in sessionsWithPreedit) {
+            sendCommand(sessionId, SessionCommand.CommandType.REVERT) ?: return false
+        }
+        if (!setRequest(request(incognitoMode, kanaModifierInsensitiveMode, prediction = true, zeroQuery = false))) {
+            return false
+        }
+        val deleted = typeForSuggestion(sessionId, reading)?.let { deleteIfTopCandidate(sessionId, it, surface) } == true
+        return restoreRequest() && deleted
+    }
+
+    /** 候補窓の先頭（文節の第一候補）が表記と同じ場合だけ、そのIDで履歴からの削除を送る。 */
+    private fun deleteIfTopCandidate(sessionId: Long, output: Output, surface: String): Boolean {
+        val top = output.allCandidateWords.candidatesList.firstOrNull() ?: return false
+        if (!top.hasId() || top.value != surface) return false
+        return sendCommand(sessionId, SessionCommand.CommandType.DELETE_CANDIDATE_FROM_HISTORY, top.id) != null
     }
 
     override fun commitAll(sessionId: Long): Boolean {

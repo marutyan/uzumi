@@ -290,6 +290,34 @@ class ConversionWorker(
         }
     }
 
+    /**
+     * 候補の長押しの「この学習を削除」。IME側の学習から読みと表記の行を消し、エンジンの履歴からも同じ組を消す。
+     * どちらもworker threadで行い、エンジンのsessionは読みから作り直すため、表示中の候補IDには依らない。
+     * 学習禁止欄と評価の記録中は何もしない。onRemovedはIME側の行を消せたかを渡し、worker threadから呼ぶ。
+     */
+    fun deleteLearning(
+        sessionEpoch: Long,
+        reading: String,
+        surface: String,
+        learningAllowed: Boolean,
+        onRemoved: (Boolean) -> Unit,
+    ) {
+        if (!learningAllowed) return
+        executor.execute {
+            if (evaluationActive()) return@execute
+            val removed = lookupLearningStore()?.remove(reading, surface) == true
+            if (!isEnded(sessionEpoch) && currentHealth is EngineHealth.Ready) {
+                val sessionId = sessionFor(sessionEpoch)
+                if (sessionId != null && runCatching { engine.setIncognito(false) }.getOrDefault(false)) {
+                    // 読みから作り直した状態は直前の明示変換の状態ではないため、その確定の学習通知を照合させない。
+                    lastConverted.remove(sessionEpoch)
+                    runCatching { engine.deleteFromHistory(sessionId, reading, surface) }
+                }
+            }
+            onRemoved(removed)
+        }
+    }
+
     override fun requestConversion(request: ConversionRequest) {
         latestRequest.set(request)
         executor.execute(::drainLatestRequest)

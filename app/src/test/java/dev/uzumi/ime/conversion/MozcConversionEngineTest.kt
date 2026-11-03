@@ -546,6 +546,43 @@ class MozcConversionEngineTest {
         assertEquals(SessionCommand.CommandType.REVERT, native.inputs.last().command.type)
     }
 
+    /**
+     * 学習の削除は、読みを一文節に変換して表記が第一候補なら、その候補IDでMozcの履歴から消し、確定せずに取り消す。
+     * 実際のMozcでは「かき」の柿を学習して第一候補にした後、この命令で柿が4番目へ戻ることをsession_handler_mainで確かめた。
+     */
+    @Test
+    fun deleteFromHistorySendsTopCandidateIdAndReverts() {
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        assertTrue(engine.deleteFromHistory(sessionId = 5, reading = "かき", surface = "柿"))
+
+        assertEquals(listOf("柿"), mozc.deletedFromHistory)
+        assertTrue(mozc.submitted.isEmpty())
+        assertEquals(SessionCommand.CommandType.REVERT, native.inputs.last().command.type)
+    }
+
+    /**
+     * 第一候補でない表記には削除を送らない。Mozcの文節履歴の削除は文節の第一候補の表記を消すため、
+     * 送ると別の語（ここでは「下記」の前にある「柿」）の学習を消してしまう。
+     */
+    @Test
+    fun deleteFromHistorySkipsCandidateThatIsNotFirst() {
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        assertFalse(engine.deleteFromHistory(sessionId = 5, reading = "かき", surface = "下記"))
+
+        assertTrue(mozc.deletedFromHistory.isEmpty())
+        assertTrue(mozc.submitted.isEmpty())
+        val requests = native.inputs.filter { it.type == Input.CommandType.SET_REQUEST }.map { it.request }
+        // 予測でも確かめた後、予測用のrequestを通常の設定へ戻す。
+        assertFalse(requests.last().mixedConversion)
+        assertEquals(SessionCommand.CommandType.REVERT, native.inputs.last().command.type)
+    }
+
     private fun createTempDir(): File = Files.createTempDirectory("mozc-engine-test").toFile()
 }
 
@@ -580,6 +617,9 @@ private class FakeMozcNative : MozcNativeBridge {
 private class StatefulMozc {
     /** SUBMITで確定した表記。学習が行われたかの確認に使う。 */
     val submitted = mutableListOf<String>()
+
+    /** DELETE_CANDIDATE_FROM_HISTORYで履歴から消すよう指定された表記。 */
+    val deletedFromHistory = mutableListOf<String>()
     private val composition = StringBuilder()
     private val keys = mutableListOf<String>()
     // 文節ごとに選んでいる候補のID。
@@ -595,6 +635,7 @@ private class StatefulMozc {
         "きょうは" to listOf("今日は" to "きょう", "京は" to "きょう"),
         "いい" to listOf("いい" to null, "良い" to null),
         "きょう" to listOf("今日" to null, "京" to null),
+        "かき" to listOf("柿" to null, "下記" to null),
         "こうえんに" to listOf("公園に" to "こうえん", "項園に" to null, "講演に" to "こうえん"),
     )
 
@@ -614,6 +655,11 @@ private class StatefulMozc {
             }
 
             input.command.type == SessionCommand.CommandType.REVERT -> clear()
+            input.command.type == SessionCommand.CommandType.DELETE_CANDIDATE_FROM_HISTORY -> {
+                deletedFromHistory += candidatesOf(keys[focus])[input.command.id].first
+                // 実際のMozcと同じく、削除の後は変換を取り消してcompositionへ戻る。
+                converting = false
+            }
         }
         return output()
     }

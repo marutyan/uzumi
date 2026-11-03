@@ -1124,6 +1124,50 @@ class ConversionWorkerTest {
         assertEquals(listOf("clearLearning"), fixture.engine.calls)
     }
 
+    /** 「この学習を削除」は、IME側の学習行とエンジンの履歴の両方を消し、直前の明示変換への確定通知を照合させない。 */
+    @Test
+    fun deleteLearningRemovesStoreRowAndEngineHistory() {
+        val learning = learningStore()
+        learning.record("かき", "柿")
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        val converted = request(reading = "かんじ")
+        fixture.worker.requestConversion(converted)
+        fixture.executor.runAll()
+        fixture.engine.calls.clear()
+        val removed = mutableListOf<Boolean>()
+
+        fixture.worker.deleteLearning(1, "かき", "柿", learningAllowed = true) { removed += it }
+        fixture.executor.runAll()
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        fixture.worker.commitAll(converted, result.segments)
+        fixture.executor.runAll()
+
+        assertEquals(listOf(true), removed)
+        assertTrue(learning.exactMatches("かき").isEmpty())
+        assertEquals(listOf("setIncognito(false)", "deleteFromHistory(1,かき=柿)"), fixture.engine.calls)
+    }
+
+    /** 学習禁止欄と評価の記録中は、IME側の学習もエンジンの履歴も消さない。 */
+    @Test
+    fun deleteLearningDoesNothingWhenLearningIsSuppressedOrEvaluating() {
+        val learning = learningStore()
+        learning.record("かき", "柿")
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.calls.clear()
+        val removed = mutableListOf<Boolean>()
+
+        fixture.worker.deleteLearning(1, "かき", "柿", learningAllowed = false) { removed += it }
+        fixture.evaluating = true
+        fixture.worker.deleteLearning(1, "かき", "柿", learningAllowed = true) { removed += it }
+        fixture.executor.runAll()
+
+        assertTrue(removed.isEmpty())
+        assertEquals(listOf("柿"), learning.exactMatches("かき").map { it.surface })
+        assertTrue(fixture.engine.calls.isEmpty())
+    }
+
     /** ニューラル変換を選ぶと、ライブ変換のかなの連なりをモデルで変換し、辞書（Mozc）の文節へ切り分ける。 */
     @Test
     fun liveConversionUsesNeuralBackendWhenSelected() {
@@ -1688,6 +1732,11 @@ private class FakeConversionEngine : ConversionEngine {
 
     override fun clearLearning(): Boolean {
         calls += "clearLearning"
+        return true
+    }
+
+    override fun deleteFromHistory(sessionId: Long, reading: String, surface: String): Boolean {
+        calls += "deleteFromHistory($sessionId,$reading=$surface)"
         return true
     }
 
