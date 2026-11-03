@@ -50,7 +50,7 @@ class EditorSessionTest {
 
         assertEquals("ありがとうございます", connection.text)
         assertFalse(session.hasComposition)
-        assertEquals(listOf(request to 2), client.committed)
+        assertEquals(listOf(request to PredictionCandidate(2, "ありがとうございます")), client.committed)
     }
 
     /** 入力途中のローマ字は予測の読みへ含めず、予測を選ぶと保留ごと未確定全体を置き換える。 */
@@ -73,6 +73,46 @@ class EditorSessionTest {
         // 捨てた保留が次の入力へ残らない。
         typeRomaji(session, "a")
         assertEquals("ありがとうあ", connection.text)
+    }
+
+    /** IDを持たない複数の英語候補を表記で区別し、選んだ表記をそのまま確定する。 */
+    @Test
+    fun selectsExactIdlessEnglishPredictionAmongSameNullIds() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+        assertTrue(session.inputText("いーめーる"))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        val candidates = listOf(
+            PredictionCandidate(4, "メール", "いーめーる"),
+            PredictionCandidate(null, "email", "いーめーる", englishVariant = true),
+            PredictionCandidate(null, "Email", "いーめーる", englishVariant = true),
+            PredictionCandidate(null, "E-mail", "いーめーる", englishVariant = true),
+        )
+        assertTrue(session.applyPredictionResult(PredictionResult(request, candidates)))
+
+        assertTrue(session.selectPrediction(request, candidates[2]))
+
+        assertEquals("Email", connection.text)
+        assertEquals(listOf(request to candidates[2]), client.committed)
+    }
+
+    /** Mozc候補が無い、または表示中の値と重なって除外されたとき、英語候補だけを先頭へ出さない。 */
+    @Test
+    fun hidesEnglishPredictionsWithoutVisibleMozcCandidateBeforeThem() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+        assertTrue(session.inputText("いーめーる"))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(
+            PredictionCandidate(1, "いーめーる", "いーめーる"),
+            PredictionCandidate(null, "Email", "いーめーる", englishVariant = true),
+        ))))
+
+        assertTrue(session.predictionResult()!!.candidates.isEmpty())
     }
 
     /** 入力全体の候補から、本文に表示中のライブ変換の表記と注目segmentの候補と同じ表記を除く。全部重なれば0件にする。 */
@@ -151,7 +191,7 @@ class EditorSessionTest {
         assertEquals("", core.display)
         assertFalse(session.hasComposition)
         assertTrue(liveClient.learned.isEmpty())
-        assertEquals(listOf(request to 4), predictionClient.committed)
+        assertEquals(listOf(request to PredictionCandidate(4, "ありがとう")), predictionClient.committed)
     }
 
     /** ゼロクエリは直前の確定文脈だけを使い、選択語をカーソル位置へ直接確定する。 */
@@ -169,7 +209,7 @@ class EditorSessionTest {
         assertTrue(session.selectPrediction(request, candidateId = 3))
 
         assertEquals("きょうは天気晴れ", connection.text)
-        assertEquals(listOf(request to 3), client.committed)
+        assertEquals(listOf(request to PredictionCandidate(3, "天気")), client.committed)
     }
 
     /** ゼロクエリは機密・学習禁止・数値・URLやメールの欄、または選択範囲がある状態から本文を読まずに抑止する。 */
@@ -818,6 +858,35 @@ class EditorSessionTest {
         assertTrue(session.compositionSnapshot().reading.isEmpty())
         assertEquals(listOf(request), client.committedAll)
         assertEquals(listOf("感じ"), client.committedAllSegments.single().second.map(ConversionSegment::value))
+    }
+
+    /** 明示変換で選んだ英語候補の読みと種別を保ち、Mozcへ候補を再学習させない。 */
+    @Test
+    fun chosenEnglishConversionCandidateKeepsLearningMetadata() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        assertTrue(session.inputText("ぐーぐる"))
+        assertTrue(session.convert())
+        val request = client.requests.single()
+        val engine = ConversionCandidate(0, "ぐーぐる", "ぐーぐる")
+        val english = ConversionCandidate(
+            id = Int.MIN_VALUE + 0x20000,
+            value = "Google",
+            reading = "ぐーぐる",
+            learnedReading = "ぐーぐる",
+            englishVariant = true,
+        )
+        val segment = ConversionSegment("ぐーぐる", "ぐーぐる", candidates = listOf(engine, english))
+        assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(ConversionResult(request, listOf(segment), listOf(engine, english)))))
+        assertTrue(session.selectConversionCandidate(session.candidateOptions().last().conversionChoice!!))
+        assertTrue(session.commitComposition())
+
+        val committed = client.committedAllSegments.single().second.single()
+        assertEquals("Google", committed.value)
+        assertEquals("ぐーぐる", committed.learnedReading)
+        assertTrue(committed.englishVariant)
+        assertFalse(committed.engineCandidate)
     }
 
     /** 変換キーを押すたび注目文節の候補を循環し、候補バーの選択表示も追従する。 */
@@ -2409,7 +2478,7 @@ private class FakeConversionClient : ConversionClient {
 /** 予測要求と、選んだ候補の確定を記録する偽の窓口。 */
 private class FakePredictionClient : PredictionClient {
     val requests = mutableListOf<PredictionRequest>()
-    val committed = mutableListOf<Pair<PredictionRequest, Int>>()
+    val committed = mutableListOf<Pair<PredictionRequest, PredictionCandidate>>()
 
     override val isPredictionAvailable: Boolean = true
 
@@ -2419,8 +2488,8 @@ private class FakePredictionClient : PredictionClient {
     }
 
     /** 選択候補の確定通知を記録する。 */
-    override fun commitPrediction(request: PredictionRequest, candidateId: Int) {
-        committed += request to candidateId
+    override fun commitPrediction(request: PredictionRequest, candidate: PredictionCandidate) {
+        committed += request to candidate
     }
 }
 

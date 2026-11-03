@@ -33,6 +33,7 @@ import androidx.autofill.inline.common.ViewStyle
 import androidx.autofill.inline.v1.InlineSuggestionUi
 import dev.uzumi.ime.conversion.ConversionOutcome
 import dev.uzumi.ime.conversion.ConversionWorker
+import dev.uzumi.ime.conversion.EnglishWordDictionary
 import dev.uzumi.ime.conversion.EngineHealth
 import dev.uzumi.ime.conversion.JniMozcNativeBridge
 import dev.uzumi.ime.conversion.MozcConversionEngine
@@ -89,6 +90,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * Androidの入力接続、編集セッション、キーボード表示を一つの寿命へ結び付ける。
  */
 class UzumiInputMethodService : InputMethodService() {
+    /** 同梱の英語読み辞書を初回参照時に読み、不変indexをプロセス内で再利用する。 */
+    private val englishWordDictionary by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        EnglishWordDictionary.load(assets.open("english-words.tsv"))
+    }
+
     private var session: EditorSession? = null
     private var keyboardPanel: KeyboardPanel? = null
     // 最近履歴は一覧を開いたときに読み、入力成功後かつ機密欄以外でのみ書く。
@@ -194,6 +200,7 @@ class UzumiInputMethodService : InputMethodService() {
             onCandidateResult = { sessionEpoch, result -> mainHandler.post { deliverCandidateResult(sessionEpoch, result) } },
             onPredictionResult = { result -> mainHandler.post { deliverPredictionResult(result) } },
             userDictionary = { UserDictionaries.get(this) },
+            englishWords = { englishWordDictionary },
             learningStore = { LearningStores.get(this) },
         )
         conversionExecutor = executor
@@ -1113,7 +1120,7 @@ class UzumiInputMethodService : InputMethodService() {
         result: PredictionResult,
         candidate: PredictionCandidate,
     ): CandidateEntry = CandidateEntry(candidate.value, selected = false, isPrediction = true) {
-        current.selectPrediction(result.request, candidate.id)
+        current.selectPrediction(result.request, candidate)
     }
 
     /** 待機中のクリップボード提案を予測候補より左へ置き、本文貼付と提案解除を別々に押せるようにする。 */

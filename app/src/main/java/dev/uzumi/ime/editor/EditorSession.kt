@@ -221,7 +221,10 @@ class EditorSession(
         val result = appliedPrediction?.takeIf { isCurrentPredictionRequest(it.request) } ?: return null
         val shown = regularCandidateValues().toMutableSet()
         if (hasComposition) shown += ownedDisplay
-        return result.copy(candidates = result.candidates.filterNot { it.value in shown })
+        val candidates = result.candidates.filterNot { it.value in shown }
+        val firstEnglish = candidates.indexOfFirst(PredictionCandidate::englishVariant)
+        val keepEnglish = firstEnglish < 0 || candidates.take(firstEnglish).any { it.id != null }
+        return result.copy(candidates = candidates.filter { !it.englishVariant || keepEnglish })
     }
 
     /** 予測の右に並ぶ通常の候補の表記。ライブ変換では注目segmentの候補、それ以外は明示変換・基本候補。 */
@@ -242,14 +245,20 @@ class EditorSession(
         appliedPrediction = null
     }
 
+    /** Mozc候補IDから対応する候補を探し、予測語を確定する既存呼び出し口を保つ。 */
+    fun selectPrediction(request: PredictionRequest, candidateId: Int): Boolean {
+        val candidate = appliedPrediction?.candidates?.firstOrNull { it.id == candidateId } ?: return false
+        return selectPrediction(request, candidate)
+    }
+
     /**
      * 予測候補を選び、未確定全体（次の語の予測ではカーソル位置）をその語で確定する。
-     * ライブ変換の表示中の文節は確定しないため学習へ送らず、予測語の確定だけを予測の窓口へ伝える。
+     * 候補全体を照合するため、Mozc IDのない英語候補も同じ表示の候補へ確定できる。
      */
-    fun selectPrediction(request: PredictionRequest, candidateId: Int): Boolean {
+    fun selectPrediction(request: PredictionRequest, candidate: PredictionCandidate): Boolean {
         val result = appliedPrediction ?: return false
         if (result.request != request || !isCurrentPredictionRequest(request)) return false
-        val candidate = result.candidates.firstOrNull { it.id == candidateId } ?: return false
+        if (result.candidates.none { it == candidate }) return false
         // 予測は未確定全体を置き換えるため、入力途中のローマ字と連続タップは確定せずに捨てる。
         abandonPendingInput()
         deletionUndo = null
@@ -265,7 +274,7 @@ class EditorSession(
             liveCursorUtf16 = 0
             if (!commitCompositionAs(candidate.value)) return false
         }
-        predictionClient?.commitPrediction(request, candidate.id)
+        predictionClient?.commitPrediction(request, candidate)
         clearPredictions()
         return true
     }
@@ -1060,6 +1069,7 @@ class EditorSession(
             fromUserDictionary = candidate.fromUserDictionary,
             chosen = true,
             learnedReading = candidate.learnedReading,
+            englishVariant = candidate.englishVariant,
         )
         return updateExplicitConversionSegment(conversion, choice.segmentIndex, updated)
     }
