@@ -13,12 +13,9 @@
 あぷりけーしょん	application
 そふと	software
 はーどうぇあ	hardware
-ぱそこん	PC
 こんぴゅーたー	computer
-のーとぱそこん	laptop
 たぶれっと	tablet
 すまーとふぉん	smartphone
-けいたい	mobile
 でぃすぷれい	display
 もにたー	monitor
 きーぼーど	keyboard
@@ -49,7 +46,6 @@
 あっぷでーと	update
 あぷでーと	update
 ばーじょん	version
-せってい	settings
 ぶらうざ	browser
 うぇぶ	web
 ほーむぺーじ	homepage
@@ -66,7 +62,6 @@
 みーてぃんぐ	meeting
 かれんだー	calendar
 すけじゅーる	schedule
-めも	note
 りまいんだー	reminder
 たすく	task
 ぷろじぇくと	project
@@ -98,7 +93,6 @@
 えっくす	X
 ついったー	Twitter
 いんすたぐらむ	Instagram
-いんすた	Instagram
 ふぇいすぶっく	Facebook
 てぃっくとっく	TikTok
 らいん	LINE
@@ -137,7 +131,6 @@
 でびあん	Debian
 あいおーえす	iOS
 まっくおーえす	macOS
-おぺれーてぃんぐしすてむ	OS
 もずら	Mozilla
 ふぁいあふぉっくす	Firefox
 えっじ	Edge
@@ -159,7 +152,6 @@
 こーど	code
 ぷろぐらむ	program
 ぷろぐらみんぐ	programming
-あぷりけーしょんぷろぐらみんぐ	API
 えーぴーあい	API
 えいちてぃーえむえる	HTML
 しーえすえす	CSS
@@ -212,7 +204,6 @@
 そーすこーど	source code
 おーぷんそーす	open source
 らいせんす	license
-ばーじょんかんり	version control
 せきゅりてぃ	security
 ぷらいばしー	privacy
 あかうんと	Account
@@ -232,8 +223,7 @@
 ぶいえすこーど	VS Code
 いんてりじぇい	IntelliJ
 こーだ	Coda
-えむえーしー	Mac
-えーてぃーおーえむ	Atom
+えむえーしー	MAC
 さぶらいむ	Sublime Text
 ふぃぐま	Figma
 きゃんば	Canva
@@ -254,7 +244,6 @@
 せーぶ	save
 ろーど	load
 さーち	search
-けんさく	search
 ふぃーどばっく	feedback
 さぽーと	support
 へるぷ	help
@@ -286,7 +275,6 @@
 ばってりー	battery
 ぶるーとぅーす	Bluetooth
 えすえすでぃー	SSD
-はーどでぃすく	HDD
 ゆーえすびー	USB
 えすでぃーかーど	SD card
 えいちでぃーえむあい	HDMI
@@ -299,7 +287,6 @@
 きゅーあーるこーど	QR code
 びじねす	business
 あいであ	idea
-ぷれぜん	presentation
 すたっふ	staff
 めんばー	member
 りーだー	leader
@@ -322,14 +309,10 @@
 ほてる	hotel
 れすとらん	restaurant
 かふぇ	cafe
-こんびに	convenience store
-すーぱー	supermarket
-すたば	Starbucks
 まくどなるど	McDonald's
 すたーばっくす	Starbucks
 こーひー	coffee
 けーき	cake
-ぱん	bread
 すぽーつ	sports
 さっかー	soccer
 ふっとぼーる	football
@@ -373,4 +356,3 @@
 にゅーす	news
 あーかいぶ	archive
 ぎゃらりー	gallery
-ばーじょんあっぷ	version up
