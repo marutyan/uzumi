@@ -83,11 +83,29 @@ sealed interface KeySpec {
 class KeyView(context: Context) : View(context) {
 
     private val density = context.resources.displayMetrics.density
-    private val thresholdPx = 20f * density
-    private val cornerRadius = KeyboardDimens.KEY_CORNER_DP * density
 
-    // 端末のライト／ダーク設定に合う配色。入力Viewは構成変更のたびに作り直されるため、生成時に一度読む。
-    private val colors = KeyboardColors.from(context)
+    // フリックとみなす最小の移動距離と、中心とみなす範囲の形。設定の「入力の操作」から読む。
+    private var thresholdPx = InputTuning.DEFAULT_FLICK_THRESHOLD_DP * density
+    private var flickJudge = FlickJudge.CIRCLE
+
+    // 長押しの時間（ミリ秒）。設定で0（端末に合わせる）なら端末の長押し時間を使う。
+    private var longPressTimeoutMillis = ViewConfiguration.getLongPressTimeout().toLong()
+
+    // 連続実行中に指がこの距離以上キーの外へ出たら止める（px）。フリックの判定幅とは別の値である。
+    private val repeatCancelMarginPx = REPEAT_CANCEL_MARGIN_DP * density
+
+    // キーボード全体で共有する配色。KeyboardPanelがきせかえの設定から一度だけ作り、applyPreferencesで渡す。
+    private lateinit var colors: KeyboardColors
+
+    // きせかえの見た目。キーの形・不透明度・境界線・書体・文字の大きさ・フリックの表示を持つ。
+    private var appearance = KeyboardAppearance()
+    private var cornerRadius = KeyboardDimens.KEY_CORNER_DP * density
+    private var baseTypeface: Typeface = Typeface.DEFAULT
+    private var boldTypeface: Typeface = Typeface.DEFAULT_BOLD
+    private var textScale = 1f
+
+    // キーの地の不透明度（0〜1）。背景画像があるときだけ設定の値を使い、無ければ常に不透明にする。
+    private var keyAlpha = 1f
 
     private var spec: KeySpec? = null
     private var onAction: ((KeyboardAction) -> Unit)? = null
@@ -97,6 +115,9 @@ class KeyView(context: Context) : View(context) {
 
     // 押下中の文字の拡大表示を出す・消すコールバック。文字がnullなら消す。拡大表示を使わない面ではnull。
     private var onPreview: ((View, String?) -> Unit)? = null
+
+    // かなキーのフリックの吹き出しを出す・消すコールバック。一覧が空なら消す。2つ目の値は押している方向。
+    private var onFlickBubbles: ((View, List<FlickBubbleLabel>, FlickDirection) -> Unit)? = null
 
     // 長押しの取り消し距離は端末の標準touch slopに合わせる。フリック閾値とは別の値である。
     private val gesture = KeyGestureState(ViewConfiguration.get(context).scaledTouchSlop.toFloat())
@@ -170,6 +191,9 @@ class KeyView(context: Context) : View(context) {
     private val backgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
+    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+    }
     private val mainTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
         typeface = Typeface.DEFAULT
@@ -196,8 +220,10 @@ class KeyView(context: Context) : View(context) {
         onPageSwitch: (() -> Unit)? = null,
         onPreview: ((View, String?) -> Unit)? = null,
         onDeleteDrag: ((View, DeleteDragState) -> Unit)? = null,
+        onFlickBubbles: ((View, List<FlickBubbleLabel>, FlickDirection) -> Unit)? = null,
     ) {
         this.onDeleteDrag = onDeleteDrag
+        this.onFlickBubbles = onFlickBubbles
         this.spec = spec
         this.onAction = onAction
         this.onModeSwitch = onModeSwitch
@@ -235,12 +261,27 @@ class KeyView(context: Context) : View(context) {
     }
 
     /**
-     * 設定画面で選んだ振動・キー音・削除の左ドラッグの有無を反映する。
+     * 設定画面で選んだ振動・キー音・削除の左ドラッグの有無、入力の操作、きせかえの見た目と配色[colors]を反映する。
      */
-    fun applyPreferences(preferences: KeyboardPreferences) {
+    fun applyPreferences(preferences: KeyboardPreferences, colors: KeyboardColors) {
         vibrationEnabled = preferences.vibration
         keySoundEnabled = preferences.keySound
         deleteDragEnabled = preferences.deleteDrag
+        val input = preferences.input
+        thresholdPx = input.flickThresholdDp * density
+        flickJudge = input.flickJudge
+        longPressTimeoutMillis = input.longPressMillis.takeIf { it > 0 }?.toLong()
+            ?: ViewConfiguration.getLongPressTimeout().toLong()
+        this.colors = colors
+        appearance = preferences.appearance
+        cornerRadius = appearance.keyShape.cornerDp * density
+        baseTypeface = keyTypeface(appearance.keyFont)
+        boldTypeface = Typeface.create(baseTypeface, Typeface.BOLD)
+        textScale = appearance.keyTextScale / 100f
+        keyAlpha = if (appearance.hasBackgroundImage) appearance.keyOpacity / 100f else 1f
+        borderPaint.color = colors.divider
+        borderPaint.strokeWidth = maxOf(1f, density)
+        invalidate()
     }
 
     /** 振動の設定がONのときだけ触覚フィードバックを返す。 */
@@ -291,7 +332,7 @@ class KeyView(context: Context) : View(context) {
         removeCallbacks(longPressRunnable)
         spaceCursorDrag.reset()
         cursorDragActionSent = false
-        if (gesture.isPressed) onPreview?.invoke(this, null)
+        if (gesture.isPressed) hidePreviews()
         if (deleteDrag.state != DeleteDragState.NONE) onDeleteDrag?.invoke(this, DeleteDragState.NONE)
         deleteDrag.reset()
         if (gesture.isPressed || activePointerId != MotionEvent.INVALID_POINTER_ID) {
@@ -308,21 +349,29 @@ class KeyView(context: Context) : View(context) {
     }
 
     /**
-     * 押下中に離すと入力される文字を返す。フリック中はその向きの文字、長押し成立後は長押し文字とする。
-     * 文字を入力しないキー（切替・削除など）ではnullを返し、拡大表示を出さない。
+     * 押下中なら拡大表示を今の文字へ更新する。かなキーはフリックの表示の方式に従って中央の拡大表示と吹き出しを決め、
+     * 文字キーは長押し成立後なら長押し文字、それ以外はShiftを反映した文字を出す。文字を入力しないキーでは何も出さない。
      */
-    private fun previewText(): String? = when (val currentSpec = spec) {
-        is KeySpec.Kana -> KeyboardLayoutData.getKanaChar(currentSpec.type, currentDirection)
-            .ifEmpty { KeyboardLayoutData.getKanaChar(currentSpec.type, FlickDirection.CENTER) }
-        is KeySpec.SimpleText -> currentSpec.longPressText?.takeIf { gesture.isLongPressActive } ?: shiftedText(currentSpec)
-        else -> null
+    private fun updatePreview() {
+        if (!gesture.isPressed) return
+        when (val currentSpec = spec) {
+            is KeySpec.Kana -> {
+                val preview = flickPreview(currentSpec.type, currentDirection, appearance.flickMode)
+                onPreview?.invoke(this, preview.centerText)
+                onFlickBubbles?.invoke(this, preview.bubbles, currentDirection)
+            }
+            is KeySpec.SimpleText -> onPreview?.invoke(
+                this,
+                currentSpec.longPressText?.takeIf { gesture.isLongPressActive } ?: shiftedText(currentSpec),
+            )
+            else -> Unit
+        }
     }
 
-    /** 押下中なら拡大表示を今の文字へ更新する。 */
-    private fun updatePreview() {
-        val callback = onPreview ?: return
-        val text = previewText() ?: return
-        if (gesture.isPressed) callback(this, text)
+    /** 拡大表示とフリックの吹き出しを消す。 */
+    private fun hidePreviews() {
+        onPreview?.invoke(this, null)
+        if (spec is KeySpec.Kana) onFlickBubbles?.invoke(this, emptyList(), FlickDirection.CENTER)
     }
 
     /**
@@ -408,8 +457,8 @@ class KeyView(context: Context) : View(context) {
                     repeatCount = 0
                     repeatHandler.postDelayed(repeatRunnable, KeyRepeatPolicy.INITIAL_DELAY_MS)
                 } else if (hasLongPress()) {
-                    // 利用者が変更できる端末の長押し時間に従う
-                    postDelayed(longPressRunnable, ViewConfiguration.getLongPressTimeout().toLong())
+                    // 設定の長押しの時間（既定は利用者が変更できる端末の長押し時間）に従う
+                    postDelayed(longPressRunnable, longPressTimeoutMillis)
                 }
 
                 invalidate()
@@ -440,7 +489,7 @@ class KeyView(context: Context) : View(context) {
                 }
 
                 if (spec is KeySpec.Kana) {
-                    val newDirection = determineFlickDirection(curX - gesture.startX, curY - gesture.startY, thresholdPx)
+                    val newDirection = determineFlickDirection(curX - gesture.startX, curY - gesture.startY, thresholdPx, flickJudge)
                     if (newDirection != currentDirection) {
                         currentDirection = newDirection
                         updatePreview()
@@ -453,8 +502,8 @@ class KeyView(context: Context) : View(context) {
                     if (changed) onDeleteDrag?.invoke(this, deleteDrag.state)
                 } else if (repeatableAction() != null || longPressAction() != null) {
                     // 指がキー領域から大きく外れた場合はリピート停止
-                    if (curX < -thresholdPx || curX > width + thresholdPx ||
-                        curY < -thresholdPx || curY > height + thresholdPx
+                    if (curX < -repeatCancelMarginPx || curX > width + repeatCancelMarginPx ||
+                        curY < -repeatCancelMarginPx || curY > height + repeatCancelMarginPx
                     ) {
                         repeatHandler.removeCallbacksAndMessages(null)
                     }
@@ -524,7 +573,7 @@ class KeyView(context: Context) : View(context) {
         pressOrder?.release(this)
         repeatHandler.removeCallbacksAndMessages(null)
         removeCallbacks(longPressRunnable)
-        onPreview?.invoke(this, null)
+        hidePreviews()
         val finalSpecBeforeRelease = spec
         val cursorDragDelta = if (
             finalSpecBeforeRelease is KeySpec.Action &&
@@ -562,7 +611,7 @@ class KeyView(context: Context) : View(context) {
         when (finalSpec) {
             is KeySpec.Kana -> {
                 // MOVEが届かない速いフリックでもUP座標から正確にフリック方向を再計算する
-                val finalDirection = determineFlickDirection(upX - startX, upY - startY, thresholdPx)
+                val finalDirection = determineFlickDirection(upX - startX, upY - startY, thresholdPx, flickJudge)
                 val char = KeyboardLayoutData.getKanaChar(finalSpec.type, finalDirection)
                 if (char.isNotEmpty()) {
                     onAction?.invoke(if (finalDirection == FlickDirection.CENTER) {
@@ -838,18 +887,22 @@ class KeyView(context: Context) : View(context) {
             else -> false
         }
 
-        // 背景色の決定
+        // 背景色の決定。強調色のキー以外は、背景画像があるとき設定の不透明度で描く。
+        val isActiveShift = currentSpec is KeySpec.Shift && (isShifted || isCapsLock)
         val bgColor = when {
             isAccent -> if (isKeyPressed) colors.accentPressed else colors.accent
-            currentSpec is KeySpec.Shift && (isShifted || isCapsLock) -> {
-                if (isKeyPressed) colors.functionPressed else colors.keyActive
-            }
+            isActiveShift -> if (isKeyPressed) colors.functionPressed else colors.keyActive
             isFunctionKey -> if (isKeyPressed) colors.functionPressed else colors.functionBackground
             else -> if (isKeyPressed) colors.keyPressed else colors.keyBackground
         }
 
-        backgroundPaint.color = bgColor
-        canvas.drawRoundRect(rectF, cornerRadius, cornerRadius, backgroundPaint)
+        // 枠なしの形では、押していない普通のキーの地を塗らず、文字だけを見せる。
+        val paintsBackground = isAccent || isKeyPressed || isActiveShift || appearance.keyShape != KeyShape.FLAT
+        if (paintsBackground) {
+            backgroundPaint.color = if (isAccent) bgColor else ThemeColorMath.withAlpha(bgColor, keyAlpha)
+            canvas.drawRoundRect(rectF, cornerRadius, cornerRadius, backgroundPaint)
+        }
+        if (appearance.keyBorder) canvas.drawRoundRect(rectF, cornerRadius, cornerRadius, borderPaint)
 
         // テキスト色とサイズの決定
         val textColor = when {
@@ -869,24 +922,24 @@ class KeyView(context: Context) : View(context) {
                 val alt = currentSpec.longPressText
                 if (isLongPressed && alt != null) {
                     // 長押し成立中は、離したときに入力される文字を強調して示す
-                    drawCenteredText(canvas, alt, centerX, centerY, colors.accent, 24f, Typeface.DEFAULT_BOLD)
+                    drawCenteredText(canvas, alt, centerX, centerY, colors.accent, 24f, boldTypeface)
                 } else {
-                    drawCenteredText(canvas, shiftedText(currentSpec), centerX, centerY, textColor, 20f, Typeface.DEFAULT)
+                    drawCenteredText(canvas, shiftedText(currentSpec), centerX, centerY, textColor, 20f, baseTypeface)
                     alt?.let { drawCornerHint(canvas, it, rectF) }
                 }
             }
 
             is KeySpec.Action -> {
                 val label = customActionLabel ?: currentSpec.label
-                drawCenteredText(canvas, label, centerX, centerY, textColor, 15f, Typeface.DEFAULT)
+                drawCenteredText(canvas, label, centerX, centerY, textColor, 15f, baseTypeface)
             }
 
             is KeySpec.ModeSwitch -> {
                 val longLabel = currentSpec.longPressLabel
                 if (isLongPressed && longLabel != null) {
-                    drawCenteredText(canvas, longLabel, centerX, centerY, colors.accent, 14f, Typeface.DEFAULT_BOLD)
+                    drawCenteredText(canvas, longLabel, centerX, centerY, colors.accent, 14f, boldTypeface)
                 } else {
-                    drawCenteredText(canvas, currentSpec.label, centerX, centerY, textColor, 14f, Typeface.DEFAULT)
+                    drawCenteredText(canvas, currentSpec.label, centerX, centerY, textColor, 14f, baseTypeface)
                     longLabel?.let { drawCornerHint(canvas, it, rectF) }
                 }
             }
@@ -897,16 +950,16 @@ class KeyView(context: Context) : View(context) {
                     isShifted -> "▲"
                     else -> "⇧"
                 }
-                drawCenteredText(canvas, label, centerX, centerY, textColor, 16f, Typeface.DEFAULT)
+                drawCenteredText(canvas, label, centerX, centerY, textColor, 16f, baseTypeface)
             }
 
             is KeySpec.PageSwitch -> {
-                drawCenteredText(canvas, currentSpec.label, centerX, centerY, textColor, 14f, Typeface.DEFAULT)
+                drawCenteredText(canvas, currentSpec.label, centerX, centerY, textColor, 14f, baseTypeface)
             }
         }
     }
 
-    /** キー中央へ一つのラベルを描画する。サイズはdp単位で受け取る。 */
+    /** キー中央へ一つのラベルを描画する。サイズはdp単位で受け取り、設定の文字の大きさを掛ける。 */
     private fun drawCenteredText(
         canvas: Canvas,
         text: String,
@@ -917,7 +970,7 @@ class KeyView(context: Context) : View(context) {
         face: Typeface,
     ) {
         mainTextPaint.color = color
-        mainTextPaint.textSize = sizeDp * density
+        mainTextPaint.textSize = sizeDp * textScale * density
         mainTextPaint.typeface = face
         val textY = centerY - (mainTextPaint.descent() + mainTextPaint.ascent()) / 2f
         canvas.drawText(text, centerX, textY, mainTextPaint)
@@ -926,12 +979,15 @@ class KeyView(context: Context) : View(context) {
     /** 長押しで入力できる文字をキー右上へ小さく描画し、長押しの存在を見て分かるようにする。 */
     private fun drawCornerHint(canvas: Canvas, text: String, rect: RectF) {
         guideTextPaint.textSize = 10f * density
+        guideTextPaint.typeface = baseTypeface
         guideTextPaint.color = colors.textSecondary
         canvas.drawText(text, rect.right - 8f * density, rect.top + 12f * density, guideTextPaint)
     }
 
     /**
-     * 12キーかなキーのメイン文字およびフリックガイドを描画する。
+     * 12キーかなキーのメイン文字およびフリックガイドを描画する。「キーの中の文字」の方式では押している方向の文字を
+     * キーの中に大きく出し、四方向の案内を押している間だけ出す（これまでの見た目）。ほかの方式ではキーの文字を変えない。
+     * 「方向の文字を常に表示」がONなら、押していない間も四方向の案内を小さく出す。
      */
     private fun drawKanaKey(
         canvas: Canvas,
@@ -941,43 +997,49 @@ class KeyView(context: Context) : View(context) {
         rect: RectF,
     ) {
         val map = KeyboardLayoutData.getKanaDirections(type)
-        val selectedChar = map[currentDirection] ?: map[FlickDirection.CENTER] ?: ""
+        val inKey = appearance.flickMode == FlickDisplayMode.IN_KEY
+        val flickingInKey = inKey && currentDirection != FlickDirection.CENTER
+        val selectedChar = (if (inKey) map[currentDirection] else null) ?: map[FlickDirection.CENTER] ?: ""
 
-        // メイン文字の描画（フリック中は選択中文字を表示）
-        mainTextPaint.color = if (currentDirection != FlickDirection.CENTER) colors.accent else colors.text
-        mainTextPaint.textSize = if (currentDirection != FlickDirection.CENTER) 26f * density else KANA_LABEL_DP * density
-        mainTextPaint.typeface = if (currentDirection != FlickDirection.CENTER) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        // メイン文字の描画（キーの中の文字の方式でフリック中は選択中文字を表示）
+        mainTextPaint.color = if (flickingInKey) colors.accent else colors.text
+        mainTextPaint.textSize = (if (flickingInKey) 26f else KANA_LABEL_DP) * textScale * density
+        mainTextPaint.typeface = if (flickingInKey) boldTypeface else baseTypeface
         val textY = centerY - (mainTextPaint.descent() + mainTextPaint.ascent()) / 2f
         canvas.drawText(selectedChar, centerX, textY, mainTextPaint)
 
-        // フリックの案内文字は押している間だけ出し、普段はキーの文字だけを見せる（Simejiと同じ見た目）
-        if (!gesture.isPressed) return
+        // 案内文字は、キーの中の方式で押している間か、常に表示する設定のときだけ出す（普段はSimejiと同じ見た目）
+        val pressedInKey = inKey && gesture.isPressed
+        if (!pressedInKey && !appearance.flickGuide) return
+        // 方向を強調するのはキーの中の方式で押している間だけ。ほかの方式では吹き出しが方向を示す。
+        val highlighted = if (pressedInKey) currentDirection else null
         guideTextPaint.textSize = 11f * density
+        guideTextPaint.typeface = baseTypeface
 
         val leftChar = map[FlickDirection.LEFT]
         if (!leftChar.isNullOrEmpty()) {
-            guideTextPaint.color = if (currentDirection == FlickDirection.LEFT) colors.accent else colors.textSecondary
+            guideTextPaint.color = if (highlighted == FlickDirection.LEFT) colors.accent else colors.textSecondary
             val gy = centerY - (guideTextPaint.descent() + guideTextPaint.ascent()) / 2f
             canvas.drawText(leftChar, rect.left + 10f * density, gy, guideTextPaint)
         }
 
         val upChar = map[FlickDirection.UP]
         if (!upChar.isNullOrEmpty()) {
-            guideTextPaint.color = if (currentDirection == FlickDirection.UP) colors.accent else colors.textSecondary
+            guideTextPaint.color = if (highlighted == FlickDirection.UP) colors.accent else colors.textSecondary
             val gy = rect.top + 13f * density
             canvas.drawText(upChar, centerX, gy, guideTextPaint)
         }
 
         val rightChar = map[FlickDirection.RIGHT]
         if (!rightChar.isNullOrEmpty()) {
-            guideTextPaint.color = if (currentDirection == FlickDirection.RIGHT) colors.accent else colors.textSecondary
+            guideTextPaint.color = if (highlighted == FlickDirection.RIGHT) colors.accent else colors.textSecondary
             val gy = centerY - (guideTextPaint.descent() + guideTextPaint.ascent()) / 2f
             canvas.drawText(rightChar, rect.right - 10f * density, gy, guideTextPaint)
         }
 
         val downChar = map[FlickDirection.DOWN]
         if (!downChar.isNullOrEmpty()) {
-            guideTextPaint.color = if (currentDirection == FlickDirection.DOWN) colors.accent else colors.textSecondary
+            guideTextPaint.color = if (highlighted == FlickDirection.DOWN) colors.accent else colors.textSecondary
             val gy = rect.bottom - 5f * density
             canvas.drawText(downChar, centerX, gy, guideTextPaint)
         }
@@ -1027,8 +1089,17 @@ class KeyView(context: Context) : View(context) {
     }
 
     companion object {
+        /** きせかえの書体を端末の書体へ直す。明朝は端末のserif（日本語ではNoto Serif CJKなど）を使い、同梱しない。 */
+        fun keyTypeface(font: KeyFont): Typeface = when (font) {
+            KeyFont.GOTHIC -> Typeface.DEFAULT
+            KeyFont.MINCHO -> Typeface.SERIF
+        }
+
         /** かなキーの文字の大きさ（dp）。Simejiの実測（約23〜24dp）に合わせる。 */
         private const val KANA_LABEL_DP = 23f
+
+        /** 連続実行中に、指がキーの外へこの距離（dp）以上出たら止める。これまでのフリック閾値と同じ20dp。 */
+        private const val REPEAT_CANCEL_MARGIN_DP = 20f
 
         // TalkBack用カスタムAccessibilityAction ID（0x01000000番台）
         const val ACTION_INPUT_CENTER = 0x01000001

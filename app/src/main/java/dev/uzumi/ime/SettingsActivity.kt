@@ -49,6 +49,9 @@ import kotlin.math.roundToInt
 class SettingsActivity : Activity() {
     private var pendingDictionaryExport = false
 
+    // 押したキーの拡大表示の行。きせかえの画面でも同じ設定を切り替えるため、戻ったときに表示を合わせる。
+    private var keyPreviewRow: View? = null
+
     private val density: Float
         get() = resources.displayMetrics.density
 
@@ -73,10 +76,14 @@ class SettingsActivity : Activity() {
             UzumiSettings.keyboardPreferences(this).deleteDrag) { UzumiSettings.setDeleteDrag(this, it) })
 
         content.addView(section(R.string.settings_section_display))
+        content.addView(linkRow(R.string.settings_kisekae) {
+            startActivity(Intent(this, KisekaeActivity::class.java))
+        })
         content.addView(label(R.string.settings_height, R.string.settings_height_description))
         content.addView(heightControl())
         content.addView(switchRow(R.string.settings_key_preview, R.string.settings_key_preview_description,
-            UzumiSettings.keyboardPreferences(this).keyPreview) { UzumiSettings.setKeyPreview(this, it) })
+            UzumiSettings.keyboardPreferences(this).keyPreview) { UzumiSettings.setKeyPreview(this, it) }
+            .also { keyPreviewRow = it })
 
         content.addView(section(R.string.settings_section_toolbar))
         content.addView(label(R.string.settings_toolbar_tiles, R.string.settings_toolbar_tiles_description))
@@ -126,6 +133,12 @@ class SettingsActivity : Activity() {
         val scrollView = ScrollView(this).apply { addView(content) }
         applySystemInsets(scrollView)
         setContentView(scrollView)
+    }
+
+    /** きせかえの画面で変えた拡大表示の設定を、戻ったときにスイッチへ反映する。 */
+    override fun onResume() {
+        super.onResume()
+        keyPreviewRow?.findSwitch()?.isChecked = UzumiSettings.keyboardPreferences(this).keyPreview
     }
 
     /** ファイル選択中に画面が再生成されても、辞書を含める指定を保つ。 */

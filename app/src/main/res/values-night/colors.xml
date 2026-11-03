@@ -19,4 +19,6 @@
     <!-- 候補バーの背景と、候補一覧の区切り線 -->
     <color name="kb_bar">#FF1E2126</color>
     <color name="kb_divider">#FF3A3F47</color>
+    <!-- フリックの吹き出しの地色 -->
+    <color name="kb_flick">#FF6B7078</color>
 </resources>

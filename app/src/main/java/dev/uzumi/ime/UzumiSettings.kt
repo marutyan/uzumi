@@ -3,6 +3,9 @@ package dev.uzumi.ime
 import android.content.Context
 import android.content.SharedPreferences
 import dev.uzumi.ime.clipboard.ClipboardHistoryStores
+import dev.uzumi.ime.keyboard.InputTuning
+import dev.uzumi.ime.keyboard.KeyboardAppearance
+import dev.uzumi.ime.keyboard.KeyboardBackgroundImage
 import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.keyboard.ToolbarAction
 import dev.uzumi.ime.keyboard.ToolbarPreferences
@@ -52,6 +55,11 @@ object UzumiSettings {
     private const val KEY_CLIPBOARD_HISTORY_ENABLED = "clipboard_history_enabled"
     // 履歴を最後にONへ戻した時刻（ミリ秒）。これより前のコピーは保存しない。
     private const val KEY_CLIPBOARD_HISTORY_ENABLED_SINCE = "clipboard_history_enabled_since"
+    // きせかえと入力の操作の各項目を保存するキーの接頭辞。項目名はKeyboardAppearanceとInputTuningの保存名を使う。
+    private const val KEY_APPEARANCE_PREFIX = "kisekae_"
+    private const val KEY_INPUT_TUNING_PREFIX = "input_tuning_"
+    // 背景画像を保存した時刻。画像の本体はアプリの非公開領域（no_backup）に置き、ここには差し替えの判定用の時刻だけを持つ。
+    private const val KEY_BACKGROUND_STAMP = "background_image_stamp"
 
     /** バックアップの各設定を読み、型検証・正規化・反映する定義。新しい設定はこの一覧へ追加する。 */
     private data class BackupSettingDescriptor(
@@ -157,6 +165,20 @@ object UzumiSettings {
             normalize = { value -> value as? BackupJsonValue.BooleanValue },
             apply = { context, value -> setClipboardHistoryEnabled(context, value.booleanValue()!!) },
         ),
+        // きせかえ（色・形・フリックの表示）。背景画像の本体は個人の写真のため含めず、明るさとぼかしの値だけを含める。
+        BackupSettingDescriptor(
+            key = "appearance",
+            capture = { context -> stringObject(keyboardAppearance(context).toStorage()) },
+            normalize = { value -> stringMapOrNull(value)?.let { stringObject(KeyboardAppearance.fromStorage(it).toStorage()) } },
+            apply = { context, value -> setKeyboardAppearance(context, KeyboardAppearance.fromStorage(stringMapOrNull(value)!!)) },
+        ),
+        // 入力の操作（フリックの判定幅と判定のしかた、長押しの時間、トグルの区切り）。
+        BackupSettingDescriptor(
+            key = "inputTuning",
+            capture = { context -> stringObject(inputTuning(context).toStorage()) },
+            normalize = { value -> stringMapOrNull(value)?.let { stringObject(InputTuning.fromStorage(it).toStorage()) } },
+            apply = { context, value -> setInputTuning(context, InputTuning.fromStorage(stringMapOrNull(value)!!)) },
+        ),
     )
 
     /** キーボードの見た目と反応の設定を読む。未設定の項目は既定値にする。 */
@@ -169,7 +191,51 @@ object UzumiSettings {
             vibration = prefs.getBoolean(KEY_VIBRATION, defaults.vibration),
             keySound = prefs.getBoolean(KEY_SOUND, defaults.keySound),
             deleteDrag = prefs.getBoolean(KEY_DELETE_DRAG, defaults.deleteDrag),
+            appearance = keyboardAppearance(context),
+            input = inputTuning(context),
         )
+    }
+
+    /** きせかえの設定を読む。背景画像は、保存時刻があり画像のファイルも残っている場合だけ使う。 */
+    fun keyboardAppearance(context: Context): KeyboardAppearance {
+        val prefs = preferences(context)
+        val stamp = prefs.getLong(KEY_BACKGROUND_STAMP, 0L)
+            .takeIf { it != 0L && KeyboardBackgroundImage.file(context).isFile } ?: 0L
+        return KeyboardAppearance.fromStorage(readPrefixed(prefs, KEY_APPEARANCE_PREFIX, KeyboardAppearance.STORAGE_KEYS), stamp)
+    }
+
+    /** きせかえの設定を保存する。無くなった項目（テーマの色へ戻した文字の色など）は消す。 */
+    fun setKeyboardAppearance(context: Context, appearance: KeyboardAppearance) {
+        writePrefixed(preferences(context), KEY_APPEARANCE_PREFIX, KeyboardAppearance.STORAGE_KEYS, appearance.toStorage())
+    }
+
+    /** 背景画像を保存した時刻を記録する。0なら画像を外したことを示す。 */
+    fun setBackgroundStamp(context: Context, stamp: Long) {
+        preferences(context).edit().putLong(KEY_BACKGROUND_STAMP, stamp).apply()
+    }
+
+    /** 入力の操作の設定を読む。 */
+    fun inputTuning(context: Context): InputTuning =
+        InputTuning.fromStorage(readPrefixed(preferences(context), KEY_INPUT_TUNING_PREFIX, InputTuning.STORAGE_KEYS))
+
+    /** 入力の操作の設定を保存する。 */
+    fun setInputTuning(context: Context, tuning: InputTuning) {
+        writePrefixed(preferences(context), KEY_INPUT_TUNING_PREFIX, InputTuning.STORAGE_KEYS, tuning.toStorage())
+    }
+
+    /** 接頭辞付きで保存した文字列の項目を、保存名だけの組として読む。 */
+    private fun readPrefixed(prefs: SharedPreferences, prefix: String, keys: List<String>): Map<String, String> = buildMap {
+        keys.forEach { key -> prefs.getString(prefix + key, null)?.let { put(key, it) } }
+    }
+
+    /** 保存名の組を接頭辞付きで保存し、組に無い既知の項目は消す。 */
+    private fun writePrefixed(prefs: SharedPreferences, prefix: String, keys: List<String>, values: Map<String, String>) {
+        val editor = prefs.edit()
+        keys.forEach { key ->
+            val value = values[key]
+            if (value == null) editor.remove(prefix + key) else editor.putString(prefix + key, value)
+        }
+        editor.apply()
     }
 
     /** 機能バーの選択順と、機能バー・候補バーの段数を読む。 */
@@ -306,6 +372,16 @@ object UzumiSettings {
         val normalized = normalizeBackupSettings(values)
         val operations = BACKUP_SETTINGS.filter { it.key in normalized }
         operations.forEach { it.apply(context.applicationContext, normalized.getValue(it.key)) }
+    }
+
+    /** 文字列の組をバックアップのJSON objectにする。 */
+    private fun stringObject(values: Map<String, String>): BackupJsonValue =
+        BackupJsonValue.ObjectValue(values.mapValues { BackupJsonValue.StringValue(it.value) })
+
+    /** JSON objectの値がすべて文字列なら、文字列の組として返す。型が違えばnull（読み込み全体を拒否する）。 */
+    private fun stringMapOrNull(value: BackupJsonValue): Map<String, String>? {
+        val values = (value as? BackupJsonValue.ObjectValue)?.values ?: return null
+        return values.mapValues { (it.value as? BackupJsonValue.StringValue)?.value ?: return null }
     }
 
     /** JSON設定値から32bit整数を読む。小数や範囲外の数値は設定値として認めない。 */

@@ -66,6 +66,8 @@ class EditorSession(
     romajiInputEnabled: Boolean = false,
     // 予測要求・結果と候補確定を、変換とは別のMozc sessionへ送る。
     private val predictionClient: PredictionClient? = null,
+    // 12キーの同じキーの連続タップを同じ文字の切り替えとして扱う猶予（ミリ秒）。設定の「トグルの区切り」の値。
+    kanaToggleWindowMillis: Long = KanaKeyToggle.WINDOW_MILLIS,
 ) {
     private val buffer = CompositionBuffer()
     // compositionの内容が変わるたびに増える番号。変換応答が現在の読みに対するものかを照合する。
@@ -104,7 +106,7 @@ class EditorSession(
     private val pendingCommittedSelections = mutableListOf<SelectionTransition>()
 
     // 12キーの同じキーの連続タップと、英字配列の入力途中のローマ字。どちらもこの編集セッションの間だけ持つ。
-    private val kanaToggle = KanaKeyToggle()
+    private val kanaToggle = KanaKeyToggle(kanaToggleWindowMillis)
     private val romajiComposer = if (romajiInputEnabled) RomajiKanaComposer() else null
 
     // ライブ変換で最後にEditorへ送ったカーソル位置（composition先頭からのUTF-16 offset）。

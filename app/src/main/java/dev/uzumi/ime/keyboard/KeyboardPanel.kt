@@ -83,11 +83,18 @@ class KeyboardPanel(
     private var emojiPickerBottomRow: LinearLayout? = null
     private var emojiPickerVisible = false
 
+    // きせかえの設定から一度だけ作る配色と書体。全キー、拡大表示、吹き出しで共有する。
+    private val colors = KeyboardColors.from(context, preferences.appearance)
+    private val keyTypeface = KeyView.keyTypeface(preferences.appearance.keyFont)
+
     // 押したキーの拡大表示。password欄では入力した文字を画面に大きく出さないため使わない。
-    private val keyPreview = KeyPreviewPopup(this, KeyboardColors.from(context))
+    private val keyPreview = KeyPreviewPopup(this, colors, keyTypeface)
+
+    // かなキーのフリックの吹き出し。拡大表示と同じく、password欄では出さない。
+    private val flickBubbles = FlickBubblePopup(this, colors, preferences.appearance, keyTypeface)
 
     // 削除キーの左ドラッグ中に、離すと消える範囲を示す案内。
-    private val deleteDragHint = DeleteDragHint(this, KeyboardColors.from(context))
+    private val deleteDragHint = DeleteDragHint(this, colors)
 
     private lateinit var kanaContainer: LinearLayout
     private lateinit var qwertyContainer: LinearLayout
@@ -96,7 +103,8 @@ class KeyboardPanel(
 
     init {
         orientation = VERTICAL
-        setBackgroundColor(KeyboardColors.from(context).keyboardBackground)
+        // 背景画像があるときは、入力View全体に敷いた画像が見えるよう地色を塗らない。
+        if (!preferences.appearance.hasBackgroundImage) setBackgroundColor(colors.keyboardBackground)
         val pad = (KeyboardDimens.PANEL_PADDING_DP * density).toInt()
         setPadding(pad, pad, pad, pad)
 
@@ -199,6 +207,7 @@ class KeyboardPanel(
     fun cancelPendingInput() {
         allKeyViews.forEach { it.cancelPendingInput() }
         keyPreview.hide()
+        flickBubbles.hide()
         deleteDragHint.hide()
     }
 
@@ -694,6 +703,9 @@ class KeyboardPanel(
                 onPreview = { key, text ->
                     if (text == null || isPasswordField || !preferences.keyPreview) keyPreview.hide() else keyPreview.show(key, text)
                 },
+                onFlickBubbles = { key, bubbles, selected ->
+                    if (isPasswordField) flickBubbles.hide() else flickBubbles.show(key, bubbles, selected)
+                },
                 onDeleteDrag = { key, state ->
                     // 文字数は閾値を超えたときだけ問い合わせ、ドラッグ中の毎回の問い合わせを避ける
                     val length = if (state == DeleteDragState.ARMED) lineDeleteLength() else null
@@ -701,7 +713,7 @@ class KeyboardPanel(
                 },
             )
         }
-        keyView.applyPreferences(preferences)
+        keyView.applyPreferences(preferences, colors)
         keyView.setPressOrder(pressOrder)
         allKeyViews.add(keyView)
         return keyView

@@ -145,6 +145,112 @@
     <string name="clipboard_history_delete">履歴から削除</string>
     <string name="clipboard_history_paste_item">履歴の文字を貼り付け</string>
     <string name="clipboard_history_close">履歴を閉じる</string>
+    <string name="settings_kisekae">きせかえ</string>
+    <string name="kisekae_title">きせかえ</string>
+    <string name="kisekae_preview_title">プレビュー（押してフリックを試せます）</string>
+    <string name="kisekae_preview_echo_empty">ここに入力した文字が出ます</string>
+    <string name="kisekae_preview_description">キーボードのプレビュー。変更はすぐに反映されます。</string>
+    <string name="kisekae_section_background">背景画像</string>
+    <string name="kisekae_background_pick">写真を選ぶ</string>
+    <string name="kisekae_background_remove">画像を外す</string>
+    <string name="kisekae_background_none">画像なし</string>
+    <string name="kisekae_background_set">画像あり</string>
+    <string name="kisekae_background_note">端末の写真から選び、キーボードの大きさに合わせて切り抜きます。画像はこの端末のアプリ内だけに縮小して保存し、外へ送りません。設定の書き出しにも含めません。</string>
+    <string name="kisekae_background_failed">画像を読み込めませんでした。</string>
+    <string name="kisekae_background_brightness">明るさ</string>
+    <string name="kisekae_background_blur">ぼかし</string>
+    <string name="kisekae_section_theme">テーマと色</string>
+    <string name="kisekae_theme_standard">標準</string>
+    <string name="kisekae_theme_washi">和紙</string>
+    <string name="kisekae_theme_ai">藍</string>
+    <string name="kisekae_theme_wakatake">若竹</string>
+    <string name="kisekae_theme_sakura">桜</string>
+    <string name="kisekae_theme_sumi">墨</string>
+    <string name="kisekae_theme_custom">カスタム</string>
+    <string name="kisekae_selected">選択中</string>
+    <string name="kisekae_mode">明るさ</string>
+    <string name="kisekae_mode_system">端末に合わせる</string>
+    <string name="kisekae_mode_light">ライト</string>
+    <string name="kisekae_mode_dark">ダーク</string>
+    <string name="kisekae_color_pick">色を選ぶ（地色・キー・機能キー・強調色を変えるとカスタムになります）</string>
+    <string name="kisekae_role_background">地色</string>
+    <string name="kisekae_role_key">キー</string>
+    <string name="kisekae_role_function">機能キー</string>
+    <string name="kisekae_role_accent">強調色</string>
+    <string name="kisekae_role_text">文字</string>
+    <string name="kisekae_role_flick">フリック</string>
+    <string name="kisekae_color_map_description">色相（左右）と鮮やかさ（上下）を選ぶ面。数値でも指定できます。</string>
+    <string name="kisekae_color_lightness">明るさ</string>
+    <string name="kisekae_color_hex_description">色を#RRGGBBの形で入力</string>
+    <string name="kisekae_color_hex_apply">適用</string>
+    <string name="kisekae_color_hex_invalid">#RRGGBBの形で入力してください。</string>
+    <string name="kisekae_color_reset">標準に戻す</string>
+    <string name="kisekae_section_key">キー</string>
+    <string name="kisekae_key_shape">キーの形</string>
+    <string name="kisekae_shape_rounded">角丸</string>
+    <string name="kisekae_shape_square">四角</string>
+    <string name="kisekae_shape_pill">丸み強め</string>
+    <string name="kisekae_shape_flat">枠なし</string>
+    <string name="kisekae_key_opacity">キーの不透明度</string>
+    <string name="kisekae_key_opacity_note">背景画像があるときに効きます。</string>
+    <string name="kisekae_key_border">境界線を表示</string>
+    <string name="kisekae_key_font">フォント</string>
+    <string name="kisekae_font_gothic">ゴシック（標準）</string>
+    <string name="kisekae_font_mincho">明朝</string>
+    <string name="kisekae_key_text_scale">文字の大きさ</string>
+    <string name="kisekae_key_text_color">文字の色</string>
+    <string name="kisekae_color_theme">テーマの色</string>
+    <string name="kisekae_section_flick">フリックの表示</string>
+    <string name="kisekae_flick_mode">表示のしかた</string>
+    <string name="kisekae_flick_bubble">方向の吹き出し</string>
+    <string name="kisekae_flick_cross">十字のガイド</string>
+    <string name="kisekae_flick_in_key">キーの中の文字</string>
+    <string name="kisekae_flick_none">出さない</string>
+    <string name="kisekae_flick_shape">吹き出しの形</string>
+    <string name="kisekae_bubble_pentagon">五角形</string>
+    <string name="kisekae_bubble_rounded">角丸</string>
+    <string name="kisekae_bubble_circle">丸</string>
+    <string name="kisekae_bubble_drop">しずく</string>
+    <string name="kisekae_bubble_heart">ハート</string>
+    <string name="kisekae_bubble_star">星</string>
+    <string name="kisekae_bubble_cloud">雲</string>
+    <string name="kisekae_flick_color">吹き出しの色</string>
+    <string name="kisekae_flick_size">大きさ</string>
+    <string name="kisekae_flick_opacity">不透明度</string>
+    <string name="kisekae_flick_center">中央の文字も拡大して出す</string>
+    <string name="kisekae_flick_guide">キーに方向の文字を常に小さく表示</string>
+    <string name="kisekae_section_input">入力の操作</string>
+    <string name="kisekae_input_threshold">フリック判定幅</string>
+    <string name="kisekae_input_judge">判定のしかた</string>
+    <string name="kisekae_judge_circle">円</string>
+    <string name="kisekae_judge_axis">縦と横それぞれ</string>
+    <string name="kisekae_input_long_press_system">長押しの時間を端末の設定に合わせる</string>
+    <string name="kisekae_input_long_press">長押しの時間</string>
+    <string name="kisekae_input_toggle">トグルの区切り</string>
+    <string name="kisekae_input_note">判定幅は、指を動かしてから方向の文字に変わるまでの距離です。標準は円で半径20 dp、Simejiは縦と横それぞれ約11 dpです。トグルの区切りは、同じキーを続けて押したときに次の文字へ切り替える猶予です。</string>
+    <string name="kisekae_input_simeji">Simejiに近い（縦横それぞれ12 dp）</string>
+    <string name="kisekae_input_reset">入力の操作を標準に戻す</string>
+    <string name="kisekae_value_percent">%1$s: %2$d%%</string>
+    <string name="kisekae_value_dp">%1$s: %2$d dp</string>
+    <string name="kisekae_value_ms">%1$s: %2$d ms</string>
+    <string name="kisekae_value_plain">%1$s: %2$d</string>
+    <string-array name="kisekae_palette_names">
+        <item>白</item>
+        <item>灰色</item>
+        <item>濃い灰色</item>
+        <item>黒</item>
+        <item>赤</item>
+        <item>橙</item>
+        <item>茶</item>
+        <item>桃</item>
+        <item>黄</item>
+        <item>緑</item>
+        <item>青緑</item>
+        <item>水色</item>
+        <item>青</item>
+        <item>紺</item>
+        <item>紫</item>
+    </string-array>
     <string name="settings_key_preview">押したキーの拡大表示</string>
     <string name="settings_key_preview_description">パスワード欄では表示しません。</string>
     <string name="settings_vibration">振動</string>

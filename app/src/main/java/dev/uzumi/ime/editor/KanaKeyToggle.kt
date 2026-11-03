@@ -5,7 +5,10 @@ package dev.uzumi.ime.editor
  * （あ→い→う→え→お→あ）。時間が空く、別のキーや操作が入る、入力位置が変わると、次のタップは新しい文字になる。
  * 時刻は呼び出し側から受け取り、JVMテストで区切りを確かめられるようにする。
  */
-class KanaKeyToggle {
+class KanaKeyToggle(
+    // 同じキーのタップを続きとして扱う猶予（ミリ秒）。設定の「トグルの区切り」から渡し、既定は[WINDOW_MILLIS]。
+    private val windowMillis: Long = WINDOW_MILLIS,
+) {
     // 直前のタップのキーの文字列（同じキーかどうかの照合に使う）、選んだ位置、時刻、入力後の入力位置。
     private var lastValues: List<String>? = null
     private var lastIndex = 0
@@ -45,7 +48,7 @@ class KanaKeyToggle {
 
     /** 直前のタップから猶予時間内か。時計が戻った場合は続きにしない。 */
     private fun isWithinWindow(nowMillis: Long): Boolean =
-        nowMillis >= lastAtMillis && nowMillis - lastAtMillis <= WINDOW_MILLIS
+        nowMillis >= lastAtMillis && nowMillis - lastAtMillis <= windowMillis
 
     companion object {
         /** 同じキーのタップを同じ文字の切り替えとして扱う猶予（ミリ秒）。Gboardなどと同程度の約1秒にする。 */
