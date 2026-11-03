@@ -28,6 +28,7 @@ import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.keyboard.ToolbarAction
 import dev.uzumi.ime.keyboard.ToolbarPreferences
 import dev.uzumi.ime.learning.LearningStores
+import dev.uzumi.ime.learning.HiddenCandidateStores
 import dev.uzumi.ime.neural.NeuralRuntimeConnection
 import dev.uzumi.ime.neural.NeuralSelection
 import java.util.Locale
@@ -88,6 +89,7 @@ class SettingsActivity : Activity() {
 
         content.addView(section(R.string.settings_section_learning))
         content.addView(learningRow())
+        content.addView(linkRow(R.string.settings_hidden_candidates) { showHiddenCandidates() })
         content.addView(linkRow(R.string.settings_clear_learning) { confirmClearLearning() })
         content.addView(linkRow(R.string.open_user_dictionary) {
             startActivity(Intent(this, UserDictionaryActivity::class.java))
@@ -188,6 +190,57 @@ class SettingsActivity : Activity() {
                 }
             }
             .show()
+    }
+
+    /** 非表示候補を一覧に出し、解除を押した表記だけ設定から取り除く。 */
+    private fun showHiddenCandidates() {
+        background {
+            val surfaces = HiddenCandidateStores.get(this).all().sorted()
+            runOnUiThread {
+                if (surfaces.isEmpty()) {
+                    AlertDialog.Builder(this)
+                        .setTitle(R.string.settings_hidden_candidates)
+                        .setMessage(R.string.settings_hidden_candidates_empty)
+                        .setPositiveButton(android.R.string.ok, null)
+                        .show()
+                    return@runOnUiThread
+                }
+                val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                val unhideButtons = mutableListOf<Pair<Button, String>>()
+                surfaces.forEach { surface ->
+                    rows.addView(LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = android.view.Gravity.CENTER_VERTICAL
+                        addView(TextView(this@SettingsActivity).apply {
+                            text = surface
+                            textSize = 16f
+                            setPadding(px(12), 0, px(8), 0)
+                        }, LinearLayout.LayoutParams(0, px(52), 1f))
+                        addView(Button(this@SettingsActivity).apply {
+                            text = getString(R.string.settings_hidden_candidate_unhide)
+                            unhideButtons += this to surface
+                        })
+                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, px(56)))
+                }
+                val scroll = ScrollView(this).apply { addView(rows); isFillViewport = true }
+                val dialog = AlertDialog.Builder(this)
+                    .setTitle(R.string.settings_hidden_candidates)
+                    .setView(scroll)
+                    .setPositiveButton(android.R.string.ok, null)
+                    .create()
+                unhideButtons.forEach { (button, surface) ->
+                    button.setOnClickListener {
+                        button.isEnabled = false
+                        dialog.dismiss()
+                        background {
+                            HiddenCandidateStores.get(this@SettingsActivity).unhide(surface)
+                            runOnUiThread { if (!isFinishing) showHiddenCandidates() }
+                        }
+                    }
+                }
+                dialog.show()
+            }
+        }
     }
 
     /** ファイルI/Oを伴う処理をUI thread外で一度だけ行う。 */

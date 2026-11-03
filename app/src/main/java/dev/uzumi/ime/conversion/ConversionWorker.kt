@@ -509,7 +509,18 @@ class ConversionWorker(
         )
         // 新しい入力でニューラルの推論を中断した場合（NeuralRequestCancelled）も、結果を返さない。
         val result = runCatching { converter.convert(request) }.getOrNull()
-        if (result != null) onLiveResult(sessionEpoch, result)
+        if (result != null) {
+            val learnedStore = lookupLearningStore().takeIf { request.learningAllowed && !evaluationActive() }
+            val withLearningSource = result.copy(segments = result.segments.map { segment ->
+                val learned = learnedStore?.let { store ->
+                    (store.exactMatches(segment.reading, Int.MAX_VALUE) + store.exactPhraseMatches(segment.reading, Int.MAX_VALUE))
+                        .map { it.surface }
+                        .toSet()
+                }.orEmpty()
+                segment.copy(learnedCandidates = learned)
+            })
+            onLiveResult(sessionEpoch, withLearningSource)
+        }
         collector?.let { onLiveReport(sessionEpoch, it.report(result, pending.requestedAtNanos)) }
     }
 
@@ -533,14 +544,24 @@ class ConversionWorker(
             learnedSurfaces(request.learningAllowed),
             learnedPhrases(request.learningAllowed),
         )
+        val judge = emoticonJudge(request.learningAllowed)
         val candidates = mergeSegmentCandidates(
             request.reading,
             segment.candidates,
             lookupUserDictionary(),
             exactSurfaces,
-            emoticonJudge(request.learningAllowed),
+            judge,
         )
-        onCandidateResult(sessionEpoch, CandidateResult(request, candidates))
+        val automaticCandidates = candidates.filterNot { judge.isEmoticon(request.reading, it) }
+            .ifEmpty { listOf(request.reading) }
+        val learnedCandidates = if (evaluationActive()) emptySet() else {
+            (lookupLearningStore()?.exactMatches(request.reading, Int.MAX_VALUE).orEmpty() +
+                lookupLearningStore()?.exactPhraseMatches(request.reading, Int.MAX_VALUE).orEmpty())
+                .map { it.surface }
+                .filter { it in candidates }
+                .toSet()
+        }
+        onCandidateResult(sessionEpoch, CandidateResult(request, candidates, automaticCandidates, learnedCandidates))
     }
 
     /**

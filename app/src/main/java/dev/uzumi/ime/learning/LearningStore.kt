@@ -159,6 +159,11 @@ class LearningStore(
         byReading.values.flatten().sortedByDescending { it.score }
     }
 
+    /** 読みと表記の組を学習済みか調べ、候補の長押しメニューに削除項目を出すか決める。 */
+    fun contains(reading: String, surface: String): Boolean = synchronized(lock) {
+        byReading[reading]?.any { it.surface == surface } == true
+    }
+
     /** 一語を削除してすぐに保存する。無ければfalseを返す。 */
     fun remove(reading: String, surface: String): Boolean = synchronized(lock) {
         val words = byReading[reading] ?: return@synchronized false

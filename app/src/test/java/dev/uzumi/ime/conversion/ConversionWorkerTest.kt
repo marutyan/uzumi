@@ -900,7 +900,12 @@ class ConversionWorkerTest {
 
         assertEquals(
             listOf(
-                ResultSegment("こうえんにいく", "校園に行く", listOf("校園に行く", "公園に行く", "こうえんにいく")),
+                ResultSegment(
+                    "こうえんにいく",
+                    "校園に行く",
+                    listOf("校園に行く", "公園に行く", "こうえんにいく"),
+                    learnedCandidates = setOf("校園に行く"),
+                ),
                 ResultSegment("よ", "よ", listOf("よ")),
             ),
             fixture.liveResults[0].second.segments,
@@ -1135,6 +1140,7 @@ class ConversionWorkerTest {
         assertEquals("藁", result.display)
         assertFalse(result.segments.single().fromUserDictionary)
         assertEquals(listOf("藁", "わら", "（笑）"), result.headCandidates.map { it.value })
+        assertTrue(result.headCandidates.last().isEmoticon)
     }
 
     /** ライブ変換では、Mozcの第一候補が絵文字でも表示値にせず、候補の取り直しでも先頭に置かない。 */
@@ -1150,7 +1156,7 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
 
         assertEquals(
-            listOf(ResultSegment("わらい", "笑い", listOf("笑い", "わらい", "😂"))),
+            listOf(ResultSegment("わらい", "笑い", listOf("笑い", "わらい", "😂"), automaticCandidates = listOf("笑い", "わらい"))),
             fixture.liveResults.single().second.segments,
         )
         assertEquals(listOf("笑い", "😂"), fixture.candidateResults.single().second.candidates)
@@ -1186,7 +1192,7 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
 
         assertEquals(
-            listOf(ResultSegment("にこ", "にこ", listOf("にこ", "😊", "☺️"))),
+            listOf(ResultSegment("にこ", "にこ", listOf("にこ", "😊", "☺️"), automaticCandidates = listOf("にこ"))),
             fixture.liveResults.single().second.segments,
         )
     }
@@ -1203,7 +1209,7 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
 
         assertEquals(
-            listOf(ResultSegment("わら", "藁", listOf("藁", "わら", "（笑）"))),
+            listOf(ResultSegment("わら", "藁", listOf("藁", "わら", "（笑）"), automaticCandidates = listOf("藁", "わら"))),
             fixture.liveResults.single().second.segments,
         )
     }
