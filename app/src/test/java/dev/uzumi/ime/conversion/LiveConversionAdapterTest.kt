@@ -50,7 +50,10 @@ class LiveConversionAdapterTest {
         assertEquals(listOf("email", "Email", "E-mail"), dictionary.exactMatches("いーめーる").map { it.surface })
     }
 
-    /** 同梱辞書は英単語・固有名詞の日本語読みから英語の綴りを引くもので、意味の訳・略語への置き換え・誤った綴りを含めない。 */
+    /**
+     * 同梱辞書は英単語・固有名詞の日本語読みから英語の綴りを引くもので、意味の訳と誤った綴りを含めない。
+     * 略した呼び名（いんすた、ぱそこん等）から正式な英語表記を引く行は、利用者の決定で残す。
+     */
     @Test
     fun englishDictionaryAssetMapsReadingsToSpellingsOnly() {
         val dictionary = EnglishWordDictionary.load(File("src/main/assets/english-words.tsv").inputStream())
@@ -65,13 +68,14 @@ class LiveConversionAdapterTest {
             "けいたい" to "mobile",
             "こんびに" to "convenience store",
             "ばーじょんあっぷ" to "version up",
-            "ぱそこん" to "PC",
             "ばーじょんかんり" to "version control",
         )
         excluded.forEach { (reading, surface) ->
             assertTrue(dictionary.exactMatches(reading).none { it.surface == surface })
         }
         assertEquals(listOf("MAC"), dictionary.exactMatches("えむえーしー").map { it.surface })
+        listOf("いんすた" to "Instagram", "すたば" to "Starbucks", "ぷれぜん" to "presentation", "すーぱー" to "supermarket", "ぱそこん" to "PC")
+            .forEach { (reading, surface) -> assertTrue(dictionary.exactMatches(reading).any { it.surface == surface }) }
     }
 
     /** TSVの読み込みは空行と重複のある辞書を拒否する。 */
