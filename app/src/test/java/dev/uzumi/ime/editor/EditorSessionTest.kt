@@ -194,6 +194,45 @@ class EditorSessionTest {
         assertFalse(session.hasComposition)
     }
 
+    /**
+     * ライブ変換の読みを削除で空にした後、編集パネルで切り取りと貼り付けをすると、削除の記録は無効になる。
+     * 空のcompositionに残ったライブ変換の取り消し履歴でも「元に戻す」を出さず、戻しても消した読みを
+     * 貼り付けの後ろへ入れない。読みを空にした直後の削除の取り消しは従来どおり使える。
+     */
+    @Test
+    fun editPanelCutAndPasteAfterEmptyingLiveCompositionHidesStaleUndo() {
+        val connection = ModelEditorConnection(text = "abc", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = EditorSession(
+            connection = connection,
+            policy = normalPolicy(),
+            initialSelectionStart = 0,
+            initialSelectionEnd = 0,
+            sessionEpoch = 5,
+            liveCore = LiveConversionCore(),
+            liveClient = client,
+        )
+        typeLive(session, client, "かき")
+        assertTrue(session.deleteBackward())
+        assertTrue(session.deleteBackward())
+        assertEquals("abc", connection.text)
+        assertTrue(session.canUndoDeletion)
+
+        assertTrue(session.performEditPanelContextAction(EditPanelContextAction.SELECT_ALL))
+        assertTrue(session.performEditPanelContextAction(EditPanelContextAction.CUT))
+        assertTrue(session.performEditPanelContextAction(EditPanelContextAction.PASTE))
+
+        assertFalse(session.canUndoDeletion)
+        assertFalse(session.liveCandidateState()!!.canUndo)
+        assertFalse(session.undoLive())
+        assertEquals("", connection.text)
+        assertFalse(session.hasComposition)
+
+        // 次の入力からは、ライブ変換の取り消しを通常どおり使える。
+        typeLive(session, client, "さ")
+        assertTrue(session.liveCandidateState()!!.canUndo)
+    }
+
     /** パスワード欄では編集パネルから標準コピーと切り取りを実行しない。 */
     @Test
     fun editPanelBlocksCopyAndCutInPasswordField() {

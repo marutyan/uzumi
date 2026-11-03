@@ -1674,7 +1674,7 @@ class EditorSession(
         return LiveCandidateState(
             choices = core.candidateBar()?.choices.orEmpty(),
             currentValue = focused?.surface,
-            canUndo = core.canUndo,
+            canUndo = canUndoLive(core),
             canFocusPrevious = segments.take(focusedIndex.coerceAtLeast(0)).any(::isFocusTarget),
             focusAtInput = core.isFocusAtInput,
             focusedReading = focused?.reading,
@@ -1763,8 +1763,18 @@ class EditorSession(
     /** ライブ変換の直前の操作（候補の誤選択など）を取り消す。取り消せる操作が無ければfalse。 */
     fun undoLive(): Boolean {
         abandonPendingInput()
+        val core = liveCore ?: return false
+        if (!canUndoLive(core)) return false
         return performLive { it.undo() } ?: false
     }
+
+    /**
+     * ライブ変換の取り消しを候補バーと機能バーから使えるか。読みを削除で空にした後も、コアの取り消し履歴は
+     * 次の確定まで残る。空のcompositionで戻すと、その後の切り取り・貼り付け・カーソル移動の後でも消した読みを
+     * 今のカーソル位置へ入れてしまうため、表示が空の間は使わせない。空にした直後の削除の取り消しは、
+     * 位置を照合する削除の記録（undoDeletion）が受け持つ。
+     */
+    private fun canUndoLive(core: LiveConversionCore): Boolean = core.canUndo && core.display.isNotEmpty()
 
     /** workerから届いたライブ変換の結果を、コアが現在の状態と照合できた場合だけ表示へ反映する。 */
     fun applyLiveResult(result: LiveResult): Boolean {
