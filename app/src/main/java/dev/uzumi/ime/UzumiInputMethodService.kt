@@ -265,13 +265,7 @@ class UzumiInputMethodService : InputMethodService() {
         val density = resources.displayMetrics.density
         val views = CandidateBarViews(this)
         barViews = views
-        candidateGrid?.hide()
-        candidateActionPanel?.hide()
-        toolbarPanel?.hide()
-        templatePanel?.hide()
-        clipboardHistoryPanel?.hide()
-        clipboardHistorySessionEpoch = null
-        hideEditPanel()
+        hideKeyboardOverlays()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(views.colors.keyboardBackground)
@@ -418,13 +412,7 @@ class UzumiInputMethodService : InputMethodService() {
         // 再開始後に有効な接続（currentInputConnection）で先に確定する。
         closeSession(restartedConnection = if (restarting) currentInputConnection else null)
         clearInlineSuggestions()
-        candidateGrid?.hide()
-        candidateActionPanel?.hide()
-        toolbarPanel?.hide()
-        templatePanel?.hide()
-        clipboardHistoryPanel?.hide()
-        clipboardHistorySessionEpoch = null
-        hideEditPanel()
+        hideKeyboardOverlays()
         currentPolicy = null
         autoCapsMode = 0
         refreshCandidates()
@@ -526,12 +514,7 @@ class UzumiInputMethodService : InputMethodService() {
     override fun onFinishInputView(finishingInput: Boolean) {
         inputViewVisible = false
         keyboardPanel?.cancelPendingInput()
-        candidateGrid?.hide()
-        candidateActionPanel?.hide()
-        toolbarPanel?.hide()
-        templatePanel?.hide()
-        clipboardHistoryPanel?.hide()
-        hideEditPanel()
+        hideKeyboardOverlays()
         stopClipboardObservation()
         clearInlineSuggestions()
         super.onFinishInputView(finishingInput)
@@ -541,12 +524,7 @@ class UzumiInputMethodService : InputMethodService() {
     override fun onFinishInput() {
         inputViewVisible = false
         keyboardPanel?.cancelPendingInput()
-        candidateGrid?.hide()
-        candidateActionPanel?.hide()
-        toolbarPanel?.hide()
-        templatePanel?.hide()
-        clipboardHistoryPanel?.hide()
-        hideEditPanel()
+        hideKeyboardOverlays()
         stopClipboardObservation()
         closeSession()
         clearInlineSuggestions()
@@ -555,9 +533,9 @@ class UzumiInputMethodService : InputMethodService() {
         super.onFinishInput()
     }
 
-    /** IME windowが隠れたとき編集パネルと選択モードを解放する。 */
+    /** IME windowが隠れたとき、キーボード面に重ねた一覧・パネルと編集パネルの選択モードを解放する。 */
     override fun onWindowHidden() {
-        hideEditPanel()
+        hideKeyboardOverlays()
         super.onWindowHidden()
     }
 
@@ -915,8 +893,7 @@ class UzumiInputMethodService : InputMethodService() {
     /** キーボード面へ履歴を重ね、候補一覧や機能一覧とは同時に表示しない。 */
     private fun showClipboardHistory() {
         if (!canShowClipboardHistory()) return
-        candidateGrid?.hide()
-        toolbarPanel?.hide()
+        hideKeyboardOverlays(except = KeyboardOverlay.CLIPBOARD_HISTORY)
         clipboardHistorySessionEpoch = session?.sessionEpoch
         refreshClipboardHistoryPanel()
     }
@@ -1160,13 +1137,10 @@ class UzumiInputMethodService : InputMethodService() {
         }
         trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
             evaluation.record(OperationKind.OTHER)
-            toolbarPanel?.hide()
-            clipboardHistoryPanel?.hide()
-            clipboardHistorySessionEpoch = null
+            hideKeyboardOverlays(except = KeyboardOverlay.CANDIDATE_GRID)
             if (grid?.isShowing == true) {
                 grid.hide()
             } else {
-                templatePanel?.hide()
                 showCandidateGrid(current, entries)
                 // ライブ変換では、一覧を開いた文節の候補を明示変換と同じだけ取り直す。届いたら一覧を描き直す。
                 if (current?.isLiveMode == true && session === current) current.requestLiveCandidates()
@@ -1227,14 +1201,10 @@ class UzumiInputMethodService : InputMethodService() {
         val views = barViews ?: return
         trailing.addView(views.symbolButton("▦", getString(R.string.toolbar_open)) {
             val panel = toolbarPanel ?: return@symbolButton
-            hideEditPanel()
-            candidateGrid?.hide()
-            clipboardHistoryPanel?.hide()
-            clipboardHistorySessionEpoch = null
+            hideKeyboardOverlays(except = KeyboardOverlay.TOOLBAR)
             if (panel.isShowing) {
                 panel.hide()
             } else {
-                templatePanel?.hide()
                 panel.show(availableToolbarActions(current), ::toolbarActionLabel) { action ->
                     panel.hide()
                     handleToolbarAction(action)
@@ -1305,8 +1275,7 @@ class UzumiInputMethodService : InputMethodService() {
     private fun showTemplatePicker() {
         val current = session ?: return
         val panel = templatePanel ?: return
-        candidateGrid?.hide()
-        toolbarPanel?.hide()
+        hideKeyboardOverlays(except = KeyboardOverlay.TEMPLATES)
         panel.showLoading()
         val executor = conversionExecutor ?: run {
             panel.hide()
@@ -1350,7 +1319,7 @@ class UzumiInputMethodService : InputMethodService() {
     /** 有効な音声入力サブタイプへ切り替え、Uzumi側では録音を行わない。 */
     private fun switchToEnabledVoiceInputMethod() {
         val target = findEnabledVoiceInputMethod() ?: return
-        hideEditPanel()
+        hideKeyboardOverlays()
         switchInputMethod(target.first.id, target.second)
     }
 
@@ -1361,8 +1330,7 @@ class UzumiInputMethodService : InputMethodService() {
             hideEditPanel()
             return
         }
-        candidateGrid?.hide()
-        toolbarPanel?.hide()
+        hideKeyboardOverlays(except = KeyboardOverlay.EDIT)
         session?.refreshSelectionFromEditor()
         editPanelSelectionMode = false
         panel.show(
@@ -1494,6 +1462,22 @@ class UzumiInputMethodService : InputMethodService() {
         val height: Int,
     )
 
+    /** キーボード面に重ねる一覧・パネル。同時には一つだけ開き、IME非表示や欄の切り替えではすべて閉じる。 */
+    private enum class KeyboardOverlay { CANDIDATE_GRID, TOOLBAR, TEMPLATES, CLIPBOARD_HISTORY, EDIT, CANDIDATE_ACTION }
+
+    /** 重ねる一覧・パネルをexcept以外すべて閉じる。開く操作の直前と、表示・欄の終了時にこの一か所から呼ぶ。 */
+    private fun hideKeyboardOverlays(except: KeyboardOverlay? = null) {
+        if (except != KeyboardOverlay.CANDIDATE_GRID) candidateGrid?.hide()
+        if (except != KeyboardOverlay.TOOLBAR) toolbarPanel?.hide()
+        if (except != KeyboardOverlay.TEMPLATES) templatePanel?.hide()
+        if (except != KeyboardOverlay.CLIPBOARD_HISTORY) {
+            clipboardHistoryPanel?.hide()
+            clipboardHistorySessionEpoch = null
+        }
+        if (except != KeyboardOverlay.EDIT) hideEditPanel()
+        if (except != KeyboardOverlay.CANDIDATE_ACTION) candidateActionPanel?.hide()
+    }
+
     /** 候補バーの一項目。押したときの操作を持つ。 */
     private class CandidateEntry(
         val label: String,
@@ -1556,8 +1540,7 @@ class UzumiInputMethodService : InputMethodService() {
         val learningStore = LearningStores.peek()
         val reading = entry.learnedReading
         val canDeleteLearning = reading != null && learningStore?.contains(reading, entry.surface) == true
-        candidateGrid?.hide()
-        toolbarPanel?.hide()
+        hideKeyboardOverlays(except = KeyboardOverlay.CANDIDATE_ACTION)
         panel.show(
             canDeleteLearning = canDeleteLearning,
             onDeleteLearning = {
