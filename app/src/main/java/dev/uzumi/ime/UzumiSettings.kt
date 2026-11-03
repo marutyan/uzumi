@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.keyboard.ToolbarAction
 import dev.uzumi.ime.keyboard.ToolbarPreferences
+import dev.uzumi.ime.learning.LearningStores
 import kotlin.math.roundToInt
 
 /**
@@ -43,6 +44,103 @@ object UzumiSettings {
     private const val KEY_TOOLBAR_ACTIONS = "toolbar_actions"
     private const val KEY_TOOLBAR_ROWS = "toolbar_rows"
     private const val KEY_CANDIDATE_ROWS = "candidate_rows"
+
+    /** バックアップの各設定を読み、型検証・正規化・反映する定義。新しい設定はこの一覧へ追加する。 */
+    private data class BackupSettingDescriptor(
+        val key: String,
+        val capture: (Context) -> BackupJsonValue,
+        val normalize: (BackupJsonValue) -> BackupJsonValue?,
+        val apply: (Context, BackupJsonValue) -> Unit,
+    )
+
+    /** 書き出しと読み込みに含める利用者設定の一覧。学習の有効状態は含め、学習履歴やdebugモデルは含めない。 */
+    private val BACKUP_SETTINGS = listOf(
+        BackupSettingDescriptor(
+            key = "keyboardHeightDp",
+            capture = { BackupJsonValue.NumberValue(keyboardHeightDp(it).toString()) },
+            normalize = { value -> value.intOrNull()?.let { BackupJsonValue.NumberValue(KeyboardPreferences.normalizeRowHeightDp(it).toString()) } },
+            apply = { context, value -> setKeyboardHeightDp(context, value.intOrNull()!!) },
+        ),
+        BackupSettingDescriptor(
+            key = "liveConversion",
+            capture = { BackupJsonValue.BooleanValue(isLiveConversionEnabled(it)) },
+            normalize = { value -> (value as? BackupJsonValue.BooleanValue) },
+            apply = { context, value -> setLiveConversionEnabled(context, value.booleanValue()!!) },
+        ),
+        BackupSettingDescriptor(
+            key = "learningEnabled",
+            capture = { BackupJsonValue.BooleanValue(LearningStores.get(it).isEnabled) },
+            normalize = { value -> value as? BackupJsonValue.BooleanValue },
+            apply = { context, value -> LearningStores.get(context).setEnabled(value.booleanValue()!!) },
+        ),
+        BackupSettingDescriptor(
+            key = "deleteDrag",
+            capture = { BackupJsonValue.BooleanValue(keyboardPreferences(it).deleteDrag) },
+            normalize = { value -> value as? BackupJsonValue.BooleanValue },
+            apply = { context, value -> setDeleteDrag(context, value.booleanValue()!!) },
+        ),
+        BackupSettingDescriptor(
+            key = "vibration",
+            capture = { BackupJsonValue.BooleanValue(keyboardPreferences(it).vibration) },
+            normalize = { value -> value as? BackupJsonValue.BooleanValue },
+            apply = { context, value -> setVibration(context, value.booleanValue()!!) },
+        ),
+        BackupSettingDescriptor(
+            key = "keySound",
+            capture = { BackupJsonValue.BooleanValue(keyboardPreferences(it).keySound) },
+            normalize = { value -> value as? BackupJsonValue.BooleanValue },
+            apply = { context, value -> setKeySound(context, value.booleanValue()!!) },
+        ),
+        BackupSettingDescriptor(
+            key = "keyPreview",
+            capture = { BackupJsonValue.BooleanValue(keyboardPreferences(it).keyPreview) },
+            normalize = { value -> value as? BackupJsonValue.BooleanValue },
+            apply = { context, value -> setKeyPreview(context, value.booleanValue()!!) },
+        ),
+        BackupSettingDescriptor(
+            key = "toolbarActions",
+            capture = { context -> BackupJsonValue.ArrayValue(toolbarPreferences(context).selectedActions.map { BackupJsonValue.StringValue(it.name) }) },
+            normalize = normalize@{ value ->
+                val actionValues = (value as? BackupJsonValue.ArrayValue)?.values
+                    ?: return@normalize null
+                val names = actionValues.map {
+                    (it as? BackupJsonValue.StringValue)?.value ?: return@normalize null
+                }
+                val actions = names.mapNotNull { name -> ToolbarAction.entries.firstOrNull { it.name == name } }
+                BackupJsonValue.ArrayValue(ToolbarPreferences.normalizeActions(actions).map { BackupJsonValue.StringValue(it.name) })
+            },
+            apply = { context, value ->
+                val actions = value.arrayValue()!!.mapNotNull { action ->
+                    ToolbarAction.entries.firstOrNull { it.name == action.stringValue() }
+                }
+                setToolbarActions(context, actions)
+            },
+        ),
+        BackupSettingDescriptor(
+            key = "toolbarRows",
+            capture = { BackupJsonValue.NumberValue(toolbarPreferences(it).toolbarRows.toString()) },
+            normalize = { value -> value.intOrNull()?.let { BackupJsonValue.NumberValue(ToolbarPreferences.normalizeRows(it).toString()) } },
+            apply = { context, value -> setToolbarRows(context, value.intOrNull()!!) },
+        ),
+        BackupSettingDescriptor(
+            key = "candidateRows",
+            capture = { BackupJsonValue.NumberValue(toolbarPreferences(it).candidateRows.toString()) },
+            normalize = { value -> value.intOrNull()?.let { BackupJsonValue.NumberValue(ToolbarPreferences.normalizeRows(it).toString()) } },
+            apply = { context, value -> setCandidateRows(context, value.intOrNull()!!) },
+        ),
+        BackupSettingDescriptor(
+            key = "romajiInput",
+            capture = { BackupJsonValue.BooleanValue(isRomajiInputEnabled(it)) },
+            normalize = { value -> value as? BackupJsonValue.BooleanValue },
+            apply = { context, value -> setRomajiInputEnabled(context, value.booleanValue()!!) },
+        ),
+        BackupSettingDescriptor(
+            key = "romajiEnglishQwerty",
+            capture = { BackupJsonValue.BooleanValue(isRomajiEnglishQwertyIncluded(it)) },
+            normalize = { value -> value as? BackupJsonValue.BooleanValue },
+            apply = { context, value -> setRomajiEnglishQwertyIncluded(context, value.booleanValue()!!) },
+        ),
+    )
 
     /** キーボードの見た目と反応の設定を読む。未設定の項目は既定値にする。 */
     fun keyboardPreferences(context: Context): KeyboardPreferences {
@@ -151,6 +249,43 @@ object UzumiSettings {
     /** 配列切替に英字QWERTYを含めるかを保存する。 */
     fun setRomajiEnglishQwertyIncluded(context: Context, included: Boolean) =
         putBoolean(context, KEY_ROMAJI_ENGLISH_QWERTY, included)
+
+    /** 現在の設定をバックアップへ渡すJSON値の一覧として取り出す。 */
+    fun captureBackupSettings(context: Context): Map<String, BackupJsonValue> =
+        BACKUP_SETTINGS.associate { it.key to it.capture(context.applicationContext) }
+
+    /** 既知設定だけを型検証して正規化し、未知の設定名を無視する。 */
+    fun normalizeBackupSettings(values: Map<String, BackupJsonValue>): Map<String, BackupJsonValue> = buildMap {
+        BACKUP_SETTINGS.forEach { descriptor ->
+            if (!values.containsKey(descriptor.key)) return@forEach
+            val normalized = descriptor.normalize(values.getValue(descriptor.key))
+                ?: throw SettingsBackupException("${descriptor.key}の型が正しくありません")
+            put(descriptor.key, normalized)
+        }
+    }
+
+    /** すべての既知設定を先に検証してから保存するため、型不正で既存設定だけが部分更新されるのを防ぐ。 */
+    fun applyBackupSettings(context: Context, values: Map<String, BackupJsonValue>) {
+        val normalized = normalizeBackupSettings(values)
+        val operations = BACKUP_SETTINGS.filter { it.key in normalized }
+        operations.forEach { it.apply(context.applicationContext, normalized.getValue(it.key)) }
+    }
+
+    /** JSON設定値から32bit整数を読む。小数や範囲外の数値は設定値として認めない。 */
+    private fun BackupJsonValue.intOrNull(): Int? =
+        (this as? BackupJsonValue.NumberValue)?.value?.toIntOrNull()
+
+    /** JSON設定値から真偽値を読む。 */
+    private fun BackupJsonValue.booleanValue(): Boolean? =
+        (this as? BackupJsonValue.BooleanValue)?.value
+
+    /** JSON設定値から配列を読む。型検証はバックアップ定義で先に行う。 */
+    private fun BackupJsonValue.arrayValue(): List<BackupJsonValue>? =
+        (this as? BackupJsonValue.ArrayValue)?.values
+
+    /** JSON設定値から文字列を読む。型検証はバックアップ定義で先に行う。 */
+    private fun BackupJsonValue.stringValue(): String? =
+        (this as? BackupJsonValue.StringValue)?.value
 
     /** 設定の保存先。 */
     private fun preferences(context: Context): SharedPreferences =
