@@ -1,5 +1,6 @@
 package dev.uzumi.ime.keyboard
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -14,6 +15,8 @@ import dev.uzumi.ime.editor.EditPanelAction
 import dev.uzumi.ime.editor.EditPanelRules
 
 /** キーボード面へ重ね、編集操作と選択状態をタイルで表示する。 */
+// 必須コールバックを伴うプログラム生成専用Viewであり、XMLからは生成しない。
+@SuppressLint("ViewConstructor")
 class EditPanelView(
     context: Context,
     private val onAction: (EditPanelAction) -> Unit,
