@@ -17,6 +17,8 @@ import android.view.ViewConfiguration
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
+import dev.uzumi.ime.R
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * キーの種別と表示・動作定義を表すシールドインターフェース。
@@ -275,7 +277,7 @@ class KeyView(context: Context) : View(context) {
         this.colors = colors
         appearance = preferences.appearance
         cornerRadius = appearance.keyShape.cornerDp * density
-        baseTypeface = keyTypeface(appearance.keyFont)
+        baseTypeface = keyTypeface(getContext(), appearance.keyFont)
         boldTypeface = Typeface.create(baseTypeface, Typeface.BOLD)
         textScale = appearance.keyTextScale / 100f
         keyAlpha = if (appearance.hasBackgroundImage) appearance.keyOpacity / 100f else 1f
@@ -1089,10 +1091,26 @@ class KeyView(context: Context) : View(context) {
     }
 
     companion object {
-        /** きせかえの書体を端末の書体へ直す。明朝は端末のserif（日本語ではNoto Serif CJKなど）を使い、同梱しない。 */
-        fun keyTypeface(font: KeyFont): Typeface = when (font) {
+        /** 同梱書体と読み込み失敗時のゴシックをプロセス内に保持する。 */
+        private val bundledTypefaces = ConcurrentHashMap<KeyFont, Typeface>()
+
+        /** キーと周辺表示で共有する書体を返す。同梱書体の読み込み結果はプロセス内に保持する。 */
+        fun keyTypeface(context: Context, font: KeyFont): Typeface = when (font) {
             KeyFont.GOTHIC -> Typeface.DEFAULT
             KeyFont.MINCHO -> Typeface.SERIF
+            KeyFont.ZEN_MARU_GOTHIC -> bundledTypefaces.computeIfAbsent(font) {
+                loadBundledTypeface(context, R.font.zen_maru_gothic_medium)
+            }
+            KeyFont.YUSEI_MAGIC -> bundledTypefaces.computeIfAbsent(font) {
+                loadBundledTypeface(context, R.font.yusei_magic_regular)
+            }
+        }
+
+        /** Resources.getFontで書体を読み、例外もゴシックとしてキャッシュできる値にする。 */
+        private fun loadBundledTypeface(context: Context, resourceId: Int): Typeface = try {
+            context.resources.getFont(resourceId)
+        } catch (_: Exception) {
+            Typeface.DEFAULT
         }
 
         /** かなキーの文字の大きさ（dp）。Simejiの実測（約23〜24dp）に合わせる。 */

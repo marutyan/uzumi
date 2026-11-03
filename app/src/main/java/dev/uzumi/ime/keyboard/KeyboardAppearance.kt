@@ -17,13 +17,19 @@ enum class KeyShape(val cornerDp: Float) {
     FLAT(KeyboardDimens.KEY_CORNER_DP),
 }
 
-/** キーの文字の書体。フォントを同梱せず、端末にある書体だけを選べるようにする。 */
+/** キーと候補バーの文字の書体。 */
 enum class KeyFont {
     /** 端末の既定のゴシック。 */
     GOTHIC,
 
     /** 端末のserif（日本語では明朝体）。 */
     MINCHO,
+
+    /** 同梱したZen Maru Gothic。 */
+    ZEN_MARU_GOTHIC,
+
+    /** 同梱したYusei Magic。 */
+    YUSEI_MAGIC,
 }
 
 /** かなキーを押している間のフリックの表示のしかた。 */

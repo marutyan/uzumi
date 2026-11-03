@@ -85,7 +85,7 @@ class KeyboardPanel(
 
     // きせかえの設定から一度だけ作る配色と書体。全キー、拡大表示、吹き出しで共有する。
     private val colors = KeyboardColors.from(context, preferences.appearance)
-    private val keyTypeface = KeyView.keyTypeface(preferences.appearance.keyFont)
+    private val keyTypeface = KeyView.keyTypeface(context, preferences.appearance.keyFont)
 
     // 押したキーの拡大表示。password欄では入力した文字を画面に大きく出さないため使わない。
     private val keyPreview = KeyPreviewPopup(this, colors, keyTypeface)

@@ -8,6 +8,7 @@ import dev.uzumi.ime.UzumiSettings
 import dev.uzumi.ime.keyboard.FlickBubbleShape
 import dev.uzumi.ime.keyboard.FlickJudge
 import dev.uzumi.ime.keyboard.InputTuning
+import dev.uzumi.ime.keyboard.KeyFont
 import dev.uzumi.ime.keyboard.KeyShape
 import dev.uzumi.ime.keyboard.KeyboardAppearance
 import dev.uzumi.ime.keyboard.ThemePreset
@@ -238,6 +239,7 @@ class UserDictionaryTsvTest {
                 "appearance" to BackupJsonValue.ObjectValue(
                     mapOf(
                         "keyOpacity" to BackupJsonValue.StringValue("500"),
+                        KeyboardAppearance.KEY_FONT to BackupJsonValue.StringValue(KeyFont.YUSEI_MAGIC.name),
                         "futureField" to BackupJsonValue.StringValue("x"),
                     ),
                 ),
@@ -246,7 +248,28 @@ class UserDictionaryTsvTest {
                 ),
             ),
         )
-        assertEquals(stringObject(KeyboardAppearance(keyOpacity = 100).toStorage()), normalized.getValue("appearance"))
+        assertEquals(
+            stringObject(KeyboardAppearance(keyOpacity = 100, keyFont = KeyFont.YUSEI_MAGIC).toStorage()),
+            normalized.getValue("appearance"),
+        )
+        KeyFont.entries.forEach { font ->
+            val appearance = UzumiSettings.normalizeBackupSettings(
+                mapOf(
+                    "appearance" to BackupJsonValue.ObjectValue(
+                        mapOf(KeyboardAppearance.KEY_FONT to BackupJsonValue.StringValue(font.name)),
+                    ),
+                ),
+            )
+            assertEquals(stringObject(KeyboardAppearance(keyFont = font).toStorage()), appearance.getValue("appearance"))
+        }
+        val unknownFont = UzumiSettings.normalizeBackupSettings(
+            mapOf(
+                "appearance" to BackupJsonValue.ObjectValue(
+                    mapOf(KeyboardAppearance.KEY_FONT to BackupJsonValue.StringValue("FUTURE")),
+                ),
+            ),
+        )
+        assertEquals(stringObject(KeyboardAppearance().toStorage()), unknownFont.getValue("appearance"))
         assertEquals(stringObject(InputTuning(flickJudge = FlickJudge.AXIS).toStorage()), normalized.getValue("inputTuning"))
         assertThrows(SettingsBackupException::class.java) {
             UzumiSettings.normalizeBackupSettings(

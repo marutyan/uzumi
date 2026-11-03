@@ -383,7 +383,12 @@ class KisekaeActivity : Activity() {
         })
         content.addView(caption(R.string.kisekae_key_font))
         content.addView(choice(
-            listOf(KeyFont.GOTHIC to R.string.kisekae_font_gothic, KeyFont.MINCHO to R.string.kisekae_font_mincho),
+            listOf(
+                KeyFont.GOTHIC to R.string.kisekae_font_gothic,
+                KeyFont.MINCHO to R.string.kisekae_font_mincho,
+                KeyFont.ZEN_MARU_GOTHIC to R.string.kisekae_font_zen_maru_gothic,
+                KeyFont.YUSEI_MAGIC to R.string.kisekae_font_yusei_magic,
+            ),
             appearance.keyFont,
         ) { font -> updateAppearance { it.copy(keyFont = font) } })
         content.addView(slider(R.string.kisekae_key_text_scale, KeyboardAppearance.KEY_TEXT_SCALE_RANGE, 5,

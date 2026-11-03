@@ -197,6 +197,8 @@
     <string name="kisekae_key_font">フォント</string>
     <string name="kisekae_font_gothic">ゴシック（標準）</string>
     <string name="kisekae_font_mincho">明朝</string>
+    <string name="kisekae_font_zen_maru_gothic">丸ゴシック（Zen Maru Gothic）</string>
+    <string name="kisekae_font_yusei_magic">手書き風（Yusei Magic）</string>
     <string name="kisekae_key_text_scale">文字の大きさ</string>
     <string name="kisekae_key_text_color">文字の色</string>
     <string name="kisekae_color_theme">テーマの色</string>

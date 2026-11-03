@@ -588,10 +588,21 @@ class KeyboardLayoutDataTest {
         assertEquals(ThemeMode.SYSTEM, defaults.mode)
         assertEquals(85, defaults.backgroundBrightness)
         assertEquals(100, defaults.keyOpacity)
+        assertEquals(KeyFont.GOTHIC, defaults.keyFont)
         assertEquals(FlickDisplayMode.BUBBLE, defaults.flickMode)
         assertEquals(FlickBubbleShape.PENTAGON, defaults.flickShape)
         assertFalse(defaults.hasBackgroundImage)
         assertEquals(defaults, KeyboardAppearance.fromStorage(emptyMap()))
+
+        KeyFont.entries.forEach { font ->
+            val stored = KeyboardAppearance(keyFont = font).toStorage()
+            assertEquals(font.name, stored[KeyboardAppearance.KEY_FONT])
+            assertEquals(font, KeyboardAppearance.fromStorage(stored).keyFont)
+        }
+        assertEquals(
+            KeyFont.GOTHIC,
+            KeyboardAppearance.fromStorage(mapOf(KeyboardAppearance.KEY_FONT to "FUTURE")).keyFont,
+        )
 
         val custom = KeyboardAppearance(
             preset = ThemePreset.SAKURA,

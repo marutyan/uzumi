@@ -22,7 +22,7 @@ class CandidateBarViews(private val context: Context) {
     val colors = KeyboardColors.from(context)
 
     // 候補の文字の書体。きせかえで選んだキーの書体にそろえる。
-    private val candidateTypeface = KeyView.keyTypeface(UzumiSettings.keyboardAppearance(context).keyFont)
+    private val candidateTypeface = KeyView.keyTypeface(context, UzumiSettings.keyboardAppearance(context).keyFont)
     private val density = context.resources.displayMetrics.density
 
     /** 候補一つ。選択中の候補は背景色で示し、指定があれば長押しメニューを開く。 */
@@ -63,6 +63,7 @@ class CandidateBarViews(private val context: Context) {
         this.text = text
         contentDescription = description
         setTextSize(TypedValue.COMPLEX_UNIT_DIP, CHIP_TEXT_DP)
+        typeface = candidateTypeface
         val palette = this@CandidateBarViews.colors
         setTextColor(if (emphasized) palette.accent else palette.textSecondary)
         if (emphasized) setTypeface(typeface, Typeface.BOLD)
@@ -88,6 +89,7 @@ class CandidateBarViews(private val context: Context) {
         this.text = text
         setTextSize(TypedValue.COMPLEX_UNIT_DIP, HINT_TEXT_DP)
         setTextColor(colors.textSecondary)
+        typeface = candidateTypeface
         gravity = Gravity.CENTER_VERTICAL
         setPadding(px(10f), 0, px(10f), 0)
         layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT)
@@ -99,6 +101,7 @@ class CandidateBarViews(private val context: Context) {
         contentDescription = description
         setTextSize(TypedValue.COMPLEX_UNIT_DIP, SYMBOL_TEXT_DP)
         setTextColor(colors.text)
+        typeface = candidateTypeface
         gravity = Gravity.CENTER
         minWidth = px(MIN_TOUCH_DP)
         setPadding(px(8f), 0, px(8f), 0)
