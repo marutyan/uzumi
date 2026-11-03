@@ -139,6 +139,8 @@ class UzumiInputMethodService : InputMethodService() {
     // 編集パネルはキーボード面へ重ね、選択モードをIME表示中だけ保持する。
     private var editPanel: EditPanelView? = null
     private var editPanelSelectionMode = false
+    // 有効な音声入力の切り替え先。タイルの表示判定でIMEの一覧を毎回問い合わせないよう、表示開始とsubtype変更時だけ調べる。
+    private var voiceInputMethod: Pair<InputMethodInfo, InputMethodSubtype>? = null
     // 入力Viewを作ったときのキーボード設定。設定画面で変わっていれば、次に表示するときに作り直す。
     private var builtPreferences: KeyboardPreferences? = null
     private var builtToolbarPreferences: ToolbarPreferences? = null
@@ -467,7 +469,15 @@ class UzumiInputMethodService : InputMethodService() {
             setInputView(onCreateInputView())
         }
         startClipboardObservation()
+        voiceInputMethod = findEnabledVoiceInputMethod()
         applyPolicyToKeyboard()
+        refreshCandidates()
+    }
+
+    /** 入力方法のsubtypeが変わったとき、音声入力の切り替え先を調べ直して機能タイルへ反映する。 */
+    override fun onCurrentInputMethodSubtypeChanged(newSubtype: InputMethodSubtype?) {
+        super.onCurrentInputMethodSubtypeChanged(newSubtype)
+        voiceInputMethod = findEnabledVoiceInputMethod()
         refreshCandidates()
     }
 
@@ -1227,7 +1237,7 @@ class UzumiInputMethodService : InputMethodService() {
                     it.canUndoDeletion || it.liveCandidateState()?.canUndo == true
                 } == true
                 ToolbarAction.EDIT -> canOpenEditPanel()
-                ToolbarAction.MICROPHONE -> findEnabledVoiceInputMethod() != null
+                ToolbarAction.MICROPHONE -> voiceInputMethod != null
                 else -> true
             }
         }
@@ -1320,7 +1330,7 @@ class UzumiInputMethodService : InputMethodService() {
 
     /** 有効な音声入力サブタイプへ切り替え、Uzumi側では録音を行わない。 */
     private fun switchToEnabledVoiceInputMethod() {
-        val target = findEnabledVoiceInputMethod() ?: return
+        val target = voiceInputMethod ?: return
         hideKeyboardOverlays()
         switchInputMethod(target.first.id, target.second)
     }
