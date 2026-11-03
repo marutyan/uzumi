@@ -1233,6 +1233,24 @@ class EditorSessionTest {
         assertTrue(client.committedAll.isEmpty())
     }
 
+    /** 変換キーの候補巡回は非表示の候補を飛ばし、次が非表示でも先へ進める。 */
+    @Test
+    fun explicitConvertCycleSkipsHiddenCandidates() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("かんじ")
+        session.setHiddenCandidateSurfaces(setOf("感じ"))
+        session.convert()
+        val request = client.requests.single()
+        assertTrue(session.applyConversionOutcome(converted(request, "漢字", "感じ", "幹事")))
+
+        assertTrue(session.convert())
+        assertEquals("幹事", session.compositionSnapshot().display)
+        assertTrue(session.convert())
+        assertEquals("漢字", session.compositionSnapshot().display)
+    }
+
     /** 候補選択で表示幅が変わった後に旧compositionの遅延通知が届いても、現在の変換を保つ。 */
     @Test
     fun delayedSelectionForPreviousConversionDisplayDoesNotDiscardCurrentChoices() {

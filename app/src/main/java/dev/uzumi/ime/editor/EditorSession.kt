@@ -1943,7 +1943,12 @@ class EditorSession(
         val conversion = currentConversion() ?: return false
         val index = focusedConversionSegmentIndex
         val segment = conversion.segments.getOrNull(index) ?: return false
-        val candidates = segmentCandidates(conversion, index)
+        // 非表示の候補は選択時に拒否されるため、除いた候補の中だけで巡回する。
+        val candidates = CandidateVisibility.filter(
+            segmentCandidates(conversion, index),
+            effectiveHiddenCandidateSurfaces(),
+            isRecording = false,
+        ) { it.value }
         if (candidates.isEmpty()) return false
         val current = candidates.indexOfFirst { it.value == segment.value }
         val next = candidates[(current + 1) % candidates.size]
