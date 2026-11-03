@@ -14,6 +14,7 @@
     <string name="dictionary_add">単語を追加</string>
     <string name="dictionary_add_template">定型文を追加</string>
     <string name="dictionary_edit">単語を編集</string>
+    <string name="dictionary_edit_template">定型文を編集</string>
     <string name="dictionary_import">ファイルから読み込む</string>
     <string name="dictionary_export">ファイルへ書き出す</string>
     <string name="dictionary_save">保存</string>

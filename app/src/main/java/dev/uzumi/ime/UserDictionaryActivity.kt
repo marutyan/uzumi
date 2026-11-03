@@ -199,10 +199,13 @@ class UserDictionaryActivity : Activity() {
             ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
             setSelection(categories.indexOf(original?.category ?: initialCategory))
         }
+        // 品詞の選択に合わせて題名を変えるため、作成後のダイアログを参照する。
+        var shownDialog: AlertDialog? = null
         categorySpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            /** 品詞の選択に合わせて、本文欄を単行または複数行へ切り替える。 */
+            /** 品詞の選択に合わせて、本文欄を単行または複数行へ、題名を単語または定型文へ切り替える。 */
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 configureSurfaceField(surfaceField, categories[position])
+                shownDialog?.setTitle(editDialogTitle(isNew = original == null, categories[position]))
             }
 
             /** 選択なしは画面の初期設定で扱う。 */
@@ -222,12 +225,13 @@ class UserDictionaryActivity : Activity() {
             addView(errorText)
         }
         val builder = AlertDialog.Builder(this)
-            .setTitle(if (original == null) R.string.dictionary_add else R.string.dictionary_edit)
+            .setTitle(editDialogTitle(isNew = original == null, original?.category ?: initialCategory))
             .setView(form)
             .setPositiveButton(R.string.dictionary_save, null)
             .setNegativeButton(android.R.string.cancel, null)
         if (original != null) builder.setNeutralButton(R.string.dictionary_delete, null)
         val dialog = builder.create()
+        shownDialog = dialog
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val entry = UserDictionaryEntry(
@@ -255,6 +259,17 @@ class UserDictionaryActivity : Activity() {
             }
         }
         dialog.show()
+    }
+
+    /** 追加・編集の入力画面の題名。定型文は「定型文を追加」「定型文を編集」、それ以外は単語として示す。 */
+    private fun editDialogTitle(isNew: Boolean, category: UserDictionaryCategory): Int {
+        val isTemplate = category == UserDictionaryCategory.TEMPLATE
+        return when {
+            isNew && isTemplate -> R.string.dictionary_add_template
+            isNew -> R.string.dictionary_add
+            isTemplate -> R.string.dictionary_edit_template
+            else -> R.string.dictionary_edit
+        }
     }
 
     /** 定型文だけ本文の空白・改行を入力できるよう、複数行の編集欄を使う。 */
