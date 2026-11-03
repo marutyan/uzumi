@@ -44,6 +44,7 @@ import dev.uzumi.ime.conversion.MozcConversionEngine
 import dev.uzumi.ime.conversion.MozcDataInstaller
 import dev.uzumi.ime.conversion.NeuralModelSpec
 import dev.uzumi.ime.conversion.PredictionCandidate
+import dev.uzumi.ime.conversion.PredictionCommitResult
 import dev.uzumi.ime.conversion.PredictionResult
 import dev.uzumi.ime.clipboard.ClipboardHistoryCapturePolicy
 import dev.uzumi.ime.clipboard.ClipboardHistoryIdentity
@@ -234,6 +235,7 @@ class UzumiInputMethodService : InputMethodService() {
             evaluationActive = { evaluation.isRecording },
             onCandidateResult = { sessionEpoch, result -> mainHandler.post { deliverCandidateResult(sessionEpoch, result) } },
             onPredictionResult = { result -> mainHandler.post { deliverPredictionResult(result) } },
+            onPredictionCommitResult = { result -> mainHandler.post { deliverPredictionCommitResult(result) } },
             userDictionary = { UserDictionaries.get(this) },
             englishWords = { englishWordDictionary },
             learningStore = { LearningStores.get(this) },
@@ -793,6 +795,13 @@ class UzumiInputMethodService : InputMethodService() {
         if (current.applyPredictionResult(result)) refreshCandidates()
     }
 
+    /** Mozcが部分確定した読みだけを同じ編集世代へ反映する。 */
+    private fun deliverPredictionCommitResult(result: PredictionCommitResult) {
+        val current = session ?: return
+        if (current.sessionEpoch != result.request.sessionEpoch) return
+        if (current.applyPredictionCommitResult(result)) refreshCandidates()
+    }
+
     /** 訂正中のsegmentの表示範囲へ背景色を付け、どのsegmentを直しているかをEditor上で示す。 */
     private fun highlightSegment(text: String, span: DisplaySpan?): CharSequence {
         if (span == null || span.start >= span.end || span.end > text.length) return text
@@ -1088,21 +1097,32 @@ class UzumiInputMethodService : InputMethodService() {
                 refreshCandidates()
             })
         }
-        val predictions = current?.predictionResult()?.takeIf { predictionsShown }?.let { result ->
-            result.candidates.map { candidate -> predictionEntry(current, result, candidate) }
+        val predictions = current?.let { editor ->
+            editor.predictionBarResult()?.takeIf { predictionsShown }?.let { result ->
+                result.candidates.map { candidate -> predictionEntry(editor, result, candidate) }
+            }
+        }.orEmpty()
+        val allPredictions = current?.let { editor ->
+            editor.predictionResult()?.takeIf { predictionsShown }?.let { result ->
+                result.candidates.map { candidate -> predictionEntry(editor, result, candidate) }
+            }
         }.orEmpty()
         val regularEntries = if (current?.isLiveMode == true) liveEntries(current, leading, trailing) else explicitEntries(current)
-        val entries = predictions + regularEntries.mapIndexed { index, entry ->
-            CandidateEntry(
-                label = entry.label,
-                selected = entry.selected,
-                surface = entry.surface,
-                learnedReading = entry.learnedReading,
-                sectionBreakBefore = predictions.isNotEmpty() && index == 0,
-                isPrediction = entry.isPrediction,
-                onPick = entry.onPick,
-            )
+        val entriesFor = { predictionEntries: List<CandidateEntry> ->
+            predictionEntries + regularEntries.mapIndexed { index, entry ->
+                CandidateEntry(
+                    label = entry.label,
+                    selected = entry.selected,
+                    surface = entry.surface,
+                    learnedReading = entry.learnedReading,
+                    sectionBreakBefore = predictionEntries.isNotEmpty() && index == 0,
+                    isPrediction = entry.isPrediction,
+                    onPick = entry.onPick,
+                )
+            }
         }
+        val entries = entriesFor(predictions)
+        val listEntries = entriesFor(allPredictions)
         // 次の語の予測はInline候補の右に並べるため、Inline候補の表示条件には通常候補だけを使う。
         updateInlineHost(regularEntries.isEmpty() && current != null && InlineAutofillPolicy.shouldShow(
             hasComposition = current.hasComposition,
@@ -1174,8 +1194,18 @@ class UzumiInputMethodService : InputMethodService() {
         // 縦線は右端の固定ボタン（末尾・∨）すべての手前に置き、候補の列がそこで終わることを示す
         trailing.addView(views.divider(), 0)
         if (regularEntries.isEmpty() && current?.hasComposition != true) {
-            // 確定後の次の語の予測だけを並べている間は、待機中と同じくキーボードを閉じる操作を残す。
-            grid?.hide()
+            // 次の語の予測がバーの上限を超えた場合は一覧を開けるようにし、キーボードを閉じる操作も残す。
+            if (allPredictions.size > predictions.size) {
+                trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
+                    evaluation.record(OperationKind.OTHER)
+                    hideKeyboardOverlays(except = KeyboardOverlay.CANDIDATE_GRID)
+                    if (grid?.isShowing == true) grid.hide() else showCandidateGrid(current, listEntries)
+                    refreshCandidates()
+                })
+                if (grid?.isShowing == true) showCandidateGrid(current, listEntries)
+            } else {
+                grid?.hide()
+            }
             trailing.addView(views.symbolButton("⌄", getString(R.string.close_keyboard)) {
                 evaluation.record(OperationKind.OTHER)
                 requestHideSelf(0)
@@ -1190,7 +1220,7 @@ class UzumiInputMethodService : InputMethodService() {
             if (grid?.isShowing == true) {
                 grid.hide()
             } else {
-                showCandidateGrid(current, entries)
+                showCandidateGrid(current, listEntries)
                 // ライブ変換では、一覧を開いた文節の候補を明示変換と同じだけ取り直す。届いたら一覧を描き直す。
                 if (current?.isLiveMode == true && session === current) current.requestLiveCandidates()
             }
@@ -1199,7 +1229,7 @@ class UzumiInputMethodService : InputMethodService() {
         addToolbarEntry(trailing, current)
         resizeCandidateBar(effectiveRows.second)
         // 一覧を開いたまま候補が変わった場合は、一覧も新しい候補で描き直す
-        if (grid?.isShowing == true) showCandidateGrid(current, entries)
+        if (grid?.isShowing == true) showCandidateGrid(current, listEntries)
     }
 
     /** 候補バーを設定に応じた段数の高さで表示する。候補が少なくても高さを変えず、キーボードの上下動を防ぐ。 */
@@ -1548,7 +1578,7 @@ class UzumiInputMethodService : InputMethodService() {
         val onPick: () -> Unit,
     )
 
-    /** 予測候補を、選ぶと未確定全体（待機中はカーソル位置）をその語で確定する候補バーの項目にする。 */
+    /** 予測候補を候補バーの項目にする。Mozcの部分key候補は、選択結果を待って残りの読みを反映する。 */
     private fun predictionEntry(
         current: EditorSession,
         result: PredictionResult,

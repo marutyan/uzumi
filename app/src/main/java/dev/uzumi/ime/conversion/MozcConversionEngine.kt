@@ -329,7 +329,7 @@ class MozcConversionEngine(
             .distinct()
     }
 
-    /** Mozcの候補窓から、入力途中の予測として出せる候補を最大9件先読みする。readingがnullなら次の語の予測。 */
+    /** Mozcの候補窓から、入力途中の予測として出せる候補を最大50件先読みする。readingがnullなら次の語の予測。 */
     private fun predictionCandidates(output: Output, reading: String?): List<PredictionCandidate> {
         if (!output.hasAllCandidateWords()) return emptyList()
         return output.allCandidateWords.candidatesList
@@ -345,11 +345,10 @@ class MozcConversionEngine(
     }
 
     /**
-     * 入力途中の候補を残すか決め、残すなら学習に使う読みを付けて返す。残すのは、(a) keyが入力した読みの続きである予測と、
-     * (b) 入力した読み全体の変換結果。Mozcは候補の自立語部分の読み（content_key）が入力と違うときだけkeyを付けるため、
-     * keyが無い候補は読み全体の変換で、その読みは入力と同じ。keyが入力の接頭辞の候補（「了解しました」のkey「りょうかいし」）は
-     * 表記の読み全体が分からないため、IME側の学習へは記録しない（読みをnullにする）。表記ゆれ変換が有効な間は、
-     * keyと入力を小書き・濁点・半濁点の違いを除いて比べる。打ったとおりのひらがなは候補にしない。
+     * 入力途中の候補を残すか決める。keyが入力読みより長ければ続きを含む候補、短ければ選択後のMozc応答を確認する候補として残す。
+     * Mozcのkeyは候補のcontent_keyで、部分消費を単独では示さないため、実際に残る読みはSUBMIT_CANDIDATEの応答で決める。
+     * keyが無い候補は入力全体の変換結果として扱う。表記ゆれ変換中は小書き・濁点・半濁点の違いを除いて比べる。
+     * 打ったとおりのひらがなは候補にしない。
      */
     private fun readingPrediction(word: CandidateWord, reading: String): PredictionCandidate? {
         if (word.value == reading) return null
@@ -358,7 +357,9 @@ class MozcConversionEngine(
         val typed = comparableReading(reading)
         return when {
             key.startsWith(typed) -> PredictionCandidate(word.id, word.value, word.key)
-            typed.startsWith(key) -> PredictionCandidate(word.id, word.value, null)
+            typed.startsWith(key) -> {
+                PredictionCandidate(word.id, word.value, partialKey = word.key)
+            }
             else -> null
         }
     }
@@ -369,7 +370,7 @@ class MozcConversionEngine(
 
     /**
      * Uzumiが送るRequestを1か所で組み立てる。通常は学習の有無と表記ゆれ変換の有無だけを指定し、
-     * 予測の間だけAndroid向けの混合候補（mixed_conversion）とゼロクエリの取得方式を加える。
+     * 予測の間だけAndroid向けの混合候補（mixed_conversion）、部分予測、ゼロクエリの取得方式を加える。
      */
     private fun request(
         incognito: Boolean,
@@ -380,7 +381,10 @@ class MozcConversionEngine(
         val builder = Request.newBuilder()
             .setIsIncognitoMode(incognito)
             .setKanaModifierInsensitiveConversion(kanaModifierInsensitive)
-        if (prediction) builder.setZeroQuerySuggestion(zeroQuery).setMixedConversion(true)
+        if (prediction) {
+            builder.setZeroQuerySuggestion(zeroQuery).setMixedConversion(true)
+            builder.setAutoPartialSuggestion(true)
+        }
         return builder.build()
     }
 
@@ -490,8 +494,26 @@ class MozcConversionEngine(
 
     /** 予測sessionの候補窓にある予測候補をSUBMIT_CANDIDATEで確定し、Mozcの履歴へ学習させる。 */
     override fun commitPrediction(sessionId: Long, candidateId: Int): Boolean {
+        return submitPrediction(sessionId, candidateId) != null
+    }
+
+    /** SUBMIT_CANDIDATEの結果から、Mozcが実際に残した未変換読みを返す。 */
+    override fun submitPrediction(sessionId: Long, candidateId: Int): EnginePredictionCommit? {
         val output = sendCommand(sessionId, SessionCommand.CommandType.SUBMIT_CANDIDATE, candidateId)
-        return output?.consumed == true
+            ?.takeIf { it.consumed }
+            ?: return null
+        val result = output.result.takeIf { output.hasResult() && it.hasKey() } ?: return null
+        val remaining = if (output.hasPreedit()) {
+            output.preedit.segmentList.joinToString(separator = "") { segment ->
+                if (segment.hasKey()) segment.key else segment.value
+            }
+        } else {
+            ""
+        }
+        return EnginePredictionCommit(
+            remainingReading = remaining,
+            resultReading = result.key,
+        )
     }
 
     /** 指定sessionへキー入力を一つ送る。requestSuggestionがfalseなら入力途中の予測を求めない。 */
@@ -545,7 +567,7 @@ class MozcConversionEngine(
         /** APKに辞書が無い場合にnativeへ渡す、存在しないfileの名前。 */
         const val MISSING_DATA_FILE_NAME = "mozc-data-missing"
 
-        /** 顔文字・絵文字を除いた後も候補を揃えられるようMozcから先読みする件数。 */
-        private const val MAX_PREDICTIONS = 9
+        /** 表示中・通常候補との重複を除いた後も候補を揃えられるようMozcから先読みする件数。 */
+        private const val MAX_PREDICTIONS = 50
     }
 }

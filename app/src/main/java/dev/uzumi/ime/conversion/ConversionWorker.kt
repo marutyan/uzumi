@@ -3,6 +3,8 @@ package dev.uzumi.ime.conversion
 import dev.uzumi.ime.dictionary.UserDictionaryLookup
 import dev.uzumi.ime.evaluation.LiveRequestReport
 import dev.uzumi.ime.dictionary.withoutTemplates
+import dev.uzumi.ime.editor.GraphemeClusters
+import dev.uzumi.ime.editor.KanaModifier
 import dev.uzumi.ime.learning.LearningStore
 import dev.uzumi.ime.live.CandidateRequest
 import dev.uzumi.ime.live.CandidateResult
@@ -95,6 +97,8 @@ class ConversionWorker(
     private val nanoTime: () -> Long = System::nanoTime,
     // 予測応答はsessionEpochとrevisionを保ったままUIへ返す。
     private val onPredictionResult: (PredictionResult) -> Unit = {},
+    // Mozc候補のSUBMIT_CANDIDATE結果。worker threadから呼ばれるため、UIへはpostして反映する。
+    private val onPredictionCommitResult: (PredictionCommitResult) -> Unit = {},
 ) : ConversionClient, LiveConversionClient, PredictionClient {
     @Volatile
     private var currentHealth: EngineHealth = EngineHealth.Loading
@@ -206,29 +210,64 @@ class ConversionWorker(
      * Mozcの予測sessionへも確定して履歴を学習させる。
      */
     override fun commitPrediction(request: PredictionRequest, candidate: PredictionCandidate) {
-        if (request.incognito || isEnded(request.sessionEpoch)) return
+        if (isEnded(request.sessionEpoch)) return
         executor.execute {
             if (lastPredictionRequests[request.sessionEpoch] != request) return@execute
             val selected = lastPredictionCandidates[request.sessionEpoch].orEmpty()
                 .firstOrNull { it == candidate } ?: return@execute
-            selected.reading?.let { reading ->
-                lookupLearningStore()?.let { store ->
-                    if (selected.englishVariant) store.recordEnglishVariant(reading, selected.value)
-                    else store.record(reading, selected.value)
+            var engineCommit: EnginePredictionCommit? = null
+            if (selected.id != null) {
+                val sessionId = predictionSessions[request.sessionEpoch]
+                val insensitive = kanaModifierInsensitive(request.kanaModifierInsensitive)
+                if (sessionId != null && runCatching { engine.setIncognito(request.incognito, insensitive) }.getOrDefault(false)) {
+                    engineCommit = runCatching { engine.submitPrediction(sessionId, selected.id) }.getOrNull()
                 }
             }
-            val candidateId = selected.id ?: run {
-                lastPredictionRequests.remove(request.sessionEpoch)
-                lastPredictionCandidates.remove(request.sessionEpoch)
-                return@execute
+            val learningReading = engineCommit?.let { predictionLearningReading(request, selected, it) }
+                ?: selected.reading.takeIf { selected.id == null }
+            if (!request.incognito) {
+                learningReading?.let { reading ->
+                    lookupLearningStore()?.let { store ->
+                        if (selected.englishVariant) store.recordEnglishVariant(reading, selected.value)
+                        else store.record(reading, selected.value)
+                    }
+                }
             }
-            val sessionId = predictionSessions[request.sessionEpoch] ?: return@execute
-            val insensitive = kanaModifierInsensitive(request.kanaModifierInsensitive)
-            if (!runCatching { engine.setIncognito(false, insensitive) }.getOrDefault(false)) return@execute
-            runCatching { engine.commitPrediction(sessionId, candidateId) }
             lastPredictionRequests.remove(request.sessionEpoch)
             lastPredictionCandidates.remove(request.sessionEpoch)
+            onPredictionCommitResult(
+                PredictionCommitResult(
+                    request = request,
+                    candidate = selected,
+                    succeeded = selected.id == null || engineCommit != null,
+                    remainingReading = engineCommit?.remainingReading,
+                    learningReading = learningReading,
+                ),
+            )
         }
+    }
+
+    /** Mozcの応答に残った読みを基準に、IME学習へ実際に確定した読みを渡す。 */
+    private fun predictionLearningReading(
+        request: PredictionRequest,
+        candidate: PredictionCandidate,
+        commit: EnginePredictionCommit,
+    ): String? {
+        if (request.isZeroQuery) return commit.resultReading ?: candidate.reading
+        if (commit.remainingReading.isEmpty()) {
+            return if (candidate.partialKey != null) request.reading else candidate.reading ?: request.reading
+        }
+        val remainingClusters = GraphemeClusters.split(commit.remainingReading).size
+        val typedRemaining = GraphemeClusters.split(request.reading).takeLast(remainingClusters).joinToString("")
+        val comparable: (String) -> String = if (request.kanaModifierInsensitive) {
+            { value -> KanaModifier.stripModifiers(value) }
+        } else {
+            { value -> value }
+        }
+        if (remainingClusters == 0 || comparable(typedRemaining) != comparable(commit.remainingReading)) return null
+        val consumed = request.reading.removeSuffix(typedRemaining)
+        if (consumed.isEmpty()) return null
+        return commit.resultReading?.takeIf { comparable(it) == comparable(consumed) } ?: consumed
     }
 
     /**
@@ -691,7 +730,7 @@ class ConversionWorker(
         val judge = EmoticonJudge(lookupUserDictionary(), lookupLearningStore().takeUnless { request.incognito })
         val engineCandidates = generated
             .filterNot { EmoticonText.isEmoticon(it.value) || judge.isEmoticon(it.reading ?: request.reading, it.value) }
-            .take(MAX_VISIBLE_PREDICTIONS)
+            .distinctBy { it.value }
         val englishCandidates = if (engineCandidates.isEmpty() || request.reading.isEmpty() || request.incognito || evaluationActive()) {
             emptyList()
         } else {
@@ -699,6 +738,7 @@ class ConversionWorker(
             lookupEnglishWords()?.exactMatches(request.reading).orEmpty()
                 .filterNot { it.surface in existing }
                 .map { PredictionCandidate(id = null, value = it.surface, reading = it.reading, englishVariant = true) }
+                .distinctBy { it.value }
         }
         val candidates = engineCandidates + englishCandidates
         lastPredictionRequests[request.sessionEpoch] = request
@@ -795,9 +835,6 @@ class ConversionWorker(
 
         /** KNOWN_READINGの候補に辞書があれば必ず含まれる表記。 */
         const val KNOWN_CONVERSION = "漢字"
-
-        /** 候補バーへ出すMozc予測の最大件数。英語辞書の候補は、この後ろへ追加する。 */
-        private const val MAX_VISIBLE_PREDICTIONS = 3
 
         /** 英語辞書候補へ、ユーザー辞書・学習語・Mozc IDと重ならないIDを割り当てる。 */
         private const val ENGLISH_CANDIDATE_ID_BASE = Int.MIN_VALUE + 0x20000

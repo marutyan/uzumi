@@ -59,10 +59,21 @@ data class PredictionCandidate(
     val value: String,
     val reading: String? = null,
     val englishVariant: Boolean = false,
+    // Mozcの候補keyが入力読みの先頭と一致する場合の手がかり。実際の部分確定は選択結果で判定する。
+    val partialKey: String? = null,
 )
 
 /** 要求の世代に結び付いた予測候補。 */
 data class PredictionResult(val request: PredictionRequest, val candidates: List<PredictionCandidate>)
+
+/** Mozcが予測候補を確定した後の読みと、まだ変換していない入力読み。 */
+data class PredictionCommitResult(
+    val request: PredictionRequest,
+    val candidate: PredictionCandidate,
+    val succeeded: Boolean,
+    val remainingReading: String?,
+    val learningReading: String?,
+)
 
 /** 変換結果の一文節。readingはその文節が占める読み、valueは表示表記、candidatesはその文節だけの候補。 */
 data class ConversionSegment(

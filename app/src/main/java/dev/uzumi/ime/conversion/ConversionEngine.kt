@@ -38,6 +38,10 @@ interface ConversionEngine {
      */
     fun commitPrediction(sessionId: Long, candidateId: Int): Boolean
 
+    /** Mozcが実際に確定した読みと、compositionに残った読みを返す。 */
+    fun submitPrediction(sessionId: Long, candidateId: Int): EnginePredictionCommit? =
+        if (commitPrediction(sessionId, candidateId)) EnginePredictionCommit(remainingReading = "") else null
+
     /** 直前の変換の全文節を第一候補のまま確定し、エンジンへ学習させる。 */
     fun commitAll(sessionId: Long): Boolean
 
@@ -69,3 +73,9 @@ interface ConversionEngine {
     /** エンジンが確定から学習した内容（文節履歴と予測の履歴）をすべて消す。 */
     fun clearLearning(): Boolean
 }
+
+/** MozcのSUBMIT_CANDIDATE応答から得た、確定範囲と残りのcomposition。 */
+data class EnginePredictionCommit(
+    val remainingReading: String,
+    val resultReading: String? = null,
+)

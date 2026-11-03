@@ -10,6 +10,7 @@ import dev.uzumi.ime.conversion.ConversionResult
 import dev.uzumi.ime.conversion.ConversionSegment
 import dev.uzumi.ime.conversion.LiveConversionClient
 import dev.uzumi.ime.conversion.PredictionCandidate
+import dev.uzumi.ime.conversion.PredictionCommitResult
 import dev.uzumi.ime.conversion.PredictionClient
 import dev.uzumi.ime.conversion.PredictionRequest
 import dev.uzumi.ime.conversion.PredictionResult
@@ -76,6 +77,8 @@ class EditorSession(
     // 予測も入力世代とsession epochが一致する場合だけ候補へ表示する。
     private var pendingPrediction: PredictionRequest? = null
     private var appliedPrediction: PredictionResult? = null
+    // 部分key候補はMozcの確定応答で残りの読みを確かめてから本文へ反映する。
+    private var pendingPredictionSelection: PendingPredictionSelection? = null
     // 設定から読み込んだNG表記。評価中は適用せず、表示と候補の条件を元へ戻す。
     private var hiddenCandidateSurfaces: Set<String> = emptySet()
     private var appliedConversion: ConversionResult? = null
@@ -243,7 +246,7 @@ class EditorSession(
     /** 現在の読みまたは直前の確定文字列に対するMozc予測を依頼し、古い候補を直ちに外す。 */
     fun refreshPredictions(): Boolean {
         val client = predictionClient
-        if (!active || client?.isPredictionAvailable != true) {
+        if (!active || evaluation?.isRecording == true || client?.isPredictionAvailable != true) {
             clearPredictions()
             return false
         }
@@ -251,6 +254,10 @@ class EditorSession(
         if (request == null) {
             clearPredictions()
             return false
+        }
+        pendingPredictionSelection?.let { selection ->
+            if (isCurrentPredictionRequest(selection.request)) return false
+            pendingPredictionSelection = null
         }
         if (pendingPrediction == request || appliedPrediction?.request == request) return false
         pendingPrediction = request
@@ -269,17 +276,29 @@ class EditorSession(
      * その右に並ぶ通常の候補（注目文節の候補）と同じ表記は、同じ語が候補バーに二度並ばないよう除く。
      */
     fun predictionResult(): PredictionResult? {
+        if (evaluation?.isRecording == true) return null
         val result = appliedPrediction?.takeIf { isCurrentPredictionRequest(it.request) } ?: return null
         val shown = regularCandidateValues().toMutableSet()
         if (hasComposition) shown += ownedDisplay
         val candidates = CandidateVisibility.filter(
-            result.candidates.filterNot { it.value in shown },
+            result.candidates.filterNot { it.value in shown }.distinctBy { it.value },
             effectiveHiddenCandidateSurfaces(),
-            evaluation?.isRecording == true,
+            isRecording = false,
         ) { it.value }
         val firstEnglish = candidates.indexOfFirst(PredictionCandidate::englishVariant)
         val keepEnglish = firstEnglish < 0 || candidates.take(firstEnglish).any { it.id != null }
         return result.copy(candidates = candidates.filter { !it.englishVariant || keepEnglish })
+    }
+
+    /**
+     * 重複表記と非表示候補を除いた後、候補バーに出す予測を最大5件にする。英語表記はMozc予測の後ろに並ぶため、
+     * 5件で切ると一覧にしか出なくなる。英語候補が5件に入らないときは、最初の英語候補を5件目に置く。
+     */
+    fun predictionBarResult(): PredictionResult? = predictionResult()?.let { result ->
+        val bar = result.candidates.take(MAX_PREDICTIONS_IN_BAR)
+        val english = result.candidates.firstOrNull(PredictionCandidate::englishVariant)
+        val candidates = if (english == null || english in bar) bar else bar.dropLast(1) + english
+        result.copy(candidates = candidates)
     }
 
     /** 予測の右に並ぶ通常の候補の表記。ライブ変換では注目segmentの候補、それ以外は明示変換・基本候補。 */
@@ -298,6 +317,7 @@ class EditorSession(
     fun clearPredictions() {
         pendingPrediction = null
         appliedPrediction = null
+        pendingPredictionSelection = null
     }
 
     /** Mozc候補IDから対応する候補を探し、予測語を確定する既存呼び出し口を保つ。 */
@@ -339,15 +359,28 @@ class EditorSession(
         if (evaluation?.isRecording == true) emptySet() else hiddenCandidateSurfaces
 
     /**
-     * 予測候補を選び、未確定全体（次の語の予測ではカーソル位置）をその語で確定する。
-     * 候補全体を照合するため、Mozc IDのない英語候補も同じ表示の候補へ確定できる。
+     * 予測候補を選ぶ。Mozcが部分key候補と示した場合は確定応答を待ち、実際の残り読みを確認してから表示へ反映する。
+     * それ以外は未確定全体（次の語の予測ではカーソル位置）を候補表記で確定し、IDのない英語候補も同じ経路で扱う。
      */
     fun selectPrediction(request: PredictionRequest, candidate: PredictionCandidate): Boolean {
         val result = appliedPrediction ?: return false
+        if (evaluation?.isRecording == true) return false
         if (result.request != request || !isCurrentPredictionRequest(request)) return false
         if (result.candidates.none { it == candidate }) return false
         if (candidate.value in effectiveHiddenCandidateSurfaces()) return false
-        // 予測は未確定全体を置き換えるため、入力途中のローマ字と連続タップは確定せずに捨てる。
+        if (isPotentialPartialPrediction(request, candidate)) {
+            val client = predictionClient ?: return false
+            pendingPredictionSelection = PendingPredictionSelection(
+                request = request,
+                candidate = candidate,
+                pendingRomaji = romajiComposer?.pendingText.orEmpty(),
+            )
+            pendingPrediction = null
+            appliedPrediction = null
+            client.commitPrediction(request, candidate)
+            return true
+        }
+        // 全体予測を確定するときは、従来どおり未確定全体と入力途中のローマ字を置き換える。
         abandonPendingInput()
         deletionUndo = null
         if (request.isZeroQuery) {
@@ -363,6 +396,80 @@ class EditorSession(
             if (!commitCompositionAs(candidate.value)) return false
         }
         predictionClient?.commitPrediction(request, candidate)
+        clearPredictions()
+        return true
+    }
+
+    /** MozcのSUBMIT_CANDIDATE後に届いた残りの読みを、同じ要求世代でのみ本文へ反映する。 */
+    fun applyPredictionCommitResult(result: PredictionCommitResult): Boolean {
+        val selection = pendingPredictionSelection ?: return false
+        if (selection.request != result.request || selection.candidate != result.candidate) return false
+        pendingPredictionSelection = null
+        if (!active || evaluation?.isRecording == true || !isCurrentPredictionRequest(result.request)) return false
+        if (!result.succeeded) return false
+        val mozRemaining = result.remainingReading ?: return false
+        if (result.request.isZeroQuery && mozRemaining.isNotEmpty()) return false
+        val remaining = if (result.request.isZeroQuery) {
+            ""
+        } else {
+            typedRemainingReading(result.request, mozRemaining)
+                ?.takeIf { it != result.request.reading }
+                ?: return false
+        }
+        val pendingRomaji = if (remaining.isEmpty()) "" else selection.pendingRomaji
+        return commitPredictionText(selection.request, selection.candidate, remaining, pendingRomaji)
+    }
+
+    /** CandidateWindowのkeyが入力より短い場合を選択結果で確かめる候補か返す。 */
+    private fun isPotentialPartialPrediction(request: PredictionRequest, candidate: PredictionCandidate): Boolean {
+        val key = candidate.partialKey ?: return false
+        if (request.isZeroQuery || candidate.id == null || candidate.englishVariant) return false
+        val comparable: (String) -> String = if (request.kanaModifierInsensitive) {
+            { value -> KanaModifier.stripModifiers(value) }
+        } else {
+            { value -> value }
+        }
+        val typed = comparable(request.reading)
+        val candidateKey = comparable(key)
+        return candidateKey.isNotEmpty() && typed.startsWith(candidateKey) && typed.length > candidateKey.length
+    }
+
+    /** Mozcのpreeditに残った読みを、必要なら12キーの入力表記へ対応づけて返す。 */
+    private fun typedRemainingReading(request: PredictionRequest, remaining: String): String? {
+        if (request.reading.endsWith(remaining)) return remaining
+        if (!request.kanaModifierInsensitive) return null
+        val clusters = GraphemeClusters.split(remaining).size
+        if (clusters == 0) return null
+        val typed = GraphemeClusters.split(request.reading).takeLast(clusters).joinToString("")
+        return typed.takeIf { KanaModifier.stripModifiers(it) == KanaModifier.stripModifiers(remaining) }
+    }
+
+    /** 候補を確定し、実際に残った読みがあれば新しい未確定compositionへ戻す。 */
+    private fun commitPredictionText(
+        request: PredictionRequest,
+        candidate: PredictionCandidate,
+        remainingReading: String,
+        pendingRomaji: String,
+    ): Boolean {
+        abandonPendingInput()
+        deletionUndo = null
+        if (request.isZeroQuery) {
+            val start = knownSelectionStart()
+            if (!connection.commitText(candidate.value, 1)) {
+                failClosed()
+                return false
+            }
+            updateExternalSelectionAfterCommit(candidate.value, start)
+        } else {
+            liveCore?.discardComposition()
+            liveCursorUtf16 = 0
+            if (!commitCompositionAs(candidate.value)) return false
+            val resumedReading = remainingReading + pendingRomaji
+            if (resumedReading.isNotEmpty()) {
+                if (!inputTextDirect(resumedReading, fromTwelveKey = request.kanaModifierInsensitive)) return false
+                romajiComposer?.restorePending(pendingRomaji)
+            }
+        }
         clearPredictions()
         return true
     }
@@ -2027,6 +2134,7 @@ class EditorSession(
     /** compositionの変更を記録し、待機中の要求と表示中の変換結果を無効にする。 */
     private fun markCompositionChanged() {
         revision += 1
+        pendingPredictionSelection = null
         pendingConversion = null
         appliedConversion = null
         appliedConversionCommitRequest = null
@@ -2279,7 +2387,17 @@ class EditorSession(
         connection.invalidate()
     }
 
+    /** Mozc応答を待つ部分候補の要求と入力途中ローマ字を保存する。 */
+    private data class PendingPredictionSelection(
+        val request: PredictionRequest,
+        val candidate: PredictionCandidate,
+        val pendingRomaji: String,
+    )
+
     private companion object {
+        /** 候補バーに並べる予測候補数。∨で開く一覧はこの上限を使わない。 */
+        const val MAX_PREDICTIONS_IN_BAR = 5
+
         /** 左ドラッグで行頭を探すときに読む、カーソル前の最大文字数。これより長い行はこの長さだけ消す。 */
         const val LINE_DELETE_MAX_CHARS = 1_000
 
