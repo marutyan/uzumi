@@ -6,9 +6,11 @@ import android.graphics.drawable.GradientDrawable
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import dev.uzumi.ime.R
 
 /**
  * 候補バーに並べる部品（候補、札、案内、記号のボタン）を、キーボードと同じ配色と寸法で作る。
@@ -19,8 +21,14 @@ class CandidateBarViews(private val context: Context) {
     val colors = KeyboardColors.from(context)
     private val density = context.resources.displayMetrics.density
 
-    /** 候補一つ。選択中の候補は背景色で示す。 */
-    fun item(text: String, selected: Boolean, prediction: Boolean = false, onClick: () -> Unit): TextView = TextView(context).apply {
+    /** 候補一つ。選択中の候補は背景色で示し、指定があれば長押しメニューを開く。 */
+    fun item(
+        text: String,
+        selected: Boolean,
+        prediction: Boolean = false,
+        onLongClick: (() -> Boolean)? = null,
+        onClick: () -> Unit,
+    ): TextView = TextView(context).apply {
         this.text = text
         setTextSize(TypedValue.COMPLEX_UNIT_DIP, CANDIDATE_TEXT_DP)
         setTextColor(colors.text)
@@ -37,6 +45,7 @@ class CandidateBarViews(private val context: Context) {
         }
         isClickable = true
         isFocusable = true
+        if (onLongClick != null) setOnLongClickListener { onLongClick() }
         setOnClickListener { onClick() }
         layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT)
     }
@@ -152,6 +161,7 @@ class CandidateGridView(context: Context) : ScrollView(context) {
         selected: Int,
         dividerIndex: Int? = null,
         predictionIndexes: Set<Int> = emptySet(),
+        onLongClick: ((Int) -> Boolean)? = null,
         onPick: (Int) -> Unit,
     ) {
         rows.removeAllViews()
@@ -163,7 +173,12 @@ class CandidateGridView(context: Context) : ScrollView(context) {
             chunk.forEachIndexed { column, value ->
                 val index = rowIndex * COLUMNS + column
                 if (index == dividerIndex) row.addView(views.divider())
-                row.addView(views.item(value, index == selected, index in predictionIndexes) { onPick(index) }.apply {
+                row.addView(views.item(
+                    value,
+                    index == selected,
+                    index in predictionIndexes,
+                    onLongClick = onLongClick?.let { callback -> { callback(index) } },
+                ) { onPick(index) }.apply {
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
                     maxLines = 1
                 })
@@ -195,5 +210,75 @@ class CandidateGridView(context: Context) : ScrollView(context) {
 
         /** 1行の高さ（dp）。 */
         const val ROW_HEIGHT_DP = 52f
+    }
+}
+
+/** キーボード面に重ね、候補の学習削除・非表示・取消を選ぶ小さなメニュー。 */
+class CandidateActionPanel(context: Context) : FrameLayout(context) {
+    private val views = CandidateBarViews(context)
+    private val density = context.resources.displayMetrics.density
+    private val menu = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setBackgroundColor(views.colors.bar)
+        elevation = px(8f).toFloat()
+    }
+
+    init {
+        setBackgroundColor(0x66000000)
+        isClickable = true
+        setOnClickListener { hide() }
+        addView(menu, FrameLayout.LayoutParams(px(MENU_WIDTH_DP), FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        visibility = View.GONE
+    }
+
+    /** 学習行がある候補だけ削除項目を出し、非表示と取消の操作を並べる。 */
+    fun show(
+        canDeleteLearning: Boolean,
+        onDeleteLearning: () -> Unit,
+        onHideCandidate: () -> Unit,
+    ) {
+        menu.removeAllViews()
+        if (canDeleteLearning) menu.addView(action(context.getString(R.string.candidate_action_delete_learning), onDeleteLearning))
+        menu.addView(action(context.getString(R.string.candidate_action_hide), onHideCandidate))
+        menu.addView(action(context.getString(R.string.candidate_action_cancel), ::hide))
+        visibility = View.VISIBLE
+        bringToFront()
+    }
+
+    /** メニューを閉じて候補情報を破棄する。 */
+    fun hide() {
+        visibility = View.GONE
+        menu.removeAllViews()
+    }
+
+    /** タップしやすい行のメニュー項目を作る。 */
+    private fun action(label: String, onClick: () -> Unit): TextView = TextView(context).apply {
+        text = label
+        setTextColor(views.colors.text)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, MENU_TEXT_SP)
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(px(18f), 0, px(18f), 0)
+        minHeight = px(MENU_ROW_HEIGHT_DP)
+        isClickable = true
+        isFocusable = true
+        setOnClickListener {
+            hide()
+            onClick()
+        }
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+    }
+
+    /** メニューの寸法を端末の密度に合わせてpxへ変換する。 */
+    private fun px(dp: Float): Int = (dp * density).toInt()
+
+    private companion object {
+        /** 候補操作メニューの幅（dp）。 */
+        const val MENU_WIDTH_DP = 232f
+
+        /** 候補操作メニューの各行の高さ（dp）。 */
+        const val MENU_ROW_HEIGHT_DP = 52f
+
+        /** 候補操作メニューの文字サイズ（sp）。 */
+        const val MENU_TEXT_SP = 14f
     }
 }

@@ -59,6 +59,7 @@ import dev.uzumi.ime.evaluation.OperationKind
 import dev.uzumi.ime.evaluation.TimingKind
 import dev.uzumi.ime.evaluation.TimingSample
 import dev.uzumi.ime.keyboard.CandidateBarViews
+import dev.uzumi.ime.keyboard.CandidateActionPanel
 import dev.uzumi.ime.keyboard.CandidateGridView
 import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardAction
@@ -72,6 +73,7 @@ import dev.uzumi.ime.keyboard.ToolbarBarViews
 import dev.uzumi.ime.keyboard.ToolbarPreferences
 import dev.uzumi.ime.keyboard.ToolbarTilePanel
 import dev.uzumi.ime.learning.LearningStores
+import dev.uzumi.ime.learning.HiddenCandidateStores
 import dev.uzumi.ime.live.CandidateResult
 import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.DisplaySpan
@@ -113,6 +115,7 @@ class UzumiInputMethodService : InputMethodService() {
     private var barViews: CandidateBarViews? = null
     // ∨で開く候補一覧。キーボードの面を覆って表示する。
     private var candidateGrid: CandidateGridView? = null
+    private var candidateActionPanel: CandidateActionPanel? = null
     private var toolbarPanel: ToolbarTilePanel? = null
     // 入力Viewを作ったときのキーボード設定。設定画面で変わっていれば、次に表示するときに作り直す。
     private var builtPreferences: KeyboardPreferences? = null
@@ -207,6 +210,7 @@ class UzumiInputMethodService : InputMethodService() {
         conversionWorker = worker
         // 学習の保存ファイルを別threadで先に読む。変換threadはMozcの読込みで塞がるため、そこへは積まない
         Thread({ LearningStores.get(applicationContext) }, "uzumi-learning-preload").start()
+        Thread({ HiddenCandidateStores.get(applicationContext) }, "uzumi-hidden-candidates-preload").start()
         worker.start()
         EvaluationStatusSource.provider = ::evaluationStatus
         EvaluationStatusSource.neuralMemoryRequester = { neuralConnection?.requestMemory() }
@@ -232,6 +236,7 @@ class UzumiInputMethodService : InputMethodService() {
         val views = CandidateBarViews(this)
         barViews = views
         candidateGrid?.hide()
+        candidateActionPanel?.hide()
         toolbarPanel?.hide()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -309,6 +314,9 @@ class UzumiInputMethodService : InputMethodService() {
         toolbarPanel = ToolbarTilePanel(this).also { panel ->
             keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
         }
+        candidateActionPanel = CandidateActionPanel(this).also { actionPanel ->
+            keyboardArea.addView(actionPanel, FrameLayout.LayoutParams(match, match))
+        }
         root.addView(keyboardArea, LinearLayout.LayoutParams(match, wrap))
         applyPolicyToKeyboard()
         refreshCandidates()
@@ -367,6 +375,7 @@ class UzumiInputMethodService : InputMethodService() {
         closeSession(restartedConnection = if (restarting) currentInputConnection else null)
         clearInlineSuggestions()
         candidateGrid?.hide()
+        candidateActionPanel?.hide()
         toolbarPanel?.hide()
         currentPolicy = null
         autoCapsMode = 0
@@ -469,6 +478,7 @@ class UzumiInputMethodService : InputMethodService() {
         inputViewVisible = false
         keyboardPanel?.cancelPendingInput()
         candidateGrid?.hide()
+        candidateActionPanel?.hide()
         toolbarPanel?.hide()
         stopClipboardObservation()
         clearInlineSuggestions()
@@ -480,6 +490,7 @@ class UzumiInputMethodService : InputMethodService() {
         inputViewVisible = false
         keyboardPanel?.cancelPendingInput()
         candidateGrid?.hide()
+        candidateActionPanel?.hide()
         toolbarPanel?.hide()
         stopClipboardObservation()
         closeSession()
@@ -580,6 +591,7 @@ class UzumiInputMethodService : InputMethodService() {
     /** キーボード操作を現在の編集セッションへ一度だけ送る。 */
     private fun handleKeyboardAction(action: KeyboardAction) {
         val current = session ?: return
+        current.setHiddenCandidateSurfaces(HiddenCandidateStores.get(this).all())
         OperationClassifier.keyboardAction(action, current.isLiveMode)?.let(evaluation::record)
         // Backspaceは連続削除をまとめ、絵文字一覧の開閉中は削除Undoを保ち、ほかの編集操作で記録を終える。
         if (action != KeyboardAction.Delete && action != KeyboardAction.DeleteToLineStart &&
@@ -648,6 +660,7 @@ class UzumiInputMethodService : InputMethodService() {
     private fun deliverLiveResult(sessionEpoch: Long, result: LiveResult) {
         val current = session ?: return
         if (current.sessionEpoch != sessionEpoch) return
+        current.setHiddenCandidateSurfaces(HiddenCandidateStores.get(this).all())
         if (current.applyLiveResult(result)) {
             lastAppliedLive = result.identity to System.nanoTime()
             refreshCandidates()
@@ -688,6 +701,7 @@ class UzumiInputMethodService : InputMethodService() {
     private fun deliverCandidateResult(sessionEpoch: Long, result: CandidateResult) {
         val current = session ?: return
         if (current.sessionEpoch != sessionEpoch) return
+        current.setHiddenCandidateSurfaces(HiddenCandidateStores.get(this).all())
         if (current.applyLiveCandidates(result)) refreshCandidates()
     }
 
@@ -814,10 +828,12 @@ class UzumiInputMethodService : InputMethodService() {
         val views = barViews ?: return
         val leading = barLeading ?: return
         val trailing = barTrailing ?: return
+        if (evaluation.isRecording) candidateActionPanel?.hide()
         row.removeAllViews()
         leading.removeAllViews()
         trailing.removeAllViews()
         val current = session
+        current?.setHiddenCandidateSurfaces(HiddenCandidateStores.get(this).all())
         // 評価の記録中は予測を出さず、操作数を予測導入前と同じ条件で数える。
         val predictionsShown = !evaluation.isRecording
         if (predictionsShown) current?.refreshPredictions()
@@ -837,7 +853,10 @@ class UzumiInputMethodService : InputMethodService() {
             CandidateEntry(
                 label = entry.label,
                 selected = entry.selected,
+                surface = entry.surface,
+                learnedReading = entry.learnedReading,
                 sectionBreakBefore = predictions.isNotEmpty() && index == 0,
+                isPrediction = entry.isPrediction,
                 onPick = entry.onPick,
             )
         }
@@ -883,7 +902,12 @@ class UzumiInputMethodService : InputMethodService() {
             indexes.forEach { index ->
                 val entry = entries[index]
                 if (entry.sectionBreakBefore && index != indexes.first()) candidateLine.addView(views.divider())
-                candidateLine.addView(views.item(entry.label, entry.selected, entry.isPrediction) { pickCandidate(current, entry, index) }.apply {
+                candidateLine.addView(views.item(
+                    entry.label,
+                    entry.selected,
+                    entry.isPrediction,
+                    onLongClick = { openCandidateActionMenu(current, entry) },
+                ) { pickCandidate(current, entry, index) }.apply {
                     maxLines = 1
                 })
             }
@@ -1090,6 +1114,7 @@ class UzumiInputMethodService : InputMethodService() {
             selected = entries.indexOfFirst { it.selected },
             dividerIndex = entries.indexOfFirst { it.sectionBreakBefore }.takeIf { it >= 0 },
             predictionIndexes = entries.indices.filter { entries[it].isPrediction }.toSet(),
+            onLongClick = { index -> openCandidateActionMenu(current, entries[index]) },
         ) { index ->
             grid.hide()
             pickCandidate(current, entries[index], index)
@@ -1108,6 +1133,8 @@ class UzumiInputMethodService : InputMethodService() {
     private class CandidateEntry(
         val label: String,
         val selected: Boolean,
+        val surface: String = label,
+        val learnedReading: String? = null,
         val sectionBreakBefore: Boolean = false,
         // 選ぶとすぐ確定する予測の候補か。選ぶだけの通常候補と見分けられるよう、色を変えて表示する。
         val isPrediction: Boolean = false,
@@ -1119,7 +1146,12 @@ class UzumiInputMethodService : InputMethodService() {
         current: EditorSession,
         result: PredictionResult,
         candidate: PredictionCandidate,
-    ): CandidateEntry = CandidateEntry(candidate.value, selected = false, isPrediction = true) {
+    ): CandidateEntry = CandidateEntry(
+        label = candidate.value,
+        selected = false,
+        surface = candidate.value,
+        isPrediction = true,
+    ) {
         current.selectPrediction(result.request, candidate)
     }
 
@@ -1151,6 +1183,67 @@ class UzumiInputMethodService : InputMethodService() {
         refreshCandidates()
     }
 
+    /** 長押しされた候補の学習行だけを消すか、表記を非表示一覧へ保存する小さな重ねメニューを開く。 */
+    private fun openCandidateActionMenu(shown: EditorSession?, entry: CandidateEntry): Boolean {
+        val current = shown ?: return false
+        if (evaluation.isRecording || current.policy.suppressLearning || session !== current || !inputViewVisible) return false
+        val panel = candidateActionPanel ?: return false
+        val learningStore = LearningStores.peek()
+        val reading = entry.learnedReading
+        val canDeleteLearning = reading != null && learningStore?.contains(reading, entry.surface) == true
+        candidateGrid?.hide()
+        toolbarPanel?.hide()
+        panel.show(
+            canDeleteLearning = canDeleteLearning,
+            onDeleteLearning = {
+                if (session === current && reading != null && !evaluation.isRecording && !current.policy.suppressLearning) {
+                    removeLearnedCandidate(current, reading, entry.surface)
+                } else {
+                    refreshCandidates()
+                }
+            },
+            onHideCandidate = {
+                if (session === current && !evaluation.isRecording && !current.policy.suppressLearning) {
+                    hideCandidateSurface(current, entry.surface)
+                } else {
+                    refreshCandidates()
+                }
+            },
+        )
+        return true
+    }
+
+    /** 学習行の削除をworker threadで行い、現セッションに残る同じ由来の候補も取り除く。 */
+    private fun removeLearnedCandidate(current: EditorSession, reading: String, surface: String) {
+        Thread({
+            if (!evaluation.isRecording && !current.policy.suppressLearning) {
+                val removed = LearningStores.get(applicationContext).remove(reading, surface)
+                mainHandler.post {
+                    if (session === current) {
+                        if (removed) current.removeLearnedCandidate(reading, surface)
+                        refreshCandidates()
+                    }
+                }
+            }
+        }, "uzumi-learning-remove").start()
+    }
+
+    /** 非表示表記をworker threadで保存し、同じ欄の候補と表示値へすぐ反映する。 */
+    private fun hideCandidateSurface(current: EditorSession, surface: String) {
+        Thread({
+            if (!evaluation.isRecording && !current.policy.suppressLearning) {
+                val store = HiddenCandidateStores.get(applicationContext)
+                store.hide(surface)
+                mainHandler.post {
+                    if (session === current) {
+                        current.setHiddenCandidateSurfaces(store.all())
+                        refreshCandidates()
+                    }
+                }
+            }
+        }, "uzumi-candidate-hide").start()
+    }
+
     /** 明示変換の候補（変換結果、または読みのかな・カナ）を並べる。 */
     private fun explicitEntries(current: EditorSession?): List<CandidateEntry> {
         if (current == null) return emptyList()
@@ -1158,7 +1251,12 @@ class UzumiInputMethodService : InputMethodService() {
         return current.candidateOptions().map { option ->
             val choice = option.conversionChoice
             val label = if (choice != null) option.value else getString(R.string.candidate_button_label, option.value, option.label)
-            CandidateEntry(label, selected = choice != null && option.selected) {
+            CandidateEntry(
+                label = label,
+                selected = choice != null && option.selected,
+                surface = option.value,
+                learnedReading = option.learnedReading,
+            ) {
                 if (choice != null) {
                     current.selectConversionCandidate(choice)
                     scheduleConversionTimeout(current)
@@ -1194,7 +1292,12 @@ class UzumiInputMethodService : InputMethodService() {
             })
         }
         return state.choices.map { choice ->
-            CandidateEntry(choice.value, selected = choice.value == state.currentValue) { current.selectLiveCandidate(choice) }
+            CandidateEntry(
+                label = choice.value,
+                selected = choice.value == state.currentValue,
+                surface = choice.value,
+                learnedReading = choice.learnedReading,
+            ) { current.selectLiveCandidate(choice) }
         }
     }
 

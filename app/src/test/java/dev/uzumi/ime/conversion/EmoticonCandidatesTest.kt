@@ -85,10 +85,16 @@ class EmoticonCandidatesTest {
         val judge = EmoticonJudge(userDictionary = null, learningStore = null)
 
         val mixed = EmoticonCandidates.arrangeLive(ResultSegment("わらい", "😂", listOf("😂", "笑い", "わらい")), judge)
-        assertEquals(ResultSegment("わらい", "笑い", listOf("笑い", "わらい", "😂")), mixed)
+        assertEquals(
+            ResultSegment("わらい", "笑い", listOf("笑い", "わらい", "😂"), automaticCandidates = listOf("笑い", "わらい")),
+            mixed,
+        )
 
         val onlyEmoji = EmoticonCandidates.arrangeLive(ResultSegment("にこ", "😊", listOf("😊", "☺️")), judge)
-        assertEquals(ResultSegment("にこ", "にこ", listOf("にこ", "😊", "☺️")), onlyEmoji)
+        assertEquals(
+            ResultSegment("にこ", "にこ", listOf("にこ", "😊", "☺️"), automaticCandidates = listOf("にこ")),
+            onlyEmoji,
+        )
 
         val plain = ResultSegment("かんじ", "漢字", listOf("漢字", "感じ"))
         assertEquals(plain, EmoticonCandidates.arrangeLive(plain, judge))

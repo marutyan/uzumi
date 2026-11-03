@@ -1,5 +1,21 @@
 package dev.uzumi.ime.conversion
 
+/** NG表記を候補から除き、現在値の置換時に入力文字を失わない代替表記を一か所で決める。 */
+object CandidateVisibility {
+    /** 現在値の次から候補を探し、候補が尽きた場合は編集文字を残すため入力された読みを返す。 */
+    fun nextAllowed(values: List<String>, current: String, reading: String, hidden: Set<String>): String? {
+        if (current !in hidden) return current
+        val index = values.indexOf(current)
+        val ordered = if (index >= 0) values.drop(index + 1) + values.take(index) else values
+        return ordered.firstOrNull { it.isNotEmpty() && it !in hidden }
+            ?: reading.takeIf(String::isNotEmpty)
+    }
+
+    /** 評価記録中は比較条件を保つため、候補を取り除かず元の並びを返す。 */
+    fun <T> filter(values: List<T>, hidden: Set<String>, isRecording: Boolean, surface: (T) -> String): List<T> =
+        if (isRecording || hidden.isEmpty()) values else values.filterNot { surface(it) in hidden }
+}
+
 /**
  * 一つの変換要求を識別する世代情報。
  * 応答はこの値が編集セッションの現在値と一致する場合だけ適用し、古い応答による上書きを防ぐ。
@@ -63,6 +79,14 @@ data class ConversionSegment(
     val learnedReading: String? = null,
     // 同梱の英語辞書から追加した候補。確定時は英語語彙の学習規則を使う。
     val englishVariant: Boolean = false,
+    // 非表示候補を避けている間の表示だけを保存し、評価記録時や解除時に元へ戻す。
+    val unfilteredValue: String? = null,
+    /** 非表示候補を避ける前の候補選択状態。 */
+    val unfilteredChosen: Boolean? = null,
+    /** 非表示候補を避ける前のユーザー辞書由来の判定。 */
+    val unfilteredFromUserDictionary: Boolean? = null,
+    /** 非表示候補を避ける前の学習語の読み。nullも元の値として復元する。 */
+    val unfilteredLearnedReading: String? = null,
 ) {
     /** 表示中の表記がエンジンの候補か。falseの文節を含む確定は、エンジンへ区切りと表記を学習させない。 */
     val engineCandidate: Boolean
@@ -82,6 +106,8 @@ data class ConversionCandidate(
     val learnedReading: String? = null,
     // 同梱の英語辞書から追加した候補。確定時は英語語彙の学習規則を使う。
     val englishVariant: Boolean = false,
+    // ライブ表示の自動置換では使わない顔文字・絵文字か。ユーザー辞書の品詞判定もWorkerで反映する。
+    val isEmoticon: Boolean = false,
 ) {
     companion object {
         /** エンジンの候補一覧に無い、表示中の表記そのものを候補にするときのID。エンジン・登録語・学習語のIDと重ならない。 */

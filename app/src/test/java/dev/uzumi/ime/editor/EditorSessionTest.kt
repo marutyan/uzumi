@@ -20,6 +20,8 @@ import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.FakeLiveConverter
 import dev.uzumi.ime.live.FixedRange
 import dev.uzumi.ime.live.LiveConversionCore
+import dev.uzumi.ime.live.ResultSegment
+import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.ConversionRequest as LiveRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -887,6 +889,134 @@ class EditorSessionTest {
         assertEquals("ぐーぐる", committed.learnedReading)
         assertTrue(committed.englishVariant)
         assertFalse(committed.engineCandidate)
+    }
+
+    /** 非表示表記は明示変換と予測から除き、表示値は顔文字を飛ばして次候補へ移す。 */
+    @Test
+    fun hiddenCandidatesAreRemovedFromExplicitCandidatesAndPredictions() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val conversionClient = FakeConversionClient()
+        val predictionClient = FakePredictionClient()
+        val session = EditorSession(
+            connection,
+            normalPolicy(),
+            conversionClient = conversionClient,
+            predictionClient = predictionClient,
+        )
+        assertTrue(session.inputText("かんじ"))
+        session.setHiddenCandidateSurfaces(setOf("NG", "予測NG"))
+        assertTrue(session.convert())
+        val request = conversionClient.requests.single()
+        val candidates = listOf(
+            ConversionCandidate(0, "NG", "かんじ"),
+            ConversionCandidate(1, "😂", "かんじ", isEmoticon = true),
+            ConversionCandidate(2, "安全", "かんじ"),
+            ConversionCandidate(3, "学習語", "かんじ", learnedReading = "かんじ"),
+        )
+        val result = ConversionResult(
+            request,
+            listOf(ConversionSegment("かんじ", "NG", candidates = candidates)),
+            candidates,
+        )
+
+        assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(result)))
+        assertEquals("安全", connection.text)
+        assertEquals(listOf("😂", "安全", "学習語"), session.candidateOptions().map { it.value })
+        assertTrue(session.removeLearnedCandidate("かんじ", "学習語"))
+        assertEquals(listOf("😂", "安全"), session.candidateOptions().map { it.value })
+
+        assertTrue(session.refreshPredictions())
+        val predictionRequest = predictionClient.requests.single()
+        assertTrue(session.applyPredictionResult(PredictionResult(predictionRequest, listOf(
+            PredictionCandidate(4, "予測NG"),
+            PredictionCandidate(5, "別候補"),
+        ))))
+        assertFalse(session.selectPrediction(predictionRequest, candidateId = 4))
+        assertEquals(listOf("別候補"), session.predictionCandidates().map { it.value })
+    }
+
+    /** 安全候補が尽きたら読みを保ち、表示差し替え後も変換workerへ送る元要求を維持する。 */
+    @Test
+    fun hiddenExplicitFallbackKeepsReadingAndOriginalCommitRequest() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        assertTrue(session.inputText("かんじ"))
+        assertTrue(session.convert())
+        val request = client.requests.single()
+        val candidates = listOf(
+            ConversionCandidate(0, "NG", "かんじ"),
+            ConversionCandidate(1, "😂", "かんじ", isEmoticon = true),
+        )
+        assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(
+            ConversionResult(request, listOf(ConversionSegment("かんじ", "NG", candidates = candidates)), candidates),
+        )))
+
+        assertTrue(session.setHiddenCandidateSurfaces(setOf("NG")))
+        assertEquals("かんじ", connection.text)
+        assertTrue(session.commitComposition())
+        assertEquals(listOf(request), client.committedAll)
+        assertEquals(false, client.committedAllSegments.single().second.single().engineCandidate)
+    }
+
+    /** 評価記録中はNG候補を除外せず、記録を止めるとライブ表示と候補へ反映する。 */
+    @Test
+    fun hiddenCandidatesDoNotChangeEvaluationConditions() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val predictionClient = FakePredictionClient()
+        val counter = EvaluationCounter()
+        val session = liveSession(connection, client, evaluation = counter, predictionClient = predictionClient)
+        assertTrue(counter.start("N01"))
+        session.setHiddenCandidateSurfaces(setOf("良い", "評価中の予測"))
+
+        typeLive(session, client, "よい")
+        assertEquals("良い", connection.text)
+        assertTrue(session.liveCandidateState()!!.choices.any { it.value == "良い" })
+        assertTrue(session.refreshPredictions())
+        val predictionRequest = predictionClient.requests.single()
+        assertTrue(session.applyPredictionResult(PredictionResult(predictionRequest, listOf(
+            PredictionCandidate(6, "評価中の予測"),
+        ))))
+        assertEquals(listOf("評価中の予測"), session.predictionCandidates().map { it.value })
+
+        counter.finish()
+        assertTrue(session.setHiddenCandidateSurfaces(setOf("良い", "評価中の予測")))
+        assertEquals("酔い", connection.text)
+        assertTrue(session.liveCandidateState()!!.choices.none { it.value == "良い" })
+    }
+
+    /** 取り直し候補でNGの次候補が見つかったら、CoreとEditorの表示を同じ値へ更新する。 */
+    @Test
+    fun hiddenLiveCandidateRefreshUpdatesEditorComposition() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val core = LiveConversionCore()
+        val session = EditorSession(
+            connection = connection,
+            policy = normalPolicy(),
+            sessionEpoch = 19,
+            liveCore = core,
+            liveClient = client,
+        )
+        session.setHiddenCandidateSurfaces(setOf("NG"))
+        assertTrue(session.inputText("かんじ"))
+        val liveRequest = client.requests.single().second
+        assertTrue(session.applyLiveResult(LiveResult(
+            liveRequest.identity,
+            listOf(ResultSegment("かんじ", "NG", listOf("NG"), automaticCandidates = listOf("NG"))),
+        )))
+        assertEquals("かんじ", connection.text)
+        assertTrue(session.requestLiveCandidates())
+        val candidateRequest = client.candidateRequests.single()
+
+        assertTrue(session.applyLiveCandidates(CandidateResult(
+            candidateRequest,
+            listOf("NG", "次"),
+            automaticCandidates = listOf("NG", "次"),
+        )))
+        assertEquals("次", core.display)
+        assertEquals("次", connection.text)
     }
 
     /** 変換キーを押すたび注目文節の候補を循環し、候補バーの選択表示も追従する。 */
@@ -2403,6 +2533,7 @@ class EditorSessionTest {
         policy: InputFieldPolicy = normalPolicy(),
         styler: (String, DisplaySpan?) -> CharSequence = { text, _ -> text },
         evaluation: EvaluationCounter? = null,
+        predictionClient: PredictionClient? = null,
     ): EditorSession {
         return EditorSession(
             connection = connection,
@@ -2414,6 +2545,7 @@ class EditorSessionTest {
             liveClient = client,
             compositionStyler = styler,
             evaluation = evaluation,
+            predictionClient = predictionClient,
         )
     }
 

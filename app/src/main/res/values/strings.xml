@@ -73,6 +73,9 @@
     <string name="open_settings">Uzumiの設定を開く</string>
     <string name="close_keyboard">キーボードを閉じる</string>
     <string name="candidate_list_toggle">候補の一覧を開く、または閉じる</string>
+    <string name="candidate_action_delete_learning">この学習を削除</string>
+    <string name="candidate_action_hide">この候補を表示しない</string>
+    <string name="candidate_action_cancel">キャンセル</string>
     <string name="toolbar_open">機能タイルを開く</string>
     <string name="toolbar_paste">貼り付け</string>
     <string name="clipboard_suggestion_label">📋 %1$s</string>
@@ -126,6 +129,9 @@
     <string name="settings_clear_learning_confirm">Uzumiが覚えた変換をすべて消します。元に戻せません。</string>
     <string name="settings_clear_learning_ok">消す</string>
     <string name="settings_clear_learning_done">学習履歴を消しました</string>
+    <string name="settings_hidden_candidates">表示しない候補</string>
+    <string name="settings_hidden_candidates_empty">表示しない候補はありません。</string>
+    <string name="settings_hidden_candidate_unhide">解除</string>
     <string name="settings_section_developer">開発用</string>
     <string name="settings_neural_engine">変換エンジン（開発用）</string>
     <string name="settings_neural_engine_description">ライブ変換で使う変換エンジンを選びます。次に入力欄を開いたときから反映されます。モデルを端末に置いていない項目は選べません。</string>

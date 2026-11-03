@@ -155,7 +155,7 @@ object EmoticonCandidates {
         } else {
             segment.surface
         }
-        return segment.copy(surface = surface, candidates = ranked)
+        return segment.copy(surface = surface, candidates = ranked, automaticCandidates = ranked.filterNot(isEmoticon))
     }
 
     /**
@@ -166,13 +166,18 @@ object EmoticonCandidates {
     fun arrangeExplicit(conversion: EngineConversion, judge: EmoticonJudge): EngineConversion {
         val isEmoticon = { candidate: ConversionCandidate -> judge.isEmoticon(candidate.reading, candidate.value) }
         val ranked = rank(conversion.headCandidates, isEmoticon) { judge.isPromoted(it.learnedReading ?: it.reading, it.value) }
+            .map { it.copy(isEmoticon = isEmoticon(it)) }
         val segments = conversion.segments.mapIndexed { index, segment ->
-            if (!judge.isEmoticon(segment.reading, segment.value)) return@mapIndexed segment
+            val markedCandidates = segment.candidates.map { candidate ->
+                candidate.copy(isEmoticon = judge.isEmoticon(candidate.reading, candidate.value))
+            }
+            val markedSegment = segment.copy(candidates = markedCandidates)
+            if (!judge.isEmoticon(segment.reading, segment.value)) return@mapIndexed markedSegment
             val replacement = ranked.takeIf { index == 0 }
                 ?.firstOrNull { it.reading == segment.reading && !isEmoticon(it) }
                 ?.value
                 ?: segment.reading
-            segment.copy(value = replacement, fromUserDictionary = true)
+            markedSegment.copy(value = replacement, fromUserDictionary = true)
         }
         return EngineConversion(segments = segments, headCandidates = ranked)
     }

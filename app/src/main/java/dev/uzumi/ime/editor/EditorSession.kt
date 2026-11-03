@@ -1,6 +1,7 @@
 package dev.uzumi.ime.editor
 
 import dev.uzumi.ime.conversion.ConversionCandidate
+import dev.uzumi.ime.conversion.CandidateVisibility
 import dev.uzumi.ime.conversion.ConversionClient
 import dev.uzumi.ime.conversion.ConversionOutcome
 import dev.uzumi.ime.conversion.ConversionRequest
@@ -12,6 +13,7 @@ import dev.uzumi.ime.conversion.PredictionClient
 import dev.uzumi.ime.conversion.PredictionRequest
 import dev.uzumi.ime.conversion.PredictionResult
 import dev.uzumi.ime.conversion.SegmentedLiveConverter
+import dev.uzumi.ime.conversion.EmoticonText
 import dev.uzumi.ime.conversion.liveLearningUnits
 import dev.uzumi.ime.evaluation.ConversionProgress
 import dev.uzumi.ime.evaluation.CorrectnessJudge
@@ -71,6 +73,8 @@ class EditorSession(
     // 予測も入力世代とsession epochが一致する場合だけ候補へ表示する。
     private var pendingPrediction: PredictionRequest? = null
     private var appliedPrediction: PredictionResult? = null
+    // 設定から読み込んだNG表記。評価中は適用せず、表示と候補の条件を元へ戻す。
+    private var hiddenCandidateSurfaces: Set<String> = emptySet()
     private var appliedConversion: ConversionResult? = null
     // 候補の選択で画面用revisionを更新しても、変換エンジンが保持する要求との一致を保つ。
     private var appliedConversionCommitRequest: ConversionRequest? = null
@@ -174,19 +178,47 @@ class EditorSession(
     /** 変換結果を表示中なら注目文節の変換候補、そうでなければ現在の読みから基本候補を作る。 */
     fun candidateOptions(): List<CandidateOption> {
         if (liveCore != null) return emptyList()
+        val hidden = effectiveHiddenCandidateSurfaces()
         currentConversion()?.let { conversion ->
             val segmentIndex = focusedConversionSegmentIndex
             val segment = conversion.segments.getOrNull(segmentIndex) ?: return emptyList()
-            return segmentCandidates(conversion, segmentIndex).map { candidate ->
+            return CandidateVisibility.filter(segmentCandidates(conversion, segmentIndex), hidden, isRecording = false) { it.value }
+                .map { candidate ->
                 CandidateOption(
                     value = candidate.value,
                     label = "",
                     conversionChoice = ConversionChoice(conversion.request, candidate.id, segmentIndex),
                     selected = candidate.value == segment.value,
+                    learnedReading = candidate.learnedReading,
                 )
             }
         }
-        return BasicCandidateProvider.candidates(buffer.reading, policy.suppressSuggestions)
+        return CandidateVisibility.filter(
+            BasicCandidateProvider.candidates(buffer.reading, policy.suppressSuggestions),
+            hidden,
+            isRecording = false,
+        ) { it.value }
+    }
+
+    /** 学習削除後に現在の変換結果からも該当候補を外し、次の再変換まで古い候補を残さない。 */
+    fun removeLearnedCandidate(reading: String, surface: String): Boolean {
+        val conversion = appliedConversion ?: return false
+        var changed = false
+        val filtered = conversion.copy(
+            segments = conversion.segments.map { segment ->
+                val candidates = segment.candidates.filterNot {
+                    it.learnedReading == reading && it.value == surface
+                }
+                if (candidates.size != segment.candidates.size) changed = true
+                segment.copy(candidates = candidates)
+            },
+            headCandidates = conversion.headCandidates.filterNot {
+                it.learnedReading == reading && it.value == surface
+            },
+        )
+        if (!changed && filtered.headCandidates.size == conversion.headCandidates.size) return false
+        appliedConversion = filtered
+        return true
     }
 
     /** 現在の読みまたは直前の確定文字列に対するMozc予測を依頼し、古い候補を直ちに外す。 */
@@ -221,7 +253,11 @@ class EditorSession(
         val result = appliedPrediction?.takeIf { isCurrentPredictionRequest(it.request) } ?: return null
         val shown = regularCandidateValues().toMutableSet()
         if (hasComposition) shown += ownedDisplay
-        val candidates = result.candidates.filterNot { it.value in shown }
+        val candidates = CandidateVisibility.filter(
+            result.candidates.filterNot { it.value in shown },
+            effectiveHiddenCandidateSurfaces(),
+            evaluation?.isRecording == true,
+        ) { it.value }
         val firstEnglish = candidates.indexOfFirst(PredictionCandidate::englishVariant)
         val keepEnglish = firstEnglish < 0 || candidates.take(firstEnglish).any { it.id != null }
         return result.copy(candidates = candidates.filter { !it.englishVariant || keepEnglish })
@@ -251,6 +287,38 @@ class EditorSession(
         return selectPrediction(request, candidate)
     }
 
+    /** NG表記を通常候補と表示値へ反映し、評価記録中は空の一覧にして元の条件へ戻す。 */
+    fun setHiddenCandidateSurfaces(surfaces: Set<String>): Boolean {
+        val effective = if (evaluation?.isRecording == true) emptySet() else surfaces.toSet()
+        if (effective == hiddenCandidateSurfaces) return false
+        hiddenCandidateSurfaces = effective
+        val core = liveCore
+        if (core != null) {
+            val before = core.segments
+            val update = core.setHiddenCandidateSurfaces(effective)
+            return update.handled && update.rejection == null && applyLiveUpdate(update, before)
+        }
+        val conversion = currentConversion() ?: return false
+        val filtered = filterConversion(conversion)
+        if (filtered.display == conversion.display) return false
+        val nextRevision = revision + 1
+        val updated = filtered.copy(request = filtered.request.copy(revision = nextRevision))
+        buffer.setDisplay(updated.display)
+        revision = nextRevision
+        pendingConversion = null
+        failedConversionRevision = null
+        if (!synchronizeComposition(updated, focusedConversionSegmentIndex)) {
+            failClosed()
+            return false
+        }
+        appliedConversion = updated
+        return true
+    }
+
+    /** 評価状態を毎回参照し、記録中に隠し一覧が候補へ残らないようにする。 */
+    private fun effectiveHiddenCandidateSurfaces(): Set<String> =
+        if (evaluation?.isRecording == true) emptySet() else hiddenCandidateSurfaces
+
     /**
      * 予測候補を選び、未確定全体（次の語の予測ではカーソル位置）をその語で確定する。
      * 候補全体を照合するため、Mozc IDのない英語候補も同じ表示の候補へ確定できる。
@@ -259,6 +327,7 @@ class EditorSession(
         val result = appliedPrediction ?: return false
         if (result.request != request || !isCurrentPredictionRequest(request)) return false
         if (result.candidates.none { it == candidate }) return false
+        if (candidate.value in effectiveHiddenCandidateSurfaces()) return false
         // 予測は未確定全体を置き換えるため、入力途中のローマ字と連続タップは確定せずに捨てる。
         abandonPendingInput()
         deletionUndo = null
@@ -1063,6 +1132,7 @@ class EditorSession(
         val segment = conversion.segments.getOrNull(choice.segmentIndex) ?: return false
         val candidate = segmentCandidates(conversion, choice.segmentIndex)
             .firstOrNull { it.id == choice.candidateId } ?: return false
+        if (candidate.value in effectiveHiddenCandidateSurfaces()) return false
         deletionUndo = null
         val updated = segment.copy(
             value = candidate.value,
@@ -1070,6 +1140,10 @@ class EditorSession(
             chosen = true,
             learnedReading = candidate.learnedReading,
             englishVariant = candidate.englishVariant,
+            unfilteredValue = null,
+            unfilteredChosen = null,
+            unfilteredFromUserDictionary = null,
+            unfilteredLearnedReading = null,
         )
         return updateExplicitConversionSegment(conversion, choice.segmentIndex, updated)
     }
@@ -1084,7 +1158,9 @@ class EditorSession(
         if (!active || outcome.request != pending) return false
         pendingConversion = null
         if (pending.revision != revision || pending.reading != buffer.reading) return false
-        val converted = (outcome as? ConversionOutcome.Converted)?.result?.takeIf(ConversionResult::isConsistent)
+        val converted = (outcome as? ConversionOutcome.Converted)?.result
+            ?.takeIf(ConversionResult::isConsistent)
+            ?.let(::filterConversion)
         if (converted == null) {
             failedConversionRevision = revision
             return false
@@ -1117,6 +1193,51 @@ class EditorSession(
             }
         }
         return result.copy(segments = segments)
+    }
+
+    /** 非表示一覧にある現在値を次の安全候補へ置き換え、設定解除時に元の表示と由来を戻せるよう保持する。 */
+    private fun filterConversion(conversion: ConversionResult): ConversionResult {
+        val hidden = effectiveHiddenCandidateSurfaces()
+        return conversion.copy(segments = conversion.segments.mapIndexed { index, segment ->
+            val original = segment.unfilteredValue ?: segment.value
+            if (original !in hidden) {
+                if (segment.unfilteredValue == null) segment else segment.copy(
+                    value = original,
+                    chosen = segment.unfilteredChosen ?: segment.chosen,
+                    fromUserDictionary = segment.unfilteredFromUserDictionary ?: segment.fromUserDictionary,
+                    learnedReading = segment.unfilteredLearnedReading,
+                    unfilteredValue = null,
+                    unfilteredChosen = null,
+                    unfilteredFromUserDictionary = null,
+                    unfilteredLearnedReading = null,
+                )
+            } else {
+                val candidates = segmentCandidates(conversion, index)
+                val safeCandidates = candidates.filterNot { it.isEmoticon || EmoticonText.isEmoticon(it.value) }
+                val replacement = CandidateVisibility.nextAllowed(
+                    safeCandidates.map { it.value },
+                    original,
+                    segment.reading,
+                    hidden,
+                ) ?: segment.reading
+                val replacementCandidate = safeCandidates.firstOrNull { it.value == replacement }
+                segment.copy(
+                    value = replacement,
+                    chosen = false,
+                    // 自動差し替えはユーザー選択ではないため、Mozcの元の先頭候補を誤って学習させない。
+                    fromUserDictionary = true,
+                    learnedReading = replacementCandidate?.learnedReading,
+                    unfilteredValue = original,
+                    unfilteredChosen = segment.unfilteredChosen ?: segment.chosen,
+                    unfilteredFromUserDictionary = segment.unfilteredFromUserDictionary ?: segment.fromUserDictionary,
+                    unfilteredLearnedReading = if (segment.unfilteredValue != null) {
+                        segment.unfilteredLearnedReading
+                    } else {
+                        segment.learnedReading
+                    },
+                )
+            }
+        })
     }
 
     /** 時間超過した要求を取り下げ、遅れて届いた応答を適用しないようにする。 */
@@ -1186,7 +1307,9 @@ class EditorSession(
      * 候補行から選択した表記をcompositionへ反映する。機密欄では拒否する。
      */
     fun applyCandidate(value: String): Boolean {
-        if (!active || liveCore != null || policy.suppressSuggestions || value.isEmpty() || buffer.isEmpty) return false
+        if (!active || liveCore != null || policy.suppressSuggestions || value.isEmpty() ||
+            value in effectiveHiddenCandidateSurfaces() || buffer.isEmpty
+        ) return false
         abandonPendingInput()
         markCompositionChanged()
         buffer.setDisplay(value)
@@ -1480,8 +1603,10 @@ class EditorSession(
         val core = liveCore ?: return false
         if (!active) return false
         candidatesOutstanding = false
+        val before = core.segments
         val update = core.onCandidateResult(result)
-        return update.handled && update.rejection == null
+        if (!update.handled || update.rejection != null) return false
+        return update.commands.isEmpty() || applyLiveUpdate(update, before)
     }
 
     /**

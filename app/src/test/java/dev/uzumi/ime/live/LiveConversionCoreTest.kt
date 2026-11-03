@@ -332,6 +332,59 @@ class LiveConversionCoreTest {
         assertEquals(RejectReason.STALE_CANDIDATE, driver.core.selectCandidate(otherSegment).rejection)
     }
 
+    /** 非表示にしたライブ表示は次の顔文字・絵文字以外の候補へ移り、解除すると元の表示へ戻る。 */
+    @Test
+    fun hiddenLiveSurfaceUsesNextNonEmoticonAndRestoresOriginal() {
+        val core = LiveConversionCore()
+        core.startField(LiveFieldPolicy.NORMAL)
+        core.setHiddenCandidateSurfaces(setOf("禁"))
+        val request = assertNotNullAndGet(core.inputText("かんじ").request)
+        val result = ConversionResult(
+            request.identity,
+            listOf(
+                ResultSegment(
+                    "かんじ",
+                    "禁",
+                    candidates = listOf("禁", "😂", "次"),
+                    automaticCandidates = listOf("禁", "次"),
+                ),
+            ),
+        )
+
+        assertNull(core.onConversionResult(result).rejection)
+        assertEquals("次", core.display)
+        assertTrue(core.candidateBar()!!.choices.none { it.value == "禁" })
+
+        core.setHiddenCandidateSurfaces(emptySet())
+        assertEquals("禁", core.display)
+        assertEquals(SegmentState.PROVISIONAL, core.segments.single().state)
+    }
+
+    /** 非表示の置換候補を手で選んだ後、別の設定変更でも元の仮表示状態へ巻き戻さない。 */
+    @Test
+    fun choosingReplacementClearsHiddenSurfaceBackup() {
+        val core = LiveConversionCore()
+        core.startField(LiveFieldPolicy.NORMAL)
+        core.setHiddenCandidateSurfaces(setOf("禁"))
+        val request = assertNotNullAndGet(core.inputText("かんじ").request)
+        core.onConversionResult(
+            ConversionResult(
+                request.identity,
+                listOf(ResultSegment("かんじ", "禁", listOf("禁", "次"), automaticCandidates = listOf("禁", "次"))),
+            ),
+        )
+
+        val choice = core.candidateBar()!!.choices.single { it.value == "次" }
+        assertNull(core.selectCandidate(choice).rejection)
+        assertEquals(SegmentState.CHOSEN, core.segments.single().state)
+        core.setHiddenCandidateSurfaces(setOf("禁", "別"))
+
+        assertEquals("次", core.display)
+        assertEquals(SegmentState.CHOSEN, core.segments.single().state)
+        assertNull(core.segments.single().unfilteredSurface)
+        assertNull(core.segments.single().unfilteredState)
+    }
+
     /** 候補選択後は、選択前の結果も、chosenの境界をまたぐ再分割も捨てる。 */
     @Test
     fun boundaryChangeAfterCandidateSelectionIsRejected() {

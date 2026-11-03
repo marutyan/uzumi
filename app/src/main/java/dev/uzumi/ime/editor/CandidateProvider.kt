@@ -12,6 +12,8 @@ data class CandidateOption(
     val conversionChoice: ConversionChoice? = null,
     // 注目文節で今表示している候補か。候補バーで選択中として示す。
     val selected: Boolean = false,
+    // 候補そのものがUzumi側の学習記録から追加された場合だけ削除項目へ渡す。
+    val learnedReading: String? = null,
 )
 
 /**

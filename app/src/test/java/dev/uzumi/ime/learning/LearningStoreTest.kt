@@ -205,10 +205,26 @@ class LearningStoreTest {
         store.record("かんじ", "幹事")
         store.record("かんじ", "漢字")
 
+        assertTrue(store.contains("かんじ", "幹事"))
         assertTrue(store.remove("かんじ", "幹事"))
         assertFalse(store.remove("かんじ", "幹事"))
 
+        assertFalse(store.contains("かんじ", "幹事"))
         assertEquals(listOf("漢字"), store().allWords().map { it.surface })
+    }
+
+    /** 非表示表記はno_backup用のStoreへ保存し、タブ・改行・絵文字を含む表記もそのまま読み戻す。 */
+    @Test
+    fun hiddenCandidatesAreSavedAndRestored() {
+        val hiddenFile = File(directory, "hidden-candidates.txt")
+        val store = HiddenCandidateStore(hiddenFile)
+        val surface = "NG\t候補\n😀"
+
+        assertTrue(store.hide(surface))
+        assertFalse(store.hide(surface))
+        assertEquals(setOf(surface), HiddenCandidateStore(hiddenFile).all())
+        assertTrue(HiddenCandidateStore(hiddenFile).unhide(surface))
+        assertTrue(HiddenCandidateStore(hiddenFile).all().isEmpty())
     }
 
     /** 全消去は保存ファイルを空にし、エンジンが動いていればエンジンへ、動いていなければファイルの消去を依頼する。 */
