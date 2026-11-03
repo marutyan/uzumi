@@ -57,6 +57,7 @@ import dev.uzumi.ime.editor.AndroidInputConnectionPort
 import dev.uzumi.ime.editor.EditorSession
 import dev.uzumi.ime.editor.EditPanelAction
 import dev.uzumi.ime.editor.EditPanelContextAction
+import dev.uzumi.ime.editor.EditPanelRules
 import dev.uzumi.ime.editor.InlineAutofillPolicy
 import dev.uzumi.ime.editor.InputFieldPolicy
 import dev.uzumi.ime.evaluation.ConversionProgress
@@ -1015,6 +1016,7 @@ class UzumiInputMethodService : InputMethodService() {
         if (evaluation.isRecording) {
             clipboardHistoryPanel?.hide()
             clipboardHistorySessionEpoch = null
+            hideEditPanel()
         }
         keyboardPanel?.setComposing(session?.hasComposition == true)
         keyboardPanel?.setSegmentResizable(session?.canResizeSegment == true)
@@ -1224,7 +1226,7 @@ class UzumiInputMethodService : InputMethodService() {
                 ToolbarAction.UNDO -> current?.let {
                     it.canUndoDeletion || it.liveCandidateState()?.canUndo == true
                 } == true
-                ToolbarAction.EDIT -> current?.isActive == true && inputViewVisible
+                ToolbarAction.EDIT -> canOpenEditPanel()
                 ToolbarAction.MICROPHONE -> findEnabledVoiceInputMethod() != null
                 else -> true
             }
@@ -1323,6 +1325,10 @@ class UzumiInputMethodService : InputMethodService() {
         switchInputMethod(target.first.id, target.second)
     }
 
+    /** 現在の欄・表示・評価の状態で編集パネルを開けるかを返す。 */
+    private fun canOpenEditPanel(): Boolean =
+        EditPanelRules.canOpen(session?.isActive == true, inputViewVisible, evaluation.isRecording)
+
     /** 編集パネルを開き、他のキーボード面overlayを閉じる。 */
     private fun showEditPanel() {
         val panel = editPanel ?: return
@@ -1330,6 +1336,7 @@ class UzumiInputMethodService : InputMethodService() {
             hideEditPanel()
             return
         }
+        if (!canOpenEditPanel()) return
         hideKeyboardOverlays(except = KeyboardOverlay.EDIT)
         session?.refreshSelectionFromEditor()
         editPanelSelectionMode = false
@@ -1368,6 +1375,10 @@ class UzumiInputMethodService : InputMethodService() {
         if (action == EditPanelAction.TOGGLE_SELECTION) {
             editPanelSelectionMode = !editPanelSelectionMode
             refreshEditPanelState()
+            return
+        }
+        if (evaluation.isRecording) {
+            hideEditPanel()
             return
         }
         val current = session?.takeIf { it.isActive } ?: return

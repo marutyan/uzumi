@@ -126,6 +126,15 @@ class EditorSessionTest {
         assertFalse(session.hasComposition)
     }
 
+    /** 評価の記録中は記録条件を変えないよう編集パネルを開かず、表示中の欄でだけ開ける。 */
+    @Test
+    fun editPanelCannotOpenWhileEvaluationIsRecording() {
+        assertTrue(EditPanelRules.canOpen(sessionActive = true, inputViewVisible = true, evaluationRecording = false))
+        assertFalse(EditPanelRules.canOpen(sessionActive = true, inputViewVisible = true, evaluationRecording = true))
+        assertFalse(EditPanelRules.canOpen(sessionActive = false, inputViewVisible = true, evaluationRecording = false))
+        assertFalse(EditPanelRules.canOpen(sessionActive = true, inputViewVisible = false, evaluationRecording = false))
+    }
+
     /** 選択モードの矢印キーはShiftキーの押下と解放で挟み、入力欄に記録されるShift状態で選択を伸ばさせる。 */
     @Test
     fun shiftedEditKeyStrokeWrapsArrowWithShiftKeyPressAndRelease() {

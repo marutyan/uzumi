@@ -54,6 +54,10 @@ object EditPanelRules {
         return EditPanelSelection(nextAnchor, nextFocus)
     }
 
+    /** 編集パネルを開けるか。評価の記録中は操作数の記録条件を変えないため、定型文の挿入と同じく開かない。 */
+    fun canOpen(sessionActive: Boolean, inputViewVisible: Boolean, evaluationRecording: Boolean): Boolean =
+        sessionActive && inputViewVisible && !evaluationRecording
+
     /** パスワード欄と選択・クリップボード状態から編集パネルの操作可否を決める。 */
     fun isEnabled(
         action: EditPanelAction,
