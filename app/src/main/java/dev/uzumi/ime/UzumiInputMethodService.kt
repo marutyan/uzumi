@@ -885,20 +885,18 @@ class UzumiInputMethodService : InputMethodService() {
 
     /** clipboard listenerが届いた時点の欄・学習・評価状態を本文なしで記録する。 */
     private fun clipboardHistoryCapturePolicy(): ClipboardHistoryCapturePolicy {
-        val policy = currentPolicy
-        return ClipboardHistoryCapturePolicy(
-            sensitiveField = policy?.isSensitive ?: true,
-            learningSuppressed = policy?.suppressLearning ?: true,
-            evaluationRecording = evaluation.isRecording,
-        )
+        return ClipboardHistoryRules.capturePolicy(currentPolicy, evaluation.isRecording)
     }
 
     /** 履歴パネルを開ける表示状態、設定、入力欄、評価状態かを一か所で確認する。 */
     private fun canShowClipboardHistory(): Boolean {
         val current = session
         return inputViewVisible && current?.isActive == true &&
-            UzumiSettings.isClipboardHistoryEnabled(this) && !current.policy.suppressLearning &&
-            !evaluation.isRecording
+            ClipboardHistoryRules.mayShowHistory(
+                current.policy,
+                historyEnabled = UzumiSettings.isClipboardHistoryEnabled(this),
+                evaluationRecording = evaluation.isRecording,
+            )
     }
 
     /** キーボード面へ履歴を重ね、候補一覧や機能一覧とは同時に表示しない。 */

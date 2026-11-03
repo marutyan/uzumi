@@ -1,6 +1,7 @@
 package dev.uzumi.ime.clipboard
 
 import android.util.AtomicFile
+import dev.uzumi.ime.editor.InputFieldPolicy
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -25,7 +26,6 @@ internal data class ClipboardHistoryIdentity(
 /** clip変更通知を受けた瞬間の欄の制限を、遅延処理後も維持する。 */
 internal data class ClipboardHistoryCapturePolicy(
     val sensitiveField: Boolean,
-    val learningSuppressed: Boolean,
     val evaluationRecording: Boolean,
 )
 
@@ -37,10 +37,23 @@ internal object ClipboardHistoryRules {
     /** 未固定の履歴に残す最大件数。固定項目はこの上限に含めない。 */
     const val MAX_UNPINNED_ITEMS = 30
 
-    /** 機密clip、機密欄、学習禁止欄の本文を履歴へ保存してよいか判定する。 */
+    /** 機密clip、機密欄（パスワード欄と個人学習を禁じた欄）、評価の記録中の本文を履歴へ保存してよいか判定する。 */
     fun mayStoreText(clipboardSensitive: Boolean, capturePolicy: ClipboardHistoryCapturePolicy): Boolean =
-        !clipboardSensitive && !capturePolicy.sensitiveField && !capturePolicy.learningSuppressed &&
-            !capturePolicy.evaluationRecording
+        !clipboardSensitive && !capturePolicy.sensitiveField && !capturePolicy.evaluationRecording
+
+    /**
+     * 欄の条件から履歴の保存条件を作る。設定の「学習OFF」は変換の学習だけの設定なので履歴を止めず、
+     * 欄の種類（パスワード欄、IME_FLAG_NO_PERSONALIZED_LEARNING）だけで決める。欄が不明なら機密欄として扱う。
+     */
+    fun capturePolicy(fieldPolicy: InputFieldPolicy?, evaluationRecording: Boolean): ClipboardHistoryCapturePolicy =
+        ClipboardHistoryCapturePolicy(
+            sensitiveField = fieldPolicy?.isSensitive ?: true,
+            evaluationRecording = evaluationRecording,
+        )
+
+    /** 履歴の一覧を開けるか。保存と同じく欄の種類だけで決め、設定の「学習OFF」では止めない。 */
+    fun mayShowHistory(fieldPolicy: InputFieldPolicy?, historyEnabled: Boolean, evaluationRecording: Boolean): Boolean =
+        historyEnabled && fieldPolicy != null && !fieldPolicy.isSensitive && !evaluationRecording
 
     /** 取得時刻が未来でなく、1時間の期限内にあるclipだけを新規履歴へ取り込む。 */
     fun isFreshClip(timestamp: Long, nowMillis: Long): Boolean =

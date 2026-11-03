@@ -1,5 +1,7 @@
 package dev.uzumi.ime.clipboard
 
+import android.view.inputmethod.EditorInfo
+import dev.uzumi.ime.editor.InputFieldPolicy
 import android.content.ClipDescription
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -55,19 +57,44 @@ class RecentClipboardTest {
         assertNull(RecentClipboardRules.preview("text", maxCodePoints = 0))
     }
 
-    /** 機密clip、機密欄、または学習禁止欄の本文を履歴へ保存しない。 */
+    /** 機密clip、機密欄、評価の記録中の本文を履歴へ保存しない。 */
     @Test
     fun clipboardHistoryRejectsSensitiveSourcesAndFields() {
         val ordinary = ClipboardHistoryCapturePolicy(
             sensitiveField = false,
-            learningSuppressed = false,
             evaluationRecording = false,
         )
         assertFalse(ClipboardHistoryRules.mayStoreText(clipboardSensitive = true, capturePolicy = ordinary))
         assertFalse(ClipboardHistoryRules.mayStoreText(clipboardSensitive = false, capturePolicy = ordinary.copy(sensitiveField = true)))
-        assertFalse(ClipboardHistoryRules.mayStoreText(clipboardSensitive = false, capturePolicy = ordinary.copy(learningSuppressed = true)))
         assertFalse(ClipboardHistoryRules.mayStoreText(clipboardSensitive = false, capturePolicy = ordinary.copy(evaluationRecording = true)))
         assertTrue(ClipboardHistoryRules.mayStoreText(clipboardSensitive = false, capturePolicy = ordinary))
+    }
+
+    /** 履歴の可否は欄の種類だけで決め、設定の学習OFFでは保存も表示も止めない。 */
+    @Test
+    fun clipboardHistoryFollowsFieldTypeInsteadOfLearningSetting() {
+        val ordinary = InputFieldPolicy(
+            isPassword = false,
+            noPersonalizedLearning = false,
+            isTypeNull = false,
+            isNumeric = false,
+            isMultiLine = false,
+            noEnterAction = false,
+            imeAction = EditorInfo.IME_ACTION_DONE,
+            actionLabel = "完了",
+        )
+        val learningOff = ordinary.copy(learningDisabledBySetting = true)
+        val noPersonalized = ordinary.copy(noPersonalizedLearning = true)
+        val password = ordinary.copy(isPassword = true)
+
+        assertTrue(ClipboardHistoryRules.mayStoreText(false, ClipboardHistoryRules.capturePolicy(learningOff, evaluationRecording = false)))
+        assertTrue(ClipboardHistoryRules.mayShowHistory(learningOff, historyEnabled = true, evaluationRecording = false))
+        listOf(noPersonalized, password, null).forEach { policy ->
+            assertFalse(ClipboardHistoryRules.mayStoreText(false, ClipboardHistoryRules.capturePolicy(policy, evaluationRecording = false)))
+            assertFalse(ClipboardHistoryRules.mayShowHistory(policy, historyEnabled = true, evaluationRecording = false))
+        }
+        assertFalse(ClipboardHistoryRules.mayShowHistory(ordinary, historyEnabled = false, evaluationRecording = false))
+        assertFalse(ClipboardHistoryRules.mayShowHistory(ordinary, historyEnabled = true, evaluationRecording = true))
     }
 
     /** 通知時の機密欄状態を保存し、後から通常欄へ移っても後追い保存しない。 */
@@ -75,12 +102,10 @@ class RecentClipboardTest {
     fun clipboardHistoryKeepsThePolicyCapturedWhenClipboardChanged() {
         val policyAtCopy = ClipboardHistoryCapturePolicy(
             sensitiveField = true,
-            learningSuppressed = true,
             evaluationRecording = false,
         )
         val policyAtLaterHandling = ClipboardHistoryCapturePolicy(
             sensitiveField = false,
-            learningSuppressed = false,
             evaluationRecording = false,
         )
 
