@@ -358,10 +358,26 @@ class UzumiInputMethodService : InputMethodService() {
             keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
         }
         root.addView(keyboardArea, LinearLayout.LayoutParams(match, wrap))
+        // パネルの開閉は表示の切り替え（GONE/VISIBLE）で配置をやり直させるため、開く・閉じる経路をここで一度に拾う。
+        keyboardArea.viewTreeObserver.addOnGlobalLayoutListener { syncCoveredKeyboardAccessibility(keyboardArea) }
         applyPolicyToKeyboard()
         refreshCandidates()
         applyNavigationInsets(root)
         return root
+    }
+
+    /**
+     * キーボード面に重ねたパネル（候補一覧、機能一覧、定型文、クリップボード一覧、編集パネル、長押しメニュー）が
+     * 一つでも開いている間は、裏のキーボード面をアクセシビリティの木から外し、TalkBackで覆われたキーを押せないようにする。
+     * すべて閉じたら元に戻す。
+     */
+    private fun syncCoveredKeyboardAccessibility(keyboardArea: ViewGroup) {
+        val panel = keyboardPanel?.takeIf { it.parent === keyboardArea } ?: return
+        val covered = (0 until keyboardArea.childCount)
+            .map(keyboardArea::getChildAt)
+            .any { it !== panel && it.visibility == View.VISIBLE }
+        val mode = if (covered) View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        if (panel.importantForAccessibility != mode) panel.importantForAccessibility = mode
     }
 
     /** システムバー（captionBar含む）とカットアウトのInsetsを反映し、システム操作領域との重なりを防ぐ。 */
