@@ -155,6 +155,19 @@ class LearningStoreTest {
         assertEquals(listOf("(^_^)", "^^;"), store.allWords().map { it.surface }.sorted())
     }
 
+    /** 辞書から選んだ英語表記だけを記録し、保存後の再読込でも候補として保持する。 */
+    @Test
+    fun englishVariantIsRecordedAndRestoredWithoutAllowingGeneralAsciiLearning() {
+        val store = store()
+        assertTrue(store.recordEnglishVariant("いーめーる", "E-mail"))
+        assertFalse(store.record("うずみ", "Uzumi"))
+        store.flush()
+
+        val reopened = store()
+        assertEquals(listOf("E-mail"), reopened.exactMatches("いーめーる").map { it.surface })
+        assertTrue(reopened.exactMatches("うずみ").isEmpty())
+    }
+
     /** OFFの間は記録も参照もせず、ONに戻せば保存済みの語を再び返す。ON/OFFは保存される。 */
     @Test
     fun disabledStoreNeitherRecordsNorReturnsWords() {

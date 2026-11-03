@@ -37,8 +37,13 @@ data class PredictionRequest(
         get() = reading.isEmpty()
 }
 
-/** Mozcが返す予測候補。候補IDは、選択時に同じ予測sessionで確定学習するために保持する。 */
-data class PredictionCandidate(val id: Int, val value: String, val reading: String? = null)
+/** MozcまたはIME内の予測候補。idがnullの候補はMozcへ送らず、表記を直接確定する。 */
+data class PredictionCandidate(
+    val id: Int?,
+    val value: String,
+    val reading: String? = null,
+    val englishVariant: Boolean = false,
+)
 
 /** 要求の世代に結び付いた予測候補。 */
 data class PredictionResult(val request: PredictionRequest, val candidates: List<PredictionCandidate>)
@@ -56,6 +61,8 @@ data class ConversionSegment(
     val chosen: Boolean = false,
     // IME側の学習語だけから作った候補を表示しているなら、その学習語の読み。エンジンはこの表記を知らない。
     val learnedReading: String? = null,
+    // 同梱の英語辞書から追加した候補。確定時は英語語彙の学習規則を使う。
+    val englishVariant: Boolean = false,
 ) {
     /** 表示中の表記がエンジンの候補か。falseの文節を含む確定は、エンジンへ区切りと表記を学習させない。 */
     val engineCandidate: Boolean
@@ -73,6 +80,8 @@ data class ConversionCandidate(
     val fromUserDictionary: Boolean = false,
     // IME側の学習語だけから作った候補なら、その学習語の読み。エンジンの候補ではないため、確定時はエンジンへ送らない。
     val learnedReading: String? = null,
+    // 同梱の英語辞書から追加した候補。確定時は英語語彙の学習規則を使う。
+    val englishVariant: Boolean = false,
 ) {
     companion object {
         /** エンジンの候補一覧に無い、表示中の表記そのものを候補にするときのID。エンジン・登録語・学習語のIDと重ならない。 */

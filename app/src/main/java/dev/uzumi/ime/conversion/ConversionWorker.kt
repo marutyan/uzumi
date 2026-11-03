@@ -59,8 +59,8 @@ interface PredictionClient {
     /** 最新の予測要求をキューへ積み、結果を後から返す。 */
     fun requestPrediction(request: PredictionRequest)
 
-    /** 表示した予測候補を選んだことを、対応するMozc sessionへ伝える。 */
-    fun commitPrediction(request: PredictionRequest, candidateId: Int)
+    /** 表示した候補を確定し、Mozc IDがある場合だけ対応する予測sessionへ学習を伝える。 */
+    fun commitPrediction(request: PredictionRequest, candidate: PredictionCandidate)
 }
 
 /**
@@ -82,6 +82,8 @@ class ConversionWorker(
     private val onCandidateResult: (Long, CandidateResult) -> Unit = { _, _ -> },
     // ユーザー辞書を返す。初回はファイルを読むため、worker threadからだけ呼ぶ。
     private val userDictionary: () -> UserDictionaryLookup? = { null },
+    // 完全一致した読みへ英語表記を追加する読み取り専用辞書。
+    private val englishWords: () -> EnglishWordLookup? = { null },
     // IME側の学習キャッシュを返す。初回はファイルを読むため、worker threadからだけ呼ぶ。nullなら学習を使わない。
     private val learningStore: () -> LearningStore? = { null },
     // 評価モードで、ライブ変換の要求ごとの評価用の報告を受け取る（編集セッションの世代、報告）。worker threadから呼ばれる。
@@ -202,13 +204,23 @@ class ConversionWorker(
      * 対応する予測要求がまだ最新なら、選択した候補をIME側の学習へ記録し、
      * Mozcの予測sessionへも確定して履歴を学習させる。
      */
-    override fun commitPrediction(request: PredictionRequest, candidateId: Int) {
+    override fun commitPrediction(request: PredictionRequest, candidate: PredictionCandidate) {
         if (request.incognito || isEnded(request.sessionEpoch)) return
         executor.execute {
             if (lastPredictionRequests[request.sessionEpoch] != request) return@execute
-            val candidate = lastPredictionCandidates[request.sessionEpoch].orEmpty()
-                .firstOrNull { it.id == candidateId } ?: return@execute
-            candidate.reading?.let { reading -> lookupLearningStore()?.record(reading, candidate.value) }
+            val selected = lastPredictionCandidates[request.sessionEpoch].orEmpty()
+                .firstOrNull { it == candidate } ?: return@execute
+            selected.reading?.let { reading ->
+                lookupLearningStore()?.let { store ->
+                    if (selected.englishVariant) store.recordEnglishVariant(reading, selected.value)
+                    else store.record(reading, selected.value)
+                }
+            }
+            val candidateId = selected.id ?: run {
+                lastPredictionRequests.remove(request.sessionEpoch)
+                lastPredictionCandidates.remove(request.sessionEpoch)
+                return@execute
+            }
             val sessionId = predictionSessions[request.sessionEpoch] ?: return@execute
             val insensitive = kanaModifierInsensitive(request.kanaModifierInsensitive)
             if (!runCatching { engine.setIncognito(false, insensitive) }.getOrDefault(false)) return@execute
@@ -253,12 +265,17 @@ class ConversionWorker(
      */
     private fun recordCommittedUnits(store: LearningStore, units: List<List<LearnedSegment>>) {
         val dictionary = lookupUserDictionary()
+        val english = lookupEnglishWords()
         // 読みと表記がユーザー辞書の登録語と一致するsegmentか。
         fun registered(segment: LearnedSegment): Boolean =
             dictionary?.exactMatches(segment.reading)?.any { it.surface == segment.surface } == true
         val emoticons = EmoticonJudge(dictionary, learningStore = null)
         for (unit in units) {
-            unit.filterNot(::registered).forEach { store.record(it.reading, it.surface) }
+            unit.filterNot(::registered).forEach { segment ->
+                val isEnglishVariant = english?.exactMatches(segment.reading)?.any { it.surface == segment.surface } == true
+                if (isEnglishVariant) store.recordEnglishVariant(segment.reading, segment.surface)
+                else store.record(segment.reading, segment.surface)
+            }
             // 登録語と顔文字・絵文字のsegmentより前だけを句にする。
             val phraseSource = unit.takeWhile { !registered(it) && !emoticons.isEmoticon(it.reading, it.surface) }
             for (end in 2..phraseSource.size) {
@@ -288,7 +305,11 @@ class ConversionWorker(
             val sessionId = sessionForCommit(request) ?: return@execute
             val chosen = segments.filter { it.chosen && !it.fromUserDictionary }
             lookupLearningStore()?.let { store ->
-                chosen.forEach { store.record(it.learnedReading ?: it.reading, it.value) }
+                chosen.forEach {
+                    val reading = it.learnedReading ?: it.reading
+                    if (it.englishVariant) store.recordEnglishVariant(reading, it.value)
+                    else store.record(reading, it.value)
+                }
             }
             if (segments.all(ConversionSegment::engineCandidate)) {
                 if (chosen.isEmpty()) {
@@ -390,7 +411,20 @@ class ConversionWorker(
             }.copy(segments = listOf(shown))
             val withUser = UserDictionaryCandidates.mergeExplicit(segment.reading, learned, dictionary)
             val arranged = EmoticonCandidates.arrangeExplicit(withUser, emoticons)
-            arranged.segments.single().copy(candidates = arranged.headCandidates)
+            val english = if (request.incognito || evaluationActive()) emptyList() else {
+                lookupEnglishWords()?.exactMatches(segment.reading).orEmpty()
+            }
+            var nextEnglishId = ENGLISH_CANDIDATE_ID_BASE
+            val englishCandidates = english.map { entry ->
+                ConversionCandidate(
+                    id = nextEnglishId++,
+                    value = entry.surface,
+                    reading = entry.reading,
+                    learnedReading = entry.reading,
+                    englishVariant = true,
+                )
+            }.filterNot { extra -> arranged.headCandidates.any { it.value == extra.value } }
+            arranged.segments.single().copy(candidates = arranged.headCandidates + englishCandidates)
         }
     }
 
@@ -490,6 +524,8 @@ class ConversionWorker(
                 }
             },
             userDictionary = lookupUserDictionary(),
+            // 評価記録中と学習禁止欄では英語候補を追加せず、既存の比較条件と機密保護を維持する。
+            englishWords = if (request.learningAllowed && !evaluationActive()) lookupEnglishWords() else null,
             // 学習禁止欄では学習語を参照しない。完全一致した学習語のうちscoreが最も高いものを表示する。
             learnedSurfaces = learnedSurfaces(request.learningAllowed),
             // 部分範囲の先頭からの読みに一致する句で区切りを合わせる。学習禁止欄では参照しない。
@@ -533,12 +569,22 @@ class ConversionWorker(
             learnedSurfaces(request.learningAllowed),
             learnedPhrases(request.learningAllowed),
         )
+        val englishLookup = if (request.learningAllowed && !evaluationActive()) lookupEnglishWords() else null
+        val englishMatches = englishLookup?.exactMatches(request.reading).orEmpty()
+        val currentCandidates = segment.candidates.toHashSet() + segment.value
+        val englishWords = englishLookup?.takeIf { englishMatches.any { entry -> entry.surface !in currentCandidates } }
+        val engineCandidates = if (englishWords != null && segment.value !in segment.candidates) {
+            listOf(segment.value) + segment.candidates
+        } else {
+            segment.candidates
+        }
         val candidates = mergeSegmentCandidates(
             request.reading,
-            segment.candidates,
+            engineCandidates,
             lookupUserDictionary(),
             exactSurfaces,
             emoticonJudge(request.learningAllowed),
+            englishWords = englishWords,
         )
         onCandidateResult(sessionEpoch, CandidateResult(request, candidates))
     }
@@ -579,9 +625,18 @@ class ConversionWorker(
             }
         }.getOrDefault(emptyList())
         val judge = EmoticonJudge(lookupUserDictionary(), lookupLearningStore().takeUnless { request.incognito })
-        val candidates = generated
+        val engineCandidates = generated
             .filterNot { EmoticonText.isEmoticon(it.value) || judge.isEmoticon(it.reading ?: request.reading, it.value) }
             .take(MAX_VISIBLE_PREDICTIONS)
+        val englishCandidates = if (engineCandidates.isEmpty() || request.reading.isEmpty() || request.incognito || evaluationActive()) {
+            emptyList()
+        } else {
+            val existing = engineCandidates.mapTo(HashSet()) { it.value }
+            lookupEnglishWords()?.exactMatches(request.reading).orEmpty()
+                .filterNot { it.surface in existing }
+                .map { PredictionCandidate(id = null, value = it.surface, reading = it.reading, englishVariant = true) }
+        }
+        val candidates = engineCandidates + englishCandidates
         lastPredictionRequests[request.sessionEpoch] = request
         lastPredictionCandidates[request.sessionEpoch] = candidates
         onPredictionResult(PredictionResult(request, candidates))
@@ -611,6 +666,9 @@ class ConversionWorker(
 
     /** ユーザー辞書を開いて返す。読めなければ登録語なしで変換を続ける。 */
     private fun lookupUserDictionary(): UserDictionaryLookup? = runCatching { userDictionary() }.getOrNull()
+
+    /** 同梱の読み→英語表記辞書を開く。失敗時は英語候補を加えず通常の変換を続ける。 */
+    private fun lookupEnglishWords(): EnglishWordLookup? = runCatching { englishWords() }.getOrNull()
 
     /** 学習キャッシュを開いて返す。開けなければ学習なしで変換を続ける。 */
     private fun lookupLearningStore(): LearningStore? = runCatching { learningStore() }.getOrNull()
@@ -673,7 +731,10 @@ class ConversionWorker(
         /** KNOWN_READINGの候補に辞書があれば必ず含まれる表記。 */
         const val KNOWN_CONVERSION = "漢字"
 
-        /** 候補バーの先頭に表示する予測候補の最大件数。 */
+        /** 候補バーへ出すMozc予測の最大件数。英語辞書の候補は、この後ろへ追加する。 */
         private const val MAX_VISIBLE_PREDICTIONS = 3
+
+        /** 英語辞書候補へ、ユーザー辞書・学習語・Mozc IDと重ならないIDを割り当てる。 */
+        private const val ENGLISH_CANDIDATE_ID_BASE = Int.MIN_VALUE + 0x20000
     }
 }
