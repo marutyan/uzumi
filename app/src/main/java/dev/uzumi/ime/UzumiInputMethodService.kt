@@ -50,6 +50,7 @@ import dev.uzumi.ime.clipboard.ClipboardHistoryIdentity
 import dev.uzumi.ime.clipboard.ClipboardHistoryItem
 import dev.uzumi.ime.clipboard.ClipboardHistoryRules
 import dev.uzumi.ime.clipboard.ClipboardHistoryStore
+import dev.uzumi.ime.clipboard.ClipboardHistoryStores
 import dev.uzumi.ime.dictionary.UserDictionaries
 import dev.uzumi.ime.dictionary.UserDictionaryCategory
 import dev.uzumi.ime.clipboard.RecentClipboard
@@ -98,7 +99,6 @@ import dev.uzumi.ime.live.RequestIdentity
 import dev.uzumi.ime.neural.NeuralRuntimeConnection
 import dev.uzumi.ime.neural.NeuralSelection
 import dev.uzumi.ime.neural.shouldRecreateNeuralConnection
-import java.io.File
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -153,9 +153,8 @@ class UzumiInputMethodService : InputMethodService() {
     // クリップボード本文はRecentClipboardの一時候補にだけ保持し、ログや設定へ保存しない。
     private var recentClipboard: RecentClipboard? = null
     // 本文をIME表示中だけ取得し、他の設定・履歴とは分けたnoBackupFilesDirへ保存する。
-    private val clipboardHistoryStore by lazy {
-        ClipboardHistoryStore(File(noBackupFilesDir, CLIPBOARD_HISTORY_FILE_NAME))
-    }
+    private val clipboardHistoryStore: ClipboardHistoryStore
+        get() = ClipboardHistoryStores.get(this)
     private var clipboardSuggestion: RecentClipboard.Suggestion? = null
     private var clipboardExpiry: Runnable? = null
     private var clipboardHistoryExpiry: Runnable? = null
@@ -800,7 +799,8 @@ class UzumiInputMethodService : InputMethodService() {
             val historyEnabled = UzumiSettings.isClipboardHistoryEnabled(this)
             val visibleAtChange = inputViewVisible
             mainHandler.post {
-                if (identity != null && visibleAtChange && historyEnabled) {
+                // OFFの間も本文を読まずに処理済みとして記録し、ONへ戻した後に保存しないようにする。
+                if (identity != null && visibleAtChange) {
                     captureClipboardHistory(identity, capturePolicy, historyEnabled)
                 }
                 if (inputViewVisible) refreshClipboardSuggestion()
@@ -861,11 +861,18 @@ class UzumiInputMethodService : InputMethodService() {
         capturePolicy: ClipboardHistoryCapturePolicy = clipboardHistoryCapturePolicy(),
         historyEnabledAtChange: Boolean = UzumiSettings.isClipboardHistoryEnabled(this),
     ) {
-        if (!historyEnabledAtChange) return
         val observer = recentClipboard
         val identity = observedIdentity ?: observer?.currentHistoryIdentity() ?: return
         val store = clipboardHistoryStore
         if (store.wasHandled(identity)) return
+        if (!historyEnabledAtChange || ClipboardHistoryRules.copiedBeforeEnabled(
+                identity.timestamp,
+                UzumiSettings.clipboardHistoryEnabledSinceMillis(this),
+            )
+        ) {
+            store.markHandled(identity)
+            return
+        }
 
         val mayStoreText = ClipboardHistoryRules.mayStoreText(
             clipboardSensitive = identity.clipboardSensitive,
@@ -1802,9 +1809,6 @@ class UzumiInputMethodService : InputMethodService() {
     }
 
     private companion object {
-        /** noBackupFilesDirへ保存する履歴ファイル名。 */
-        const val CLIPBOARD_HISTORY_FILE_NAME = "clipboard-history.tsv"
-
         /** 変換応答を待つ上限。超えたら読みとかな・カナ候補へ戻す。 */
         const val CONVERSION_TIMEOUT_MILLIS = 2_000L
 

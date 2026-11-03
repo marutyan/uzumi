@@ -2,6 +2,7 @@ package dev.uzumi.ime
 
 import android.content.Context
 import android.content.SharedPreferences
+import dev.uzumi.ime.clipboard.ClipboardHistoryStores
 import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.keyboard.ToolbarAction
 import dev.uzumi.ime.keyboard.ToolbarPreferences
@@ -49,6 +50,8 @@ object UzumiSettings {
     private const val KEY_CANDIDATE_ROWS = "candidate_rows"
     // クリップボード履歴の表示・保存を切り替えるキー。
     private const val KEY_CLIPBOARD_HISTORY_ENABLED = "clipboard_history_enabled"
+    // 履歴を最後にONへ戻した時刻（ミリ秒）。これより前のコピーは保存しない。
+    private const val KEY_CLIPBOARD_HISTORY_ENABLED_SINCE = "clipboard_history_enabled_since"
 
     /** バックアップの各設定を読み、型検証・正規化・反映する定義。新しい設定はこの一覧へ追加する。 */
     private data class BackupSettingDescriptor(
@@ -205,9 +208,21 @@ object UzumiSettings {
     fun isClipboardHistoryEnabled(context: Context): Boolean =
         preferences(context).getBoolean(KEY_CLIPBOARD_HISTORY_ENABLED, DEFAULT_CLIPBOARD_HISTORY_ENABLED)
 
-    /** クリップボード履歴の表示・保存を切り替える。 */
-    fun setClipboardHistoryEnabled(context: Context, enabled: Boolean) =
-        putBoolean(context, KEY_CLIPBOARD_HISTORY_ENABLED, enabled)
+    /**
+     * クリップボード履歴の表示・保存を切り替える。OFFでは固定を含む保存済みの履歴を消し、
+     * OFFからONへ戻した時刻を残して、OFFの間のコピーを後から保存しないようにする。
+     */
+    fun setClipboardHistoryEnabled(context: Context, enabled: Boolean) {
+        val wasEnabled = isClipboardHistoryEnabled(context)
+        if (!enabled) ClipboardHistoryStores.get(context).clearAll(currentIdentity = null)
+        val editor = preferences(context).edit().putBoolean(KEY_CLIPBOARD_HISTORY_ENABLED, enabled)
+        if (enabled && !wasEnabled) editor.putLong(KEY_CLIPBOARD_HISTORY_ENABLED_SINCE, System.currentTimeMillis())
+        editor.apply()
+    }
+
+    /** 履歴を最後にONへ戻した時刻を読む。OFFにしたことがなければ0。 */
+    fun clipboardHistoryEnabledSinceMillis(context: Context): Long =
+        preferences(context).getLong(KEY_CLIPBOARD_HISTORY_ENABLED_SINCE, 0L)
 
     /** 保存済みのdp値を読み、初回だけ従来の「低・中・高」を同じ高さへ引き継ぐ。 */
     fun keyboardHeightDp(context: Context): Int {

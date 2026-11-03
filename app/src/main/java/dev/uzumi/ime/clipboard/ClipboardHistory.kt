@@ -51,6 +51,12 @@ internal object ClipboardHistoryRules {
             evaluationRecording = evaluationRecording,
         )
 
+    /**
+     * 履歴をONにした時刻より前にコピーされたclipか。OFFの間のコピーを、ONへ戻した後の表示開始時に保存しないために使う。
+     * enabledSinceMillisが0なら、OFFにしたことがない既定の状態として全てを対象にする。
+     */
+    fun copiedBeforeEnabled(timestamp: Long, enabledSinceMillis: Long): Boolean = timestamp < enabledSinceMillis
+
     /** 履歴の一覧を開けるか。保存と同じく欄の種類だけで決め、設定の「学習OFF」では止めない。 */
     fun mayShowHistory(fieldPolicy: InputFieldPolicy?, historyEnabled: Boolean, evaluationRecording: Boolean): Boolean =
         historyEnabled && fieldPolicy != null && !fieldPolicy.isSensitive && !evaluationRecording
@@ -275,5 +281,20 @@ internal class ClipboardHistoryStore(
     private companion object {
         /** ファイル形式を更新した場合に旧形式を誤読しないための識別行。 */
         const val FILE_HEADER = "uzumi-clipboard-history-v1"
+    }
+}
+
+/** noBackupFilesDir配下の履歴ファイルを、IMEと設定画面が同じプロセス内の一つのインスタンスで扱う。 */
+internal object ClipboardHistoryStores {
+    /** noBackupFilesDirへ保存する履歴ファイル名。 */
+    private const val FILE_NAME = "clipboard-history.tsv"
+
+    @Volatile
+    private var instance: ClipboardHistoryStore? = null
+
+    /** 初回だけ保存先を開き、以降は同じインスタンスを返す。 */
+    fun get(context: android.content.Context): ClipboardHistoryStore = instance ?: synchronized(this) {
+        instance ?: ClipboardHistoryStore(java.io.File(context.applicationContext.noBackupFilesDir, FILE_NAME))
+            .also { instance = it }
     }
 }

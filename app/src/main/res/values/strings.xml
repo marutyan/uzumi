@@ -128,7 +128,7 @@
     <string name="settings_toolbar_rows">機能バーの段数</string>
     <string name="settings_candidate_rows">候補バーの段数</string>
     <string name="settings_clipboard_history">クリップボード履歴</string>
-    <string name="settings_clipboard_history_description">コピーした文字をこの端末に保存します。固定していない履歴は1時間後に削除します。機密欄と学習禁止欄では保存しません。</string>
+    <string name="settings_clipboard_history_description">コピーした文字をこの端末に保存します。固定していない履歴は1時間後に削除します。オフにすると固定したものを含めて履歴を消します。パスワード欄など個人の学習を禁じた欄では保存しません。</string>
     <string name="settings_rows_value">%1$d段</string>
     <string name="settings_toolbar_move_up">%1$sを上へ移動</string>
     <string name="settings_toolbar_move_down">%1$sを下へ移動</string>

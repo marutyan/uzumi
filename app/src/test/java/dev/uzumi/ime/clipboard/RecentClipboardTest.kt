@@ -97,6 +97,14 @@ class RecentClipboardTest {
         assertFalse(ClipboardHistoryRules.mayShowHistory(ordinary, historyEnabled = true, evaluationRecording = true))
     }
 
+    /** 履歴をONへ戻した時刻より前のコピーは保存対象にせず、OFFにしたことがなければ全てを対象にする。 */
+    @Test
+    fun clipboardHistorySkipsClipsCopiedWhileHistoryWasOff() {
+        assertTrue(ClipboardHistoryRules.copiedBeforeEnabled(timestamp = 999L, enabledSinceMillis = 1_000L))
+        assertFalse(ClipboardHistoryRules.copiedBeforeEnabled(timestamp = 1_000L, enabledSinceMillis = 1_000L))
+        assertFalse(ClipboardHistoryRules.copiedBeforeEnabled(timestamp = 1L, enabledSinceMillis = 0L))
+    }
+
     /** 通知時の機密欄状態を保存し、後から通常欄へ移っても後追い保存しない。 */
     @Test
     fun clipboardHistoryKeepsThePolicyCapturedWhenClipboardChanged() {
