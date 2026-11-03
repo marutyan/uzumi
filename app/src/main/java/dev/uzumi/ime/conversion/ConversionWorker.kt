@@ -2,6 +2,7 @@ package dev.uzumi.ime.conversion
 
 import dev.uzumi.ime.dictionary.UserDictionaryLookup
 import dev.uzumi.ime.evaluation.LiveRequestReport
+import dev.uzumi.ime.dictionary.withoutTemplates
 import dev.uzumi.ime.learning.LearningStore
 import dev.uzumi.ime.live.CandidateRequest
 import dev.uzumi.ime.live.CandidateResult
@@ -611,6 +612,7 @@ class ConversionWorker(
 
     /** ユーザー辞書を開いて返す。読めなければ登録語なしで変換を続ける。 */
     private fun lookupUserDictionary(): UserDictionaryLookup? = runCatching { userDictionary() }.getOrNull()
+        ?.let { dictionary -> if (evaluationActive()) dictionary.withoutTemplates() else dictionary }
 
     /** 学習キャッシュを開いて返す。開けなければ学習なしで変換を続ける。 */
     private fun lookupLearningStore(): LearningStore? = runCatching { learningStore() }.getOrNull()

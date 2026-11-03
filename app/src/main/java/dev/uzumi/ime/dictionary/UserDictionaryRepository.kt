@@ -17,6 +17,25 @@ interface UserDictionaryLookup {
     fun prefixMatches(prefix: String, limit: Int): List<UserDictionaryEntry>
 }
 
+/** 評価条件を保つため、新しく追加した定型文だけを候補検索から外す読み取り専用の辞書Viewを返す。 */
+fun UserDictionaryLookup.withoutTemplates(): UserDictionaryLookup = object : UserDictionaryLookup {
+    /** 評価と候補の照合に使う辞書世代を元の辞書と一致させる。 */
+    override val generation: Long
+        get() = this@withoutTemplates.generation
+
+    /** 読み一致候補から定型文だけを除き、既存の短縮よみや通常語はそのまま返す。 */
+    override fun exactMatches(reading: String): List<UserDictionaryEntry> =
+        this@withoutTemplates.exactMatches(reading).filterNot { it.category == UserDictionaryCategory.TEMPLATE }
+
+    /** 前方一致候補も定型文以外だけで上限を満たすように絞る。 */
+    override fun prefixMatches(prefix: String, limit: Int): List<UserDictionaryEntry> =
+        this@withoutTemplates.prefixMatches(prefix, UserDictionaryRules.MAX_ENTRY_COUNT)
+            .asSequence()
+            .filterNot { it.category == UserDictionaryCategory.TEMPLATE }
+            .take(limit.coerceAtLeast(0))
+            .toList()
+}
+
 /** importの結果件数。失敗行は行番号付きで返し、画面で利用者へ示す。 */
 data class UserDictionaryImportSummary(
     val added: Int,

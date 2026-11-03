@@ -607,6 +607,35 @@ class ConversionWorkerTest {
         assertEquals(listOf("缶", "かん"), segment.candidates)
     }
 
+    /** 評価中は新しい定型文だけを候補から外し、以前からの短縮よみは従来どおり表示する。 */
+    @Test
+    fun evaluationHidesTemplatesButKeepsExistingShortcuts() {
+        val templateBody = "定型文\n本文"
+        val fixture = Fixture(dictionary = FakeLookup(listOf(
+            UserDictionaryEntry("かん", templateBody, UserDictionaryCategory.TEMPLATE),
+            UserDictionaryEntry("かん", "旧短縮", UserDictionaryCategory.SHORTCUT),
+        )))
+        fixture.startReady()
+
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "かん"))
+        fixture.executor.runAll()
+        assertEquals(templateBody, fixture.liveResults.last().second.segments.single().surface)
+        assertTrue(fixture.liveResults.last().second.segments.single().candidates.contains(templateBody))
+
+        fixture.evaluating = true
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 2, reading = "かん"))
+        fixture.executor.runAll()
+
+        assertEquals("旧短縮", fixture.liveResults.last().second.segments.single().surface)
+        assertFalse(fixture.liveResults.last().second.segments.single().candidates.contains(templateBody))
+
+        fixture.worker.requestConversion(request(revision = 3, reading = "かん"))
+        fixture.executor.runAll()
+        val explicit = (fixture.outcomes.last() as ConversionOutcome.Converted).result
+        assertTrue(explicit.headCandidates.any { it.value == "旧短縮" })
+        assertFalse(explicit.headCandidates.any { it.value == templateBody })
+    }
+
     /** 明示変換の先頭文節の候補にも、登録語を先頭に加える。 */
     @Test
     fun explicitConversionAddsUserDictionaryWords() {
