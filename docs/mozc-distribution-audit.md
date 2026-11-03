@@ -9,6 +9,7 @@
 - 郵便番号データは実際に`mozc.data`へ入る。READMEの「OSS版に含まない」は古い記述で、固定commitのBUILDとビルド結果が正しい。事業所データを含め、日本郵便は著作権を主張せず、再配布に許諾は要らないと公式に明記している。除外版の再ビルドは不要と判断し、実施していない。
 - `emoji_data.tsv`はUnicode CLDR 48の日本語注釈に基づくと判断し、Unicode License v3の表示をNOTICEに入れた。生成スクリプトが非公開なので、この由来は強い根拠のある推測である。
 - `libmozc.so`に静的リンクされる第三者コードは、Abseil、Protocol Buffers（C++）、utf8_range、LLVM libc++/libc++abi/compiler-rt、bionicの起動用objectである。zlibはリンク入力にあるが、最終生成物には残らない。
+- 2026-11-04から、`mozc.data`にMozc UTの追加辞書3つ（sudachidict、personal-names、place-names）を加えた版を使う。由来と作り方は[Mozc UT追加辞書入りの mozc.data](mozc-ut-dictionary.md)に、第三者表示はNOTICEの第11節〜第13節にある。この文書の`mozc.data`の監査は追加前の版を対象にしている。
 - Java lite生成コードには`com.google.protobuf:protobuf-javalite:4.34.1`（BSD 3-Clause）が対応する。また、`artifacts/`には`commands`のjarしかないが、生成コードは他の4つのproto jarも参照する。
 
 ## 対象と固定条件

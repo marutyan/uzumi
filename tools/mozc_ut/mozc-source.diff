@@ -1,0 +1,12 @@
+diff --git a/src/data/dictionary_oss/BUILD.bazel b/src/data/dictionary_oss/BUILD.bazel
+index 575a9034..9731db39 100644
+--- a/src/data/dictionary_oss/BUILD.bazel
++++ b/src/data/dictionary_oss/BUILD.bazel
+@@ -71,6 +71,7 @@ filegroup(
+         "dictionary07.txt",
+         "dictionary08.txt",
+         "dictionary09.txt",
++        "dictionary_ut.txt",
+         "//dictionary:zip_code_data",
+     ],
+     visibility = ["//visibility:private"],
