@@ -827,11 +827,16 @@ class ColorMapView(
         canvas.drawCircle(x, y, 7f * density, markerPaint)
     }
 
+    // 指で触れている途中か。離したときの作り直しを1回の操作につき1回にするために使う。
+    private var tracking = false
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
     /** 触れている位置の色相と鮮やかさを選ぶ。指を動かしている間は親のスクロールを止める。 */
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                tracking = true
                 parent?.requestDisallowInterceptTouchEvent(true)
                 hue = (event.x / width.coerceAtLeast(1)).coerceIn(0f, 1f) * 360f
                 saturation = 100f - (event.y / height.coerceAtLeast(1)).coerceIn(0f, 1f) * 100f
@@ -841,7 +846,12 @@ class ColorMapView(
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 parent?.requestDisallowInterceptTouchEvent(false)
-                onRelease()
+                // 離した後の作り直しでこのView自身が外され、ACTION_CANCELが入れ子で届く。
+                // 1回の操作につき1回だけ、タッチの処理が終わってから作り直す。
+                if (tracking) {
+                    tracking = false
+                    mainHandler.post(onRelease)
+                }
                 return true
             }
         }

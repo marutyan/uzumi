@@ -1148,6 +1148,32 @@ class ConversionWorkerTest {
         assertEquals(listOf("setIncognito(false)", "deleteFromHistory(1,かき=柿)"), fixture.engine.calls)
     }
 
+    /** 削除を押した直後に入力欄が閉じても、一時のsessionでエンジンの履歴を消し、そのsessionを片付ける。 */
+    @Test
+    fun deleteLearningAfterSessionEndUsesTemporarySession() {
+        val learning = learningStore()
+        learning.record("かき", "柿")
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.worker.requestConversion(request(reading = "かんじ"))
+        fixture.executor.runAll()
+        val removed = mutableListOf<Boolean>()
+
+        fixture.worker.deleteLearning(1, "かき", "柿", learningAllowed = true) { removed += it }
+        fixture.worker.endSession(1)
+        fixture.engine.calls.clear()
+        fixture.executor.runAll()
+
+        assertEquals(listOf(true), removed)
+        assertTrue(learning.exactMatches("かき").isEmpty())
+        val temporary = fixture.engine.calls.first { it == "createSession" }.let { fixture.engine.calls.indexOf(it) }
+        assertTrue(temporary >= 0)
+        val deleted = fixture.engine.calls.single { it.startsWith("deleteFromHistory(") }
+        val sessionId = deleted.removePrefix("deleteFromHistory(").substringBefore(",")
+        assertTrue(fixture.engine.calls.contains("deleteSession($sessionId)"))
+        assertEquals("かき=柿)", deleted.substringAfter(","))
+    }
+
     /** 学習禁止欄と評価の記録中は、IME側の学習もエンジンの履歴も消さない。 */
     @Test
     fun deleteLearningDoesNothingWhenLearningIsSuppressedOrEvaluating() {

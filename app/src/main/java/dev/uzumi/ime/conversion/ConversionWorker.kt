@@ -306,12 +306,26 @@ class ConversionWorker(
         executor.execute {
             if (evaluationActive()) return@execute
             val removed = lookupLearningStore()?.remove(reading, surface) == true
-            if (!isEnded(sessionEpoch) && currentHealth is EngineHealth.Ready) {
-                val sessionId = sessionFor(sessionEpoch)
-                if (sessionId != null && runCatching { engine.setIncognito(false) }.getOrDefault(false)) {
-                    // 読みから作り直した状態は直前の明示変換の状態ではないため、その確定の学習通知を照合させない。
-                    lastConverted.remove(sessionEpoch)
-                    runCatching { engine.deleteFromHistory(sessionId, reading, surface) }
+            if (currentHealth is EngineHealth.Ready && runCatching { engine.setIncognito(false) }.getOrDefault(false)) {
+                if (!isEnded(sessionEpoch)) {
+                    val sessionId = sessionFor(sessionEpoch)
+                    if (sessionId != null) {
+                        // 読みから作り直した状態は直前の明示変換の状態ではないため、その確定の学習通知を照合させない。
+                        lastConverted.remove(sessionEpoch)
+                        runCatching { engine.deleteFromHistory(sessionId, reading, surface) }
+                    }
+                } else {
+                    // 削除を押した直後に入力欄が閉じても、Mozcの履歴だけ残らないよう一時のsessionで消す。
+                    runCatching {
+                        val temporary = engine.createSession()
+                        if (temporary != null) {
+                            try {
+                                engine.deleteFromHistory(temporary, reading, surface)
+                            } finally {
+                                engine.deleteSession(temporary)
+                            }
+                        }
+                    }
                 }
             }
             onRemoved(removed)
