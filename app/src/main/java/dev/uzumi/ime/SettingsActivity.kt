@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -27,9 +28,16 @@ import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.keyboard.ToolbarAction
 import dev.uzumi.ime.keyboard.ToolbarPreferences
+import dev.uzumi.ime.dictionary.TsvParseResult
+import dev.uzumi.ime.dictionary.UserDictionaries
+import dev.uzumi.ime.dictionary.UserDictionaryEntry
+import dev.uzumi.ime.dictionary.UserDictionaryTsv
+import dev.uzumi.ime.evaluation.EvaluationCounter
 import dev.uzumi.ime.learning.LearningStores
 import dev.uzumi.ime.neural.NeuralRuntimeConnection
 import dev.uzumi.ime.neural.NeuralSelection
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -38,12 +46,15 @@ import kotlin.math.roundToInt
  * 候補バーの⚙と、導入画面の「Uzumiの設定」から開く。変更は次にキーボードを表示したときから反映される。
  */
 class SettingsActivity : Activity() {
+    private var pendingDictionaryExport = false
+
     private val density: Float
         get() = resources.displayMetrics.density
 
     /** 設定項目を追加UI依存なしで組み立てる。 */
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingDictionaryExport = savedInstanceState?.getBoolean(STATE_BACKUP_INCLUDE_DICTIONARY) ?: false
         title = getString(R.string.settings_title)
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -89,6 +100,8 @@ class SettingsActivity : Activity() {
         content.addView(section(R.string.settings_section_learning))
         content.addView(learningRow())
         content.addView(linkRow(R.string.settings_clear_learning) { confirmClearLearning() })
+        content.addView(linkRow(R.string.settings_backup_export) { chooseBackupExport() })
+        content.addView(linkRow(R.string.settings_backup_import) { openBackupFile() })
         content.addView(linkRow(R.string.open_user_dictionary) {
             startActivity(Intent(this, UserDictionaryActivity::class.java))
         })
@@ -106,6 +119,27 @@ class SettingsActivity : Activity() {
         val scrollView = ScrollView(this).apply { addView(content) }
         applySystemInsets(scrollView)
         setContentView(scrollView)
+    }
+
+    /** ファイル選択中に画面が再生成されても、辞書を含める指定を保つ。 */
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(STATE_BACKUP_INCLUDE_DICTIONARY, pendingDictionaryExport)
+        super.onSaveInstanceState(outState)
+    }
+
+    /** SAFから戻ったファイルURIに応じて、設定バックアップを読み込むか書き出す。 */
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        when (requestCode) {
+            REQUEST_BACKUP_IMPORT -> {
+                if (resultCode == RESULT_OK) data?.data?.let(::importBackup)
+            }
+            REQUEST_BACKUP_EXPORT -> {
+                val includeDictionary = pendingDictionaryExport
+                pendingDictionaryExport = false
+                if (resultCode == RESULT_OK) data?.data?.let { exportBackup(it, includeDictionary) }
+            }
+        }
     }
 
     /** 分類の見出し。 */
@@ -188,6 +222,163 @@ class SettingsActivity : Activity() {
                 }
             }
             .show()
+    }
+
+    /** 書き出すバックアップへユーザー辞書を含めるか選ぶ。学習履歴は選択肢に含めない。 */
+    private fun chooseBackupExport() {
+        val includeDictionary = CheckBox(this).apply {
+            text = getString(R.string.settings_backup_include_dictionary)
+            isChecked = true
+            setPadding(px(24), px(12), px(24), px(12))
+            minimumHeight = px(56)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.settings_backup_export)
+            .setMessage(R.string.settings_backup_export_description)
+            .setView(includeDictionary)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.settings_backup_export) { _, _ ->
+                pendingDictionaryExport = includeDictionary.isChecked
+                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = BACKUP_MIME_TYPE
+                    putExtra(Intent.EXTRA_TITLE, BACKUP_FILE_NAME)
+                }
+                startActivityForResult(intent, REQUEST_BACKUP_EXPORT)
+            }
+            .show()
+    }
+
+    /** Storage Access FrameworkでJSONバックアップの読み込み元を選ぶ。 */
+    private fun openBackupFile() {
+        if (EvaluationCounter.shared.isRecording) {
+            Toast.makeText(this, R.string.settings_backup_blocked_during_evaluation, Toast.LENGTH_LONG).show()
+            return
+        }
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = BACKUP_MIME_TYPE
+        }
+        startActivityForResult(intent, REQUEST_BACKUP_IMPORT)
+    }
+
+    /** SAFへJSONファイルを書き出し、任意選択のユーザー辞書も同じ形式のTSVで内包する。 */
+    private fun exportBackup(uri: Uri, includeDictionary: Boolean) {
+        backgroundResult(
+            work = {
+                val dictionary = if (includeDictionary) UserDictionaries.get(applicationContext).exportText() else null
+                val json = SettingsBackupCodec.encode(
+                    SettingsBackupDocument(UzumiSettings.captureBackupSettings(applicationContext), dictionary),
+                )
+                val output = contentResolver.openOutputStream(uri, "wt")
+                    ?: throw IOException("出力先を開けません")
+                output.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+            },
+            onSuccess = { Toast.makeText(this, R.string.settings_backup_export_done, Toast.LENGTH_LONG).show() },
+            onFailure = { Toast.makeText(this, R.string.settings_backup_failed, Toast.LENGTH_LONG).show() },
+        )
+    }
+
+    /** バックアップを読んで形式・設定値・任意のTSVを検査し、変更前の確認画面へ渡す。 */
+    private fun importBackup(uri: Uri) {
+        if (EvaluationCounter.shared.isRecording) {
+            Toast.makeText(this, R.string.settings_backup_blocked_during_evaluation, Toast.LENGTH_LONG).show()
+            return
+        }
+        backgroundResult(
+            work = {
+                val bytes = readBackupLimited(uri)
+                val json = UserDictionaryTsv.decodeUtf8(bytes)
+                    ?: throw SettingsBackupException("UTF-8のJSONではありません")
+                val document = SettingsBackupCodec.decode(json)
+                val settings = UzumiSettings.normalizeBackupSettings(document.values)
+                val dictionaryEntries = document.userDictionaryTsv?.let { tsv ->
+                    val parsed = UserDictionaryTsv.parse(tsv)
+                    if (parsed.failures.isNotEmpty()) throw SettingsBackupException("辞書のTSVが正しくありません")
+                    parsed.entries
+                }
+                PreparedBackupImport(document.copy(values = settings), dictionaryEntries)
+            },
+            onSuccess = { prepared -> confirmBackupImport(prepared) },
+            onFailure = { Toast.makeText(this, R.string.settings_backup_invalid, Toast.LENGTH_LONG).show() },
+        )
+    }
+
+    /** 上限を超えないか確かめながらSAFのJSON全体を読む。 */
+    @Throws(IOException::class, SettingsBackupException::class)
+    private fun readBackupLimited(uri: Uri): ByteArray {
+        val input = contentResolver.openInputStream(uri) ?: throw IOException("入力元を開けません")
+        return input.use { stream ->
+            val buffer = ByteArrayOutputStream()
+            val chunk = ByteArray(64 * 1024)
+            while (true) {
+                val read = stream.read(chunk)
+                if (read < 0) break
+                buffer.write(chunk, 0, read)
+                if (buffer.size() > MAX_BACKUP_BYTES) throw SettingsBackupException("バックアップが大きすぎます")
+            }
+            buffer.toByteArray()
+        }
+    }
+
+    /** 確認後に反映し、辞書は既存TSV importと同じ追加・重複省略の規則で保存する。 */
+    private fun confirmBackupImport(prepared: PreparedBackupImport) {
+        val message = if (prepared.dictionaryEntries == null) {
+            getString(R.string.settings_backup_import_confirm)
+        } else {
+            getString(R.string.settings_backup_import_confirm_with_dictionary, prepared.dictionaryEntries.size)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.settings_backup_import)
+            .setMessage(message)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.settings_backup_import_apply) { _, _ ->
+                if (EvaluationCounter.shared.isRecording) {
+                    Toast.makeText(this, R.string.settings_backup_blocked_during_evaluation, Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                backgroundResult(
+                    work = {
+                        if (EvaluationCounter.shared.isRecording) throw SettingsBackupException("評価記録中です")
+                        val dictionaryResult = prepared.dictionaryEntries?.let { entries ->
+                            if (EvaluationCounter.shared.isRecording) throw SettingsBackupException("評価記録中です")
+                            UserDictionaries.get(applicationContext).import(TsvParseResult(entries, emptyList()))
+                        }
+                        if (dictionaryResult?.storageFailed == true) throw IOException("辞書を保存できません")
+                        UzumiSettings.applyBackupSettings(applicationContext, prepared.document.values)
+                        ImportApplicationResult(dictionaryWasLimited = (dictionaryResult?.overLimit ?: 0) > 0)
+                    },
+                    onSuccess = { result ->
+                        Toast.makeText(
+                            this,
+                            if (result.dictionaryWasLimited) R.string.settings_backup_import_partial else R.string.settings_backup_import_done,
+                            Toast.LENGTH_LONG,
+                        ).show()
+                        recreate()
+                    },
+                    onFailure = { Toast.makeText(this, R.string.settings_backup_failed, Toast.LENGTH_LONG).show() },
+                )
+            }
+            .show()
+    }
+
+    /** ファイルI/Oと設定保存を別スレッドで行い、結果の通知だけUIへ戻す。 */
+    private fun <T> backgroundResult(work: () -> T, onSuccess: (T) -> Unit, onFailure: () -> Unit) {
+        Thread({
+            val result = try {
+                Result.success(work())
+            } catch (error: IOException) {
+                Result.failure(error)
+            } catch (error: SettingsBackupException) {
+                Result.failure(error)
+            } catch (error: RuntimeException) {
+                Result.failure(error)
+            }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                result.fold(onSuccess = onSuccess, onFailure = { onFailure() })
+            }
+        }, "uzumi-settings-backup").start()
     }
 
     /** ファイルI/Oを伴う処理をUI thread外で一度だけ行う。 */
@@ -459,8 +650,35 @@ class SettingsActivity : Activity() {
 
     private fun px(dp: Int): Int = (dp * density).toInt()
 
+    /** 確認済みバックアップと、TSV検証済み辞書項目を保持する。 */
+    private data class PreparedBackupImport(
+        val document: SettingsBackupDocument,
+        val dictionaryEntries: List<UserDictionaryEntry>?,
+    )
+
+    /** 読み込み処理の完了と、辞書の上限により一部追加できなかった状態を返す。 */
+    private data class ImportApplicationResult(val dictionaryWasLimited: Boolean)
+
     private companion object {
         /** 補足の説明を項目名より控えめに見せる不透明度。 */
         const val DESCRIPTION_ALPHA = 0.7f
+
+        /** バックアップ用のStorage Access Framework request code。 */
+        const val REQUEST_BACKUP_IMPORT = 34
+
+        /** バックアップ用のStorage Access Framework request code。 */
+        const val REQUEST_BACKUP_EXPORT = 35
+
+        /** バックアップJSONのMIME type。 */
+        const val BACKUP_MIME_TYPE = "application/json"
+
+        /** 初期ファイル名。 */
+        const val BACKUP_FILE_NAME = "uzumi-settings.json"
+
+        /** 1ファイルの読み込み上限。辞書を含む設定バックアップを扱い、異常に大きな入力を避ける。 */
+        const val MAX_BACKUP_BYTES = 16 * 1024 * 1024
+
+        /** SAF選択中の画面再生成で辞書を含める選択を引き継ぐstate key。 */
+        const val STATE_BACKUP_INCLUDE_DICTIONARY = "backup_include_dictionary"
     }
 }
