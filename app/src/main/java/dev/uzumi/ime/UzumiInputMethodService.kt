@@ -1097,32 +1097,23 @@ class UzumiInputMethodService : InputMethodService() {
                 refreshCandidates()
             })
         }
-        val predictions = current?.let { editor ->
-            editor.predictionBarResult()?.takeIf { predictionsShown }?.let { result ->
-                result.candidates.map { candidate -> predictionEntry(editor, result, candidate) }
-            }
-        }.orEmpty()
-        val allPredictions = current?.let { editor ->
-            editor.predictionResult()?.takeIf { predictionsShown }?.let { result ->
-                result.candidates.map { candidate -> predictionEntry(editor, result, candidate) }
-            }
-        }.orEmpty()
+        val barLayout = current?.takeIf { predictionsShown }?.predictionBarLayout()
+        val listLayout = current?.takeIf { predictionsShown }?.predictionLayout()
         val regularEntries = if (current?.isLiveMode == true) liveEntries(current, leading, trailing) else explicitEntries(current)
-        val entriesFor = { predictionEntries: List<CandidateEntry> ->
-            predictionEntries + regularEntries.mapIndexed { index, entry ->
-                CandidateEntry(
-                    label = entry.label,
-                    selected = entry.selected,
-                    surface = entry.surface,
-                    learnedReading = entry.learnedReading,
-                    sectionBreakBefore = predictionEntries.isNotEmpty() && index == 0,
-                    isPrediction = entry.isPrediction,
-                    onPick = entry.onPick,
-                )
+        // 予測は通常の候補の左に最大2件、残りを右に置く。区切りは、左の予測の後と右の予測の前に入れる。
+        val entriesFor = { layout: EditorSession.PredictionLayout? ->
+            val toEntry = { candidate: PredictionCandidate -> predictionEntry(current!!, layout!!.result, candidate) }
+            val before = layout?.beforeRegular.orEmpty().map(toEntry)
+            val regular = regularEntries.mapIndexed { index, entry ->
+                entry.withSectionBreak(before.isNotEmpty() && index == 0)
             }
+            val after = layout?.afterRegular.orEmpty().mapIndexed { index, candidate ->
+                toEntry(candidate).withSectionBreak(index == 0 && (before.isNotEmpty() || regular.isNotEmpty()))
+            }
+            before + regular + after
         }
-        val entries = entriesFor(predictions)
-        val listEntries = entriesFor(allPredictions)
+        val entries = entriesFor(barLayout)
+        val listEntries = entriesFor(listLayout)
         // 次の語の予測はInline候補の右に並べるため、Inline候補の表示条件には通常候補だけを使う。
         updateInlineHost(regularEntries.isEmpty() && current != null && InlineAutofillPolicy.shouldShow(
             hasComposition = current.hasComposition,
@@ -1195,7 +1186,7 @@ class UzumiInputMethodService : InputMethodService() {
         trailing.addView(views.divider(), 0)
         if (regularEntries.isEmpty() && current?.hasComposition != true) {
             // 次の語の予測がバーの上限を超えた場合は一覧を開けるようにし、キーボードを閉じる操作も残す。
-            if (allPredictions.size > predictions.size) {
+            if (listEntries.size > entries.size) {
                 trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
                     evaluation.record(OperationKind.OTHER)
                     hideKeyboardOverlays(except = KeyboardOverlay.CANDIDATE_GRID)
@@ -1576,7 +1567,18 @@ class UzumiInputMethodService : InputMethodService() {
         // 選ぶとすぐ確定する予測の候補か。選ぶだけの通常候補と見分けられるよう、色を変えて表示する。
         val isPrediction: Boolean = false,
         val onPick: () -> Unit,
-    )
+    ) {
+        /** 区切りの有無だけを変えた項目を返す。 */
+        fun withSectionBreak(sectionBreak: Boolean): CandidateEntry = CandidateEntry(
+            label = label,
+            selected = selected,
+            surface = surface,
+            learnedReading = learnedReading,
+            sectionBreakBefore = sectionBreak,
+            isPrediction = isPrediction,
+            onPick = onPick,
+        )
+    }
 
     /** 予測候補を候補バーの項目にする。Mozcの部分key候補は、選択結果を待って残りの読みを反映する。 */
     private fun predictionEntry(

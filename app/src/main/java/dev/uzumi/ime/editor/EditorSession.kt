@@ -291,14 +291,32 @@ class EditorSession(
     }
 
     /**
-     * 重複表記と非表示候補を除いた後、候補バーに出す予測を最大5件にする。英語表記はMozc予測の後ろに並ぶため、
-     * 5件で切ると一覧にしか出なくなる。英語候補が5件に入らないときは、最初の英語候補を5件目に置く。
+     * 予測を、通常の候補の前に置くものと後ろに置くものに分ける。前には読み全体か続きを含む予測を最大2件だけ置き、
+     * 読みの先頭だけを変換する候補（partialKeyあり）と残りの予測は後ろへ回す。予測を前に並べすぎると、
+     * 入力中の読みの本来の変換が候補バーの外へ押し出されるため。limitがあれば前後の合計をその件数までにし、
+     * 英語表記が入らないときは最初の英語候補を最後に置く（英語候補はMozc予測の後ろに並ぶため）。
      */
-    fun predictionBarResult(): PredictionResult? = predictionResult()?.let { result ->
-        val bar = result.candidates.take(MAX_PREDICTIONS_IN_BAR)
-        val english = result.candidates.firstOrNull(PredictionCandidate::englishVariant)
-        val candidates = if (english == null || english in bar) bar else bar.dropLast(1) + english
-        result.copy(candidates = candidates)
+    fun predictionLayout(limit: Int? = null): PredictionLayout? = predictionResult()?.let { result ->
+        val before = result.candidates
+            .filter { it.partialKey == null && !it.englishVariant }
+            .take(MAX_PREDICTIONS_BEFORE_REGULAR)
+        val rest = result.candidates.filterNot { it in before }
+        val after = if (limit == null) {
+            rest
+        } else {
+            val shown = rest.take((limit - before.size).coerceAtLeast(0))
+            val english = rest.firstOrNull(PredictionCandidate::englishVariant)
+            if (english == null || english in shown || shown.isEmpty()) shown else shown.dropLast(1) + english
+        }
+        PredictionLayout(result, before, after)
+    }
+
+    /** 候補バーに出す予測（最大5件）の並び。 */
+    fun predictionBarLayout(): PredictionLayout? = predictionLayout(MAX_PREDICTIONS_IN_BAR)
+
+    /** 候補バーに出す予測（最大5件）を、表示順（通常の候補の前に置くもの、後ろに置くもの）で返す。 */
+    fun predictionBarResult(): PredictionResult? = predictionBarLayout()?.let { layout ->
+        layout.result.copy(candidates = layout.beforeRegular + layout.afterRegular)
     }
 
     /** 予測の右に並ぶ通常の候補の表記。ライブ変換では注目segmentの候補、それ以外は明示変換・基本候補。 */
@@ -2394,9 +2412,19 @@ class EditorSession(
         val pendingRomaji: String,
     )
 
+    /** 予測の表示順。beforeRegularは通常の候補の左、afterRegularは右に並べる。 */
+    data class PredictionLayout(
+        val result: PredictionResult,
+        val beforeRegular: List<PredictionCandidate>,
+        val afterRegular: List<PredictionCandidate>,
+    )
+
     private companion object {
         /** 候補バーに並べる予測候補数。∨で開く一覧はこの上限を使わない。 */
         const val MAX_PREDICTIONS_IN_BAR = 5
+
+        /** 通常の候補より前に置く予測の数。入力中の読みの本来の変換をバーの左端近くに保つ。 */
+        private const val MAX_PREDICTIONS_BEFORE_REGULAR = 2
 
         /** 左ドラッグで行頭を探すときに読む、カーソル前の最大文字数。これより長い行はこの長さだけ消す。 */
         const val LINE_DELETE_MAX_CHARS = 1_000

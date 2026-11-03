@@ -496,6 +496,29 @@ class EditorSessionTest {
         assertEquals(listOf(request to candidates[2]), client.committed)
     }
 
+    /** 通常の候補の前に置く予測は最大2件にし、読みの先頭だけを変換する候補はすべて後ろへ回す。 */
+    @Test
+    fun predictionLayoutKeepsPartialCandidatesAfterRegularOnes() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+        assertTrue(session.inputText("きしゃ"))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        val candidates = listOf(
+            PredictionCandidate(1, "騎士", partialKey = "きし"),
+            PredictionCandidate(2, "記者会見", "きしゃかいけん"),
+            PredictionCandidate(3, "器", partialKey = "き"),
+            PredictionCandidate(4, "記者団", "きしゃだん"),
+            PredictionCandidate(5, "汽車ぽっぽ", "きしゃぽっぽ"),
+        )
+        assertTrue(session.applyPredictionResult(PredictionResult(request, candidates)))
+
+        val layout = session.predictionLayout()!!
+        assertEquals(listOf("記者会見", "記者団"), layout.beforeRegular.map { it.value })
+        assertEquals(listOf("騎士", "器", "汽車ぽっぽ"), layout.afterRegular.map { it.value })
+    }
+
     /** Mozc予測が5件以上あっても、最初の英語候補を候補バーの5件目に残す。 */
     @Test
     fun keepsFirstEnglishPredictionInBarBehindManyMozcPredictions() {
