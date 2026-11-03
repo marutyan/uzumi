@@ -1233,6 +1233,22 @@ class EditorSessionTest {
         assertTrue(client.committedAll.isEmpty())
     }
 
+    /** 明示変換の候補は、Mozcの候補と同じ表記の学習語も長押しメニューで照合できるよう文節の読みを持つ。 */
+    @Test
+    fun explicitCandidateOptionsCarryReadingForLearningLookup() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("かんじ")
+        session.convert()
+        val request = client.requests.single()
+        assertTrue(session.applyConversionOutcome(converted(request, "漢字", "感じ")))
+
+        val options = session.candidateOptions()
+        assertEquals(listOf(null, null), options.map { it.learnedReading })
+        assertEquals(listOf("かんじ", "かんじ"), options.map { it.learningLookupReading })
+    }
+
     /** 変換キーの候補巡回は非表示の候補を飛ばし、次が非表示でも先へ進める。 */
     @Test
     fun explicitConvertCycleSkipsHiddenCandidates() {

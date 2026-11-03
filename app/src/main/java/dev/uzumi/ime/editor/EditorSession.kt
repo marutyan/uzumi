@@ -206,6 +206,7 @@ class EditorSession(
                     conversionChoice = ConversionChoice(conversion.request, candidate.id, segmentIndex),
                     selected = candidate.value == segment.value,
                     learnedReading = candidate.learnedReading,
+                    learningLookupReading = candidate.learnedReading ?: candidate.reading,
                 )
             }
         }

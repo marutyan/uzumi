@@ -1629,7 +1629,8 @@ class UzumiInputMethodService : InputMethodService() {
                 label = label,
                 selected = choice != null && option.selected,
                 surface = option.value,
-                learnedReading = option.learnedReading,
+                // 長押しメニューは学習記録の有無で削除項目を出すため、Mozcの候補と同じ表記の学習語も照合できる読みを渡す。
+                learnedReading = option.learningLookupReading,
             ) {
                 if (choice != null) {
                     current.selectConversionCandidate(choice)
