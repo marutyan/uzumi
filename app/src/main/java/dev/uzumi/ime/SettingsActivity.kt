@@ -330,10 +330,18 @@ class SettingsActivity : Activity() {
 
     /** 確認後に反映し、辞書は既存TSV importと同じ追加・重複省略の規則で保存する。 */
     private fun confirmBackupImport(prepared: PreparedBackupImport) {
-        val message = if (prepared.dictionaryEntries == null) {
+        val baseMessage = if (prepared.dictionaryEntries == null) {
             getString(R.string.settings_backup_import_confirm)
         } else {
             getString(R.string.settings_backup_import_confirm_with_dictionary, prepared.dictionaryEntries.size)
+        }
+        // 読み込みで履歴がONからOFFへ変わると固定を含む履歴を消すため、設定画面で直接OFFにする場合と同じく先に知らせる。
+        val turnsHistoryOff = UzumiSettings.isClipboardHistoryEnabled(this) &&
+            (prepared.document.values["clipboardHistory"] as? BackupJsonValue.BooleanValue)?.value == false
+        val message = if (turnsHistoryOff) {
+            baseMessage + "\n\n" + getString(R.string.settings_backup_import_clears_clipboard_history)
+        } else {
+            baseMessage
         }
         AlertDialog.Builder(this)
             .setTitle(R.string.settings_backup_import)
