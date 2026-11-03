@@ -410,6 +410,8 @@ class SettingsActivity : Activity() {
 
     private fun toolbarActionLabel(action: ToolbarAction): String = when (action) {
         ToolbarAction.PASTE -> getString(R.string.toolbar_paste)
+        ToolbarAction.EDIT -> getString(R.string.toolbar_edit)
+        ToolbarAction.MICROPHONE -> getString(R.string.toolbar_microphone)
         ToolbarAction.UNDO -> getString(R.string.toolbar_undo)
         ToolbarAction.USER_DICTIONARY -> getString(R.string.open_user_dictionary)
         ToolbarAction.SETTINGS -> getString(R.string.open_settings)

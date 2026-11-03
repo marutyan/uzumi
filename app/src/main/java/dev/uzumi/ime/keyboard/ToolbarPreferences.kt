@@ -40,6 +40,8 @@ data class ToolbarPreferences(
         /** 現時点で実際に動作する機能。未実装機能は選択肢にも表示しない。 */
         val AVAILABLE_ACTIONS = listOf(
             ToolbarAction.PASTE,
+            ToolbarAction.EDIT,
+            ToolbarAction.MICROPHONE,
             ToolbarAction.UNDO,
             ToolbarAction.USER_DICTIONARY,
             ToolbarAction.SETTINGS,
@@ -77,6 +79,8 @@ data class ToolbarPreferences(
 /** 候補バーと機能タイルで共通に使う、実装済みの機能。 */
 enum class ToolbarAction(val icon: String) {
     PASTE("▣"),
+    EDIT("✎"),
+    MICROPHONE("🎙"),
     UNDO("↶"),
     USER_DICTIONARY("辞"),
     SETTINGS("⚙"),

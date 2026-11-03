@@ -14,6 +14,7 @@ import android.text.TextUtils
 import android.text.style.BackgroundColorSpan
 import android.util.Size
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -22,6 +23,9 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InlineSuggestionsRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InlineSuggestionsResponse
+import android.view.inputmethod.InputMethodInfo
+import android.view.inputmethod.InputMethodManager
+import android.view.inputmethod.InputMethodSubtype
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -44,6 +48,8 @@ import dev.uzumi.ime.dictionary.UserDictionaries
 import dev.uzumi.ime.clipboard.RecentClipboard
 import dev.uzumi.ime.editor.AndroidInputConnectionPort
 import dev.uzumi.ime.editor.EditorSession
+import dev.uzumi.ime.editor.EditPanelAction
+import dev.uzumi.ime.editor.EditPanelContextAction
 import dev.uzumi.ime.editor.InlineAutofillPolicy
 import dev.uzumi.ime.editor.InputFieldPolicy
 import dev.uzumi.ime.evaluation.ConversionProgress
@@ -59,6 +65,7 @@ import dev.uzumi.ime.evaluation.TimingKind
 import dev.uzumi.ime.evaluation.TimingSample
 import dev.uzumi.ime.keyboard.CandidateBarViews
 import dev.uzumi.ime.keyboard.CandidateGridView
+import dev.uzumi.ime.keyboard.EditPanelView
 import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardAction
 import dev.uzumi.ime.keyboard.KeyboardColors
@@ -108,6 +115,9 @@ class UzumiInputMethodService : InputMethodService() {
     // ∨で開く候補一覧。キーボードの面を覆って表示する。
     private var candidateGrid: CandidateGridView? = null
     private var toolbarPanel: ToolbarTilePanel? = null
+    // 編集パネルはキーボード面へ重ね、選択モードをIME表示中だけ保持する。
+    private var editPanel: EditPanelView? = null
+    private var editPanelSelectionMode = false
     // 入力Viewを作ったときのキーボード設定。設定画面で変わっていれば、次に表示するときに作り直す。
     private var builtPreferences: KeyboardPreferences? = null
     private var builtToolbarPreferences: ToolbarPreferences? = null
@@ -226,6 +236,7 @@ class UzumiInputMethodService : InputMethodService() {
         barViews = views
         candidateGrid?.hide()
         toolbarPanel?.hide()
+        hideEditPanel()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(views.colors.keyboardBackground)
@@ -302,6 +313,9 @@ class UzumiInputMethodService : InputMethodService() {
         toolbarPanel = ToolbarTilePanel(this).also { panel ->
             keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
         }
+        editPanel = EditPanelView(this, ::handleEditPanelAction).also { panel ->
+            keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
+        }
         root.addView(keyboardArea, LinearLayout.LayoutParams(match, wrap))
         applyPolicyToKeyboard()
         refreshCandidates()
@@ -361,6 +375,7 @@ class UzumiInputMethodService : InputMethodService() {
         clearInlineSuggestions()
         candidateGrid?.hide()
         toolbarPanel?.hide()
+        hideEditPanel()
         currentPolicy = null
         autoCapsMode = 0
         refreshCandidates()
@@ -445,6 +460,7 @@ class UzumiInputMethodService : InputMethodService() {
         )
         updateAutoCaps()
         refreshCandidates()
+        refreshEditPanelState()
     }
 
     /**
@@ -463,6 +479,7 @@ class UzumiInputMethodService : InputMethodService() {
         keyboardPanel?.cancelPendingInput()
         candidateGrid?.hide()
         toolbarPanel?.hide()
+        hideEditPanel()
         stopClipboardObservation()
         clearInlineSuggestions()
         super.onFinishInputView(finishingInput)
@@ -474,12 +491,19 @@ class UzumiInputMethodService : InputMethodService() {
         keyboardPanel?.cancelPendingInput()
         candidateGrid?.hide()
         toolbarPanel?.hide()
+        hideEditPanel()
         stopClipboardObservation()
         closeSession()
         clearInlineSuggestions()
         currentPolicy = null
         refreshCandidates()
         super.onFinishInput()
+    }
+
+    /** IME windowが隠れたとき編集パネルと選択モードを解放する。 */
+    override fun onWindowHidden() {
+        hideEditPanel()
+        super.onWindowHidden()
     }
 
     /**
@@ -734,6 +758,7 @@ class UzumiInputMethodService : InputMethodService() {
             clipboardSuggestion = null
             clipboardSuggestionSessionEpoch = null
             refreshCandidates()
+            refreshEditPanelState()
         }
     }
 
@@ -755,18 +780,21 @@ class UzumiInputMethodService : InputMethodService() {
                     clipboardSuggestionSessionEpoch = null
                     clipboardExpiry = null
                     refreshCandidates()
+                    refreshEditPanelState()
                 }
             }
             clipboardExpiry = expiry
             mainHandler.postDelayed(expiry, (suggestion.expiresAtMillis - System.currentTimeMillis()).coerceAtLeast(0L))
         }
         refreshCandidates()
+        refreshEditPanelState()
     }
 
     /** キーボード非表示時に監視・期限処理・本文を参照できる候補を破棄する。 */
     private fun stopClipboardObservation() {
         recentClipboard?.close()
         clearClipboardSuggestion()
+        refreshEditPanelState()
     }
 
     /** 設定値を変えず、キーボード最小高を残した画面内のバー段数上限を返す。 */
@@ -976,6 +1004,7 @@ class UzumiInputMethodService : InputMethodService() {
         val views = barViews ?: return
         trailing.addView(views.symbolButton("▦", getString(R.string.toolbar_open)) {
             val panel = toolbarPanel ?: return@symbolButton
+            hideEditPanel()
             candidateGrid?.hide()
             if (panel.isShowing) {
                 panel.hide()
@@ -998,6 +1027,8 @@ class UzumiInputMethodService : InputMethodService() {
                 ToolbarAction.UNDO -> current?.let {
                     it.canUndoDeletion || it.liveCandidateState()?.canUndo == true
                 } == true
+                ToolbarAction.EDIT -> current?.isActive == true && inputViewVisible
+                ToolbarAction.MICROPHONE -> findEnabledVoiceInputMethod() != null
                 else -> true
             }
         }
@@ -1007,6 +1038,8 @@ class UzumiInputMethodService : InputMethodService() {
         val current = session
         when (action) {
             ToolbarAction.PASTE -> pasteFromClipboard()
+            ToolbarAction.EDIT -> showEditPanel()
+            ToolbarAction.MICROPHONE -> switchToEnabledVoiceInputMethod()
             ToolbarAction.UNDO -> {
                 evaluation.record(OperationKind.CORRECTION)
                 if (current == null || session !== current) return
@@ -1028,10 +1061,104 @@ class UzumiInputMethodService : InputMethodService() {
     private fun toolbarActionLabel(action: ToolbarAction): String = when (action) {
         // 本文の冒頭は候補バーの提案だけに出し、機能バーでは同じ本文を重ねて見せない。
         ToolbarAction.PASTE -> getString(R.string.toolbar_paste)
+        ToolbarAction.EDIT -> getString(R.string.toolbar_edit)
+        ToolbarAction.MICROPHONE -> getString(R.string.toolbar_microphone)
         ToolbarAction.UNDO -> getString(R.string.toolbar_undo)
         ToolbarAction.USER_DICTIONARY -> getString(R.string.open_user_dictionary)
         ToolbarAction.SETTINGS -> getString(R.string.open_settings)
         ToolbarAction.CLOSE_KEYBOARD -> getString(R.string.close_keyboard)
+    }
+
+    /** 有効な入力方法から、voice modeの有効サブタイプを一つ見つける。 */
+    private fun findEnabledVoiceInputMethod(): Pair<InputMethodInfo, InputMethodSubtype>? {
+        val manager = getSystemService(InputMethodManager::class.java) ?: return null
+        return manager.enabledInputMethodList.asSequence().flatMap { info ->
+            manager.getEnabledInputMethodSubtypeList(info, true).asSequence()
+                .filter { subtype -> subtype.mode.equals("voice", ignoreCase = true) }
+                .map { subtype -> info to subtype }
+        }.firstOrNull()
+    }
+
+    /** 有効な音声入力サブタイプへ切り替え、Uzumi側では録音を行わない。 */
+    private fun switchToEnabledVoiceInputMethod() {
+        val target = findEnabledVoiceInputMethod() ?: return
+        hideEditPanel()
+        switchInputMethod(target.first.id, target.second)
+    }
+
+    /** 編集パネルを開き、他のキーボード面overlayを閉じる。 */
+    private fun showEditPanel() {
+        val panel = editPanel ?: return
+        if (panel.isShowing) {
+            hideEditPanel()
+            return
+        }
+        candidateGrid?.hide()
+        toolbarPanel?.hide()
+        session?.refreshSelectionFromEditor()
+        editPanelSelectionMode = false
+        panel.show(
+            isPassword = session?.policy?.isPassword == true,
+            hasSelection = session?.hasEditPanelSelection == true,
+            hasClipboardText = inputViewVisible && recentClipboard?.hasCurrentText() == true,
+            selectionMode = editPanelSelectionMode,
+        )
+    }
+
+    /** 編集パネルを閉じ、選択モードを次回へ持ち越さない。 */
+    private fun hideEditPanel() {
+        editPanelSelectionMode = false
+        editPanel?.hide()
+    }
+
+    /** 表示中の編集パネルへEditor selectionとclipboardの可否を反映する。 */
+    private fun refreshEditPanelState() {
+        val panel = editPanel?.takeIf { it.isShowing } ?: return
+        val current = session?.takeIf { it.isActive }
+        panel.update(
+            isPassword = current?.policy?.isPassword == true,
+            hasSelection = current?.hasEditPanelSelection == true,
+            hasClipboardText = inputViewVisible && recentClipboard?.hasCurrentText() == true,
+            selectionMode = editPanelSelectionMode,
+        )
+    }
+
+    /** 編集パネルのタイル操作を、現在の編集セッションと標準Editor APIへ渡す。 */
+    private fun handleEditPanelAction(action: EditPanelAction) {
+        if (action == EditPanelAction.CLOSE) {
+            hideEditPanel()
+            return
+        }
+        if (action == EditPanelAction.TOGGLE_SELECTION) {
+            editPanelSelectionMode = !editPanelSelectionMode
+            refreshEditPanelState()
+            return
+        }
+        val current = session?.takeIf { it.isActive } ?: return
+        when (action) {
+            EditPanelAction.LEFT -> current.moveEditPanelHorizontally(-1, editPanelSelectionMode)
+            EditPanelAction.RIGHT -> current.moveEditPanelHorizontally(1, editPanelSelectionMode)
+            EditPanelAction.UP -> current.sendEditPanelKeyStroke(
+                KeyEvent.KEYCODE_DPAD_UP,
+                if (editPanelSelectionMode) KeyEvent.META_SHIFT_ON else 0,
+            )
+            EditPanelAction.DOWN -> current.sendEditPanelKeyStroke(
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                if (editPanelSelectionMode) KeyEvent.META_SHIFT_ON else 0,
+            )
+            EditPanelAction.SELECT_ALL -> current.performEditPanelContextAction(EditPanelContextAction.SELECT_ALL)
+            EditPanelAction.COPY -> current.performEditPanelContextAction(EditPanelContextAction.COPY)
+            EditPanelAction.CUT -> current.performEditPanelContextAction(EditPanelContextAction.CUT)
+            EditPanelAction.PASTE -> current.performEditPanelContextAction(EditPanelContextAction.PASTE)
+            EditPanelAction.HOME -> current.sendEditPanelKeyStroke(KeyEvent.KEYCODE_MOVE_HOME)
+            EditPanelAction.END -> current.sendEditPanelKeyStroke(KeyEvent.KEYCODE_MOVE_END)
+            EditPanelAction.DELETE -> current.deleteFromEditPanel()
+            EditPanelAction.TOGGLE_SELECTION, EditPanelAction.CLOSE -> return
+        }
+        scheduleConversionTimeout(current)
+        updateAutoCaps()
+        refreshCandidates()
+        refreshEditPanelState()
     }
 
     /** ✕で閉じた提案は同じclipでは再表示せず、通常の候補バーへ戻す。 */

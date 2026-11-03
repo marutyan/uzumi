@@ -5,6 +5,13 @@ import org.junit.Test
 
 /** 機能の選択順とバーごとの段数が表示に反映されることを確かめる。 */
 class ToolbarPreferencesTest {
+    /** 編集と音声入力は選択可能な機能一覧に各一度だけ含める。 */
+    @Test
+    fun editAndMicrophoneActionsAreAvailableOnce() {
+        assertEquals(1, ToolbarPreferences.AVAILABLE_ACTIONS.count { it == ToolbarAction.EDIT })
+        assertEquals(1, ToolbarPreferences.AVAILABLE_ACTIONS.count { it == ToolbarAction.MICROPHONE })
+    }
+
     @Test
     fun normalizesActionOrderAndIndependentRowCounts() {
         val preferences = ToolbarPreferences(
