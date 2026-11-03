@@ -58,7 +58,10 @@ object UzumiSettings {
         val apply: (Context, BackupJsonValue) -> Unit,
     )
 
-    /** 書き出しと読み込みに含める利用者設定の一覧。学習の有効状態は含め、学習履歴やdebugモデルは含めない。 */
+    /**
+     * 書き出しと読み込みに含める利用者設定の一覧。学習・クリップボード履歴の有効状態は含め、
+     * 学習履歴、非表示にした候補、クリップボード履歴の本文、debugモデルは個人の入力データまたは開発用のため含めない。
+     */
     private val BACKUP_SETTINGS = listOf(
         BackupSettingDescriptor(
             key = "keyboardHeightDp",
@@ -144,6 +147,12 @@ object UzumiSettings {
             capture = { BackupJsonValue.BooleanValue(isRomajiEnglishQwertyIncluded(it)) },
             normalize = { value -> value as? BackupJsonValue.BooleanValue },
             apply = { context, value -> setRomajiEnglishQwertyIncluded(context, value.booleanValue()!!) },
+        ),
+        BackupSettingDescriptor(
+            key = "clipboardHistory",
+            capture = { BackupJsonValue.BooleanValue(isClipboardHistoryEnabled(it)) },
+            normalize = { value -> value as? BackupJsonValue.BooleanValue },
+            apply = { context, value -> setClipboardHistoryEnabled(context, value.booleanValue()!!) },
         ),
     )
 

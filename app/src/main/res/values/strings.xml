@@ -154,10 +154,10 @@
     <string name="settings_backup_export">設定を書き出す</string>
     <string name="settings_backup_import">設定を読み込む</string>
     <string name="settings_backup_include_dictionary">ユーザー辞書も含める</string>
-    <string name="settings_backup_export_description">ライブ変換などの設定と、選択した場合はユーザー辞書を書き出します。学習履歴と開発用の変換モデル選択は含みません。</string>
+    <string name="settings_backup_export_description">ライブ変換などの設定と、選択した場合はユーザー辞書を書き出します。学習履歴、表示しない候補、クリップボード履歴の内容、開発用の変換モデル選択は含みません。</string>
     <string name="settings_backup_export_done">設定を書き出しました。</string>
-    <string name="settings_backup_import_confirm">バックアップの設定を読み込みます。バックアップにない設定は現在のままです。学習履歴と開発用の変換モデル選択は含まれません。</string>
-    <string name="settings_backup_import_confirm_with_dictionary">バックアップの設定を読み込み、ユーザー辞書%1$d件を追加します。すでにある単語は重複として省きます。学習履歴と開発用の変換モデル選択は含まれません。</string>
+    <string name="settings_backup_import_confirm">バックアップの設定を読み込みます。バックアップにない設定は現在のままです。学習履歴、表示しない候補、クリップボード履歴の内容、開発用の変換モデル選択は含まれません。</string>
+    <string name="settings_backup_import_confirm_with_dictionary">バックアップの設定を読み込み、ユーザー辞書%1$d件を追加します。すでにある単語は重複として省きます。学習履歴、表示しない候補、クリップボード履歴の内容、開発用の変換モデル選択は含まれません。</string>
     <string name="settings_backup_import_apply">読み込む</string>
     <string name="settings_backup_import_done">設定を読み込みました。</string>
     <string name="settings_backup_import_partial">設定を読み込みました。辞書は登録上限のため一部だけ追加しました。</string>

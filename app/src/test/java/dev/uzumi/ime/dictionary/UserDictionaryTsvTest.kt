@@ -134,6 +134,7 @@ class UserDictionaryTsvTest {
                 "candidateRows" to BackupJsonValue.NumberValue("3"),
                 "romajiInput" to BackupJsonValue.BooleanValue(true),
                 "romajiEnglishQwerty" to BackupJsonValue.BooleanValue(false),
+                "clipboardHistory" to BackupJsonValue.BooleanValue(false),
             ),
             userDictionaryTsv = UserDictionaryTsv.format(entries),
         )
