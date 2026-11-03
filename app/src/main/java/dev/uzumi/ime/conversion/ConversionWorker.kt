@@ -572,25 +572,46 @@ class ConversionWorker(
             engine.convertSegments(sessionId, chunk)?.let { toLiveSegments(chunk, it) }
         }
         // 評価モードの間だけ件数を集める。H3の照合に使うMozcの文節は、変換器を通さずエンジンから直接取り出す。
-        val collector = if (evaluationActive()) {
+        val recordingEvaluation = evaluationActive()
+        val collector = if (recordingEvaluation) {
             LiveEvaluationCollector(mozcDirect = { reading ->
                 runCatching { engine.convertSegments(sessionId, reading) }.getOrNull()?.let { toLiveSegments(reading, it) }
             })
         } else {
             null
         }
+        val emoticons = emoticonJudge(request.learningAllowed)
         val neural = neuralBackend?.let { backend ->
+            val deadlineNanos = pending.requestedAtNanos + NeuralInferenceSettings.TIMEOUT_MILLIS * 1_000_000
             val model = backend.modelFor(
-                deadlineNanos = pending.requestedAtNanos + NeuralInferenceSettings.TIMEOUT_MILLIS * 1_000_000,
+                deadlineNanos = deadlineNanos,
                 owner = pending.sequence,
                 isSuperseded = { latestLiveRequest.get() != null },
                 record = { collector?.onCall(it) },
             )
+            // 評価中は候補補充をせず、通常時も期限内で最新の要求だけに同期照会する。
+            val joinedCandidates: ((String, String) -> List<String>?)? = if (recordingEvaluation) {
+                null
+            } else {
+                { reading, surface ->
+                    if (evaluationActive() || emoticons.isEmoticon(reading, surface) ||
+                        latestLiveRequest.get() != null || nanoTime() >= deadlineNanos
+                    ) {
+                        null
+                    } else {
+                        runCatching { engine.convertSegment(sessionId, "", reading, "") }
+                            .getOrNull()
+                            ?.takeIf { it.reading == reading && it.value.isNotEmpty() }
+                            ?.let { listOf(it.value) + it.candidates }
+                    }
+                }
+            }
             // 学習禁止欄と機密欄では、保護範囲や先に変換した表記を左文脈としてモデルへ渡さない。
             NeuralRangeConverter(
                 model,
                 mozcRange,
                 collector ?: NeuralConversionObserver.NONE,
+                joinedCandidates = joinedCandidates,
                 useLeftContext = request.learningAllowed,
             )
         }
@@ -613,7 +634,7 @@ class ConversionWorker(
             // 部分範囲の先頭からの読みに一致する句で区切りを合わせる。学習禁止欄では参照しない。
             learnedPhrases = learnedPhrases(request.learningAllowed),
             // 顔文字・絵文字はニューラル変換やMozcの第一候補、学習語、登録語でも表示値にしない。
-            emoticons = emoticonJudge(request.learningAllowed),
+            emoticons = emoticons,
             // ユーザーが伸縮で区切りを決めた読みは、Mozcの文節の幅を合わせて一文節として変換する。
             convertFixed = { reading ->
                 if (isAsciiOnly(reading)) {

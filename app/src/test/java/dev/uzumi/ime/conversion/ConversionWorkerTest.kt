@@ -1241,6 +1241,115 @@ class ConversionWorkerTest {
         assertTrue(fixture.reports.isEmpty())
     }
 
+    /** 結合文節の一文節Mozc候補は、モデルの表示値を保ったまま通常の候補へ加える。 */
+    @Test
+    fun joinedNeuralSegmentAddsSingleSegmentMozcCandidates() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.calls.clear()
+        fixture.engine.segmentsFor = { reading ->
+            if (reading == "あい") {
+                listOf(EngineSegment("あ", "亜", listOf("亜")), EngineSegment("い", "胃", listOf("胃")))
+            } else {
+                listOf(EngineSegment(reading, reading, listOf(reading)))
+            }
+        }
+        fixture.engine.segmentFor = { _, reading, _ -> EngineSegment(reading, "藍", listOf("藍", "合い")) }
+        fixture.worker.setNeuralBackend(FakeNeuralBackend { reading, _ ->
+            NeuralModelOutput.Completed(if (reading == "あい") "愛" else reading)
+        })
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "あい"))
+        fixture.executor.runAll()
+
+        val segment = fixture.liveResults.single().second.segments.single()
+        assertEquals("愛", segment.surface)
+        assertEquals(listOf("愛", "亜胃", "藍", "合い"), segment.candidates)
+        assertFalse(segment.candidatesComplete)
+        assertEquals(1, fixture.engine.calls.count { it == "convertSegment(1,|あい|)" })
+    }
+
+    /** 評価中は結合文節の候補補充を行わず、従来の第一候補と候補列を保つ。 */
+    @Test
+    fun joinedNeuralSegmentKeepsEvaluationCandidatesUnchanged() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.calls.clear()
+        fixture.evaluating = true
+        fixture.engine.segmentsFor = { reading ->
+            if (reading == "あい") {
+                listOf(EngineSegment("あ", "亜", listOf("亜")), EngineSegment("い", "胃", listOf("胃")))
+            } else {
+                listOf(EngineSegment(reading, reading, listOf(reading)))
+            }
+        }
+        fixture.engine.segmentFor = { _, reading, _ -> EngineSegment(reading, "藍", listOf("藍", "合い")) }
+        fixture.worker.setNeuralBackend(FakeNeuralBackend { reading, _ ->
+            NeuralModelOutput.Completed(if (reading == "あい") "愛" else reading)
+        })
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "あい"))
+        fixture.executor.runAll()
+
+        val segment = fixture.liveResults.single().second.segments.single()
+        assertEquals("愛", segment.surface)
+        assertEquals(listOf("愛", "亜胃"), segment.candidates)
+        assertFalse(segment.candidatesComplete)
+        assertFalse(fixture.engine.calls.any { it == "convertSegment(1,|あい|)" })
+        assertEquals(1, fixture.reports.size)
+    }
+
+    /** 300 msのニューラル期限に達した後は結合文節の候補照会を始めない。 */
+    @Test
+    fun joinedNeuralCandidateLookupStopsAtInferenceDeadline() {
+        var nowNanos = 0L
+        val fixture = Fixture(nanoTime = { nowNanos })
+        fixture.startReady()
+        fixture.engine.calls.clear()
+        fixture.engine.segmentsFor = { reading ->
+            if (reading == "あい") {
+                listOf(EngineSegment("あ", "亜", listOf("亜")), EngineSegment("い", "胃", listOf("胃")))
+            } else {
+                listOf(EngineSegment(reading, reading, listOf(reading)))
+            }
+        }
+        fixture.worker.setNeuralBackend(FakeNeuralBackend { reading, _ ->
+            nowNanos = NeuralInferenceSettings.TIMEOUT_MILLIS * 1_000_000L
+            NeuralModelOutput.Completed(if (reading == "あい") "愛" else reading)
+        })
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "あい"))
+        fixture.executor.runAll()
+
+        assertEquals("愛", fixture.liveResults.single().second.segments.single().surface)
+        assertFalse(fixture.engine.calls.any { it.startsWith("convertSegment(1,|") })
+    }
+
+    /** 一文節候補のMozc照会が失敗したら、既存のモデル表記と連結表記を残す。 */
+    @Test
+    fun failedJoinedNeuralCandidateLookupKeepsExistingCandidates() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.segmentsFor = { reading ->
+            if (reading == "あい") {
+                listOf(EngineSegment("あ", "亜", listOf("亜")), EngineSegment("い", "胃", listOf("胃")))
+            } else {
+                listOf(EngineSegment(reading, reading, listOf(reading)))
+            }
+        }
+        fixture.engine.segmentFor = { _, _, _ -> null }
+        fixture.worker.setNeuralBackend(FakeNeuralBackend { reading, _ ->
+            NeuralModelOutput.Completed(if (reading == "あい") "愛" else reading)
+        })
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "あい"))
+        fixture.executor.runAll()
+
+        val segment = fixture.liveResults.single().second.segments.single()
+        assertEquals("愛", segment.surface)
+        assertEquals(listOf("愛", "亜胃"), segment.candidates)
+    }
+
     /** 学習禁止欄では、保護範囲の表記を含む左文脈をモデルへ渡さない。通常の欄では渡す。 */
     @Test
     fun learningForbiddenFieldWithholdsLeftContext() {
@@ -1614,6 +1723,7 @@ class ConversionWorkerTest {
         dictionary: FakeLookup? = null,
         learning: LearningStore? = null,
         englishWords: EnglishWordLookup? = null,
+        nanoTime: () -> Long = System::nanoTime,
     ) {
         val engine = FakeConversionEngine()
         val executor = ManualExecutor()
@@ -1639,6 +1749,7 @@ class ConversionWorkerTest {
             learningStore = { learning },
             onLiveReport = { epoch, report -> reports += epoch to report },
             evaluationActive = { evaluating },
+            nanoTime = nanoTime,
         )
 
         /** 初期化と既知変換例の確認を済ませ、以後のエンジンsession番号を1から始める。 */
