@@ -12,6 +12,7 @@ import dev.uzumi.ime.conversion.LearnedSegment
 import dev.uzumi.ime.conversion.LiveConversionClient
 import dev.uzumi.ime.conversion.PredictionCandidate
 import dev.uzumi.ime.conversion.PredictionClient
+import dev.uzumi.ime.conversion.PredictionCommitResult
 import dev.uzumi.ime.conversion.PredictionRequest
 import dev.uzumi.ime.conversion.PredictionResult
 import dev.uzumi.ime.evaluation.EvaluationCounter
@@ -244,7 +245,7 @@ class EditorSessionTest {
         assertTrue(connection.contextMenuActions.isEmpty())
     }
 
-    /** 予測応答は読みの世代が一致するときだけ表示し、選択すると未確定全体を確定する。 */
+    /** 予測応答は読みの世代が一致するときだけ表示し、全体候補は未確定全体を確定する。 */
     @Test
     fun typedPredictionReplacesWholeCompositionAndRejectsStaleResponse() {
         val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
@@ -267,6 +268,187 @@ class EditorSessionTest {
         assertEquals("ありがとうございます", connection.text)
         assertFalse(session.hasComposition)
         assertEquals(listOf(request to PredictionCandidate(2, "ありがとうございます")), client.committed)
+    }
+
+    /** Mozc応答が部分確定を示したときだけ先頭を確定し、残りと保留中のローマ字をcompositionへ残す。 */
+    @Test
+    fun partialPredictionCommitsPrefixAndKeepsRemainingReadingAndPendingRomaji() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client, romajiInputEnabled = true)
+        typeRomaji(session, "kyouhak")
+        assertEquals("きょうはk", connection.text)
+
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        assertEquals("きょうは", request.reading)
+        val candidate = PredictionCandidate(21, "今日", partialKey = "きょう")
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(candidate))))
+
+        assertTrue(session.selectPrediction(request, candidate))
+        assertEquals("きょうはk", connection.text)
+        assertTrue(session.applyPredictionCommitResult(PredictionCommitResult(
+            request = request,
+            candidate = candidate,
+            succeeded = true,
+            remainingReading = "は",
+            learningReading = "きょう",
+        )))
+
+        assertEquals("今日はk", connection.text)
+        assertTrue(session.hasComposition)
+        assertEquals("はk", session.compositionSnapshot().reading)
+        assertEquals(listOf(request to candidate), client.committed)
+        assertTrue(session.refreshPredictions())
+        assertEquals("は", client.requests.last().reading)
+    }
+
+    /** Mozcの確定失敗や不整合な残り読みでは、元のcompositionを保つ。 */
+    @Test
+    fun unusablePredictionCommitResultKeepsOriginalComposition() {
+        val invalidResults: List<Pair<Boolean, String?>> = listOf(
+            false to "は",
+            true to null,
+            true to "ふ",
+        )
+        for ((succeeded, remainingReading) in invalidResults) {
+            val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+            val client = FakePredictionClient()
+            val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+            assertTrue(session.inputText("きょうは"))
+            assertTrue(session.refreshPredictions())
+            val request = client.requests.single()
+            val candidate = PredictionCandidate(24, "今日", partialKey = "きょう")
+            assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(candidate))))
+            assertTrue(session.selectPrediction(request, candidate))
+
+            assertFalse(session.applyPredictionCommitResult(PredictionCommitResult(
+                request = request,
+                candidate = candidate,
+                succeeded = succeeded,
+                remainingReading = remainingReading,
+                learningReading = "きょう",
+            )))
+            assertEquals("きょうは", connection.text)
+            assertEquals("きょうは", session.compositionSnapshot().reading)
+            assertTrue(session.hasComposition)
+        }
+    }
+
+    /** keyのprefixが候補でも、Mozcが全読みを消費した応答なら入力の残りを重ねず全体候補だけ確定する。 */
+    @Test
+    fun prefixKeyCandidateUsesMozcRemainingReadingInsteadOfKeyLength() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+        assertTrue(session.inputText("りようかいしました", fromTwelveKey = true))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        assertTrue(request.kanaModifierInsensitive)
+        val candidate = PredictionCandidate(22, "了解しました", partialKey = "りょうかいし")
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(candidate))))
+
+        assertTrue(session.selectPrediction(request, candidate))
+        assertTrue(session.applyPredictionCommitResult(PredictionCommitResult(
+            request = request,
+            candidate = candidate,
+            succeeded = true,
+            remainingReading = "",
+            learningReading = "りようかいしました",
+        )))
+
+        assertEquals("了解しました", connection.text)
+        assertFalse(session.hasComposition)
+    }
+
+    /** prefix keyでもMozcが全読みを確定したら、入力途中の子音を次の語へ残さない。 */
+    @Test
+    fun fullPredictionCommitDiscardsPendingRomajiAfterPrefixKey() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client, romajiInputEnabled = true)
+        typeRomaji(session, "ryoukaishimashitak")
+
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        assertEquals("りょうかいしました", request.reading)
+        val candidate = PredictionCandidate(25, "了解しました", partialKey = "りょうかいし")
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(candidate))))
+        assertTrue(session.selectPrediction(request, candidate))
+        assertTrue(session.applyPredictionCommitResult(PredictionCommitResult(
+            request = request,
+            candidate = candidate,
+            succeeded = true,
+            remainingReading = "",
+            learningReading = "りょうかいしました",
+        )))
+
+        assertEquals("了解しました", connection.text)
+        assertFalse(session.hasComposition)
+        assertTrue(session.inputRomajiText("a"))
+        assertEquals("了解しましたあ", connection.text)
+    }
+
+    /** ライブ変換中も実際の部分確定後に残り読みを戻し、次の入力を続ける。 */
+    @Test
+    fun livePartialPredictionRestoresRemainingReadingAndContinuesInput() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val liveClient = FakeLiveClient()
+        val predictionClient = FakePredictionClient()
+        val core = LiveConversionCore()
+        val session = EditorSession(
+            connection = connection,
+            policy = normalPolicy(),
+            liveCore = core,
+            liveClient = liveClient,
+            predictionClient = predictionClient,
+        )
+        typeLive(session, liveClient, "きょうは")
+        assertEquals("きょうは", core.reading)
+
+        assertTrue(session.refreshPredictions())
+        val request = predictionClient.requests.single()
+        val candidate = PredictionCandidate(26, "今日", partialKey = "きょう")
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(candidate))))
+        assertTrue(session.selectPrediction(request, candidate))
+        assertTrue(session.applyPredictionCommitResult(PredictionCommitResult(
+            request = request,
+            candidate = candidate,
+            succeeded = true,
+            remainingReading = "は",
+            learningReading = "きょう",
+        )))
+
+        assertEquals("は", core.reading)
+        assertTrue(session.inputText("て"))
+        assertEquals("はて", core.reading)
+        assertEquals("はて", liveClient.requests.last().second.targetReading)
+    }
+
+    /** 選択応答より先に入力が進んだとき、古いMozc応答で新しいcompositionを上書きしない。 */
+    @Test
+    fun stalePredictionCommitResultDoesNotReplaceNewerInput() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+        assertTrue(session.inputText("きょうは"))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        val candidate = PredictionCandidate(23, "今日", partialKey = "きょう")
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(candidate))))
+        assertTrue(session.selectPrediction(request, candidate))
+        assertTrue(session.inputText("て"))
+
+        assertFalse(session.applyPredictionCommitResult(PredictionCommitResult(
+            request = request,
+            candidate = candidate,
+            succeeded = true,
+            remainingReading = "は",
+            learningReading = "きょう",
+        )))
+
+        assertEquals("きょうはて", connection.text)
+        assertEquals("きょうはて", session.compositionSnapshot().reading)
     }
 
     /** 入力途中のローマ字は予測の読みへ含めず、予測を選ぶと保留ごと未確定全体を置き換える。 */
@@ -331,7 +513,7 @@ class EditorSessionTest {
         assertTrue(session.predictionResult()!!.candidates.isEmpty())
     }
 
-    /** 入力全体の候補から、本文に表示中のライブ変換の表記と注目segmentの候補と同じ表記を除く。全部重なれば0件にする。 */
+    /** 先頭3候補が表示中の表記と通常候補に重なっても後続予測を残し、バー5件・一覧全件を分ける。 */
     @Test
     fun livePredictionsExcludeDisplayedValueAndRegularCandidates() {
         val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
@@ -350,17 +532,19 @@ class EditorSessionTest {
         assertEquals("今日は", connection.text)
         assertTrue(session.refreshPredictions())
         val request = predictionClient.requests.single()
-        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(
-            PredictionCandidate(1, "今日は"),
-            PredictionCandidate(2, "京は"),
-            PredictionCandidate(3, "今日はいい天気"),
-            PredictionCandidate(4, "キョウハ"),
-        ))))
+        val overlapping = (listOf(connection.text) + session.liveCandidateState()!!.choices.map { it.value })
+            .distinct()
+            .take(3)
+        assertEquals(3, overlapping.size)
+        val remaining = List(6) { "予測${it + 1}" }
+        val candidates = (overlapping + remaining).mapIndexed { index, value -> PredictionCandidate(index + 1, value) }
+        assertTrue(session.applyPredictionResult(PredictionResult(request, candidates)))
 
-        assertEquals(listOf("今日はいい天気", "キョウハ"), session.predictionResult()!!.candidates.map { it.value })
-        // 除いた候補が無くても、残った候補は元の候補IDで選べる。
-        assertTrue(session.selectPrediction(request, candidateId = 3))
-        assertEquals("今日はいい天気", connection.text)
+        assertEquals(remaining, session.predictionResult()!!.candidates.map { it.value })
+        assertEquals(remaining.take(5), session.predictionBarResult()!!.candidates.map { it.value })
+        // 重複を除いても、残った候補は元の候補IDで選べる。
+        assertTrue(session.selectPrediction(request, candidateId = 4))
+        assertEquals("予測1", connection.text)
     }
 
     /** 変換前の入力では、表示中の読みと基本候補（カタカナ）と同じ表記を除き、重複だけなら予測を0件にする。 */
@@ -1204,12 +1388,9 @@ class EditorSessionTest {
         typeLive(session, client, "よい")
         assertEquals("良い", connection.text)
         assertTrue(session.liveCandidateState()!!.choices.any { it.value == "良い" })
-        assertTrue(session.refreshPredictions())
-        val predictionRequest = predictionClient.requests.single()
-        assertTrue(session.applyPredictionResult(PredictionResult(predictionRequest, listOf(
-            PredictionCandidate(6, "評価中の予測"),
-        ))))
-        assertEquals(listOf("評価中の予測"), session.predictionCandidates().map { it.value })
+        assertFalse(session.refreshPredictions())
+        assertTrue(predictionClient.requests.isEmpty())
+        assertTrue(session.predictionCandidates().isEmpty())
 
         counter.finish()
         assertTrue(session.setHiddenCandidateSurfaces(setOf("良い", "評価中の予測")))

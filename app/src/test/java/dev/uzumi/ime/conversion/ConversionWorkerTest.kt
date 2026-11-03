@@ -132,7 +132,8 @@ class ConversionWorkerTest {
 
         assertEquals(listOf("createSession", "setIncognito(false)", "suggest(2,ありがと)"), fixture.engine.calls)
         assertEquals(prediction, fixture.predictionResults.single().request)
-        assertEquals(listOf("ありがとう", "ありがとうございます", "助かります"),
+        // 表示件数は EditorSession が重複を除いた後に決めるため、ワーカーはエンジンの予測を切らずに渡す。
+        assertEquals(listOf("ありがとう", "ありがとうございます", "助かります", "助かった"),
             fixture.predictionResults.single().candidates.map { it.value })
 
         fixture.engine.calls.clear()
@@ -142,7 +143,7 @@ class ConversionWorkerTest {
         assertEquals(listOf("助かります"), learning.exactMatches("たすかります").map { it.surface })
     }
 
-    /** 英語候補はMozc予測の後ろに足し、IDなしで選んだ表記だけをLearningStoreへ記録する。 */
+    /** Mozc予測を3件で切らず英語候補の前へすべて並べ、選んだ英語表記だけをLearningStoreへ記録する。 */
     @Test
     fun englishPredictionFollowsMozcAndCommitsWithoutEngineCandidateId() {
         val learning = learningStore()
@@ -161,7 +162,7 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
         val candidates = fixture.predictionResults.single().candidates
 
-        assertEquals(listOf("Mozc候補1", "Mozc候補2", "Mozc候補3", "email", "Email", "E-mail"), candidates.map { it.value })
+        assertEquals(listOf("Mozc候補1", "Mozc候補2", "Mozc候補3", "Mozc候補4", "email", "Email", "E-mail"), candidates.map { it.value })
         val selected = candidates.first { it.value == "Email" }
         assertNull(selected.id)
         assertTrue(selected.englishVariant)
@@ -176,6 +177,33 @@ class ConversionWorkerTest {
         fixture.worker.requestPrediction(request.copy(revision = 3))
         fixture.executor.runAll()
         assertTrue(fixture.predictionResults.last().candidates.none { it.englishVariant })
+    }
+
+    /** 部分予測は確定範囲の読みをLearningStoreへ記録し、Mozcにも同じ候補IDをSUBMITする。 */
+    @Test
+    fun partialPredictionLearnsOnlyConsumedReadingAndSubmitsMozcCandidate() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        val candidate = PredictionCandidate(12, "今日", partialKey = "きょう")
+        fixture.engine.predictionCommitResult = EnginePredictionCommit(
+            remainingReading = "は",
+            resultReading = "きょう",
+        )
+        fixture.engine.predictions = listOf(candidate)
+        val request = PredictionRequest(sessionEpoch = 1, revision = 2, reading = "きょうは")
+
+        fixture.worker.requestPrediction(request)
+        fixture.executor.runAll()
+        fixture.engine.calls.clear()
+        fixture.worker.commitPrediction(request, candidate)
+        fixture.executor.runAll()
+
+        assertEquals(listOf("今日"), learning.exactMatches("きょう").map { it.surface })
+        assertTrue(learning.exactMatches("きょうは").isEmpty())
+        assertEquals(listOf("setIncognito(false)", "commitPrediction(1,12)"), fixture.engine.calls)
+        assertEquals("は", fixture.predictionCommitResults.single().remainingReading)
+        assertEquals("きょう", fixture.predictionCommitResults.single().learningReading)
     }
 
     /** 明示変換は表示値を保ち、英語候補をMozc候補の後ろへ置き、選択語だけをエンジン外で学習する。 */
@@ -298,10 +326,11 @@ class ConversionWorkerTest {
         assertEquals(1, fixture.liveResults.size)
     }
 
-    /** 学習禁止の入力途中予測はincognitoを先に指定し、選択しても確定学習を送らない。 */
+    /** 学習禁止の入力途中予測もMozcへ確定を送り、IME側のLearningStoreには記録しない。 */
     @Test
-    fun incognitoPredictionDoesNotLearn() {
-        val fixture = Fixture()
+    fun incognitoPredictionSubmitsWithoutLearning() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
         fixture.startReady()
         fixture.engine.calls.clear()
         val prediction = PredictionRequest(sessionEpoch = 1, revision = 2, reading = "ひみつ", incognito = true)
@@ -312,7 +341,8 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
 
         assertTrue(fixture.engine.calls.indexOf("setIncognito(true)") < fixture.engine.calls.indexOf("suggest(1,ひみつ)"))
-        assertFalse(fixture.engine.calls.any { it.startsWith("commitPrediction") })
+        assertTrue(fixture.engine.calls.contains("commitPrediction(1,11)"))
+        assertTrue(learning.exactMatches("ありがとう").isEmpty())
     }
 
     /** incognitoの指定に失敗した予測要求は、本文を送らず空候補として返す。 */
@@ -1592,6 +1622,7 @@ class ConversionWorkerTest {
         val liveResults = mutableListOf<Pair<Long, LiveResult>>()
         val candidateResults = mutableListOf<Pair<Long, CandidateResult>>()
         val predictionResults = mutableListOf<PredictionResult>()
+        val predictionCommitResults = mutableListOf<PredictionCommitResult>()
         val reports = mutableListOf<Pair<Long, LiveRequestReport>>()
         var evaluating = false
         val worker = ConversionWorker(
@@ -1602,6 +1633,7 @@ class ConversionWorkerTest {
             onLiveResult = { epoch, result -> liveResults += epoch to result },
             onCandidateResult = { epoch, result -> candidateResults += epoch to result },
             onPredictionResult = predictionResults::add,
+            onPredictionCommitResult = predictionCommitResults::add,
             userDictionary = { dictionary },
             englishWords = { englishWords },
             learningStore = { learning },
@@ -1675,6 +1707,7 @@ private class FakeConversionEngine : ConversionEngine {
         PredictionCandidate(15, "助かった", "たすかった"),
     )
     var nextWordPredictions = listOf(PredictionCandidate(21, "天気", "てんき"))
+    var predictionCommitResult = EnginePredictionCommit(remainingReading = "")
 
     // 明示変換で返す先頭文節の候補の表記。既定では「かんじ」だけknownConversionValuesを返し、他は読みをそのまま返す。
     var convertValuesFor: (String) -> List<String> = { reading -> if (reading == "かんじ") knownConversionValues else listOf(reading) }
@@ -1731,6 +1764,9 @@ private class FakeConversionEngine : ConversionEngine {
         calls += "commitPrediction($sessionId,$candidateId)"
         return true
     }
+
+    override fun submitPrediction(sessionId: Long, candidateId: Int): EnginePredictionCommit? =
+        if (commitPrediction(sessionId, candidateId)) predictionCommitResult else null
 
     override fun commitAll(sessionId: Long): Boolean {
         calls += "commitAll($sessionId)"
