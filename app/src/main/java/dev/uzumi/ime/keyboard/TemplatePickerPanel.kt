@@ -98,8 +98,8 @@ class TemplatePickerPanel(context: Context) : ScrollView(context) {
         isClickable = true
         isFocusable = true
         background = GradientDrawable().apply {
-            setColor(colors.bar)
-            setStroke(px(1f), colors.divider)
+            setColor(this@TemplatePickerPanel.colors.bar)
+            setStroke(px(1f), this@TemplatePickerPanel.colors.divider)
         }
         addView(TextView(context).apply {
             text = entry.reading
