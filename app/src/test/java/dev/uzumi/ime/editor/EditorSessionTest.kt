@@ -1,6 +1,7 @@
 package dev.uzumi.ime.editor
 
 import android.view.inputmethod.EditorInfo
+import android.view.KeyEvent
 import dev.uzumi.ime.conversion.ConversionCandidate
 import dev.uzumi.ime.conversion.ConversionClient
 import dev.uzumi.ime.conversion.ConversionOutcome
@@ -30,6 +31,130 @@ import org.junit.Test
 
 /** InputConnectionの成功・失敗と編集状態の同期境界を検証する。 */
 class EditorSessionTest {
+    /** 選択モード中の左右移動は固定端を保ち、反対方向で選択を縮める。 */
+    @Test
+    fun editPanelHorizontalSelectionKeepsAnchorWhileShrinkingAndReversing() {
+        val caret = EditPanelSelection(anchor = 3, focus = 3)
+        val left = EditPanelRules.moveHorizontally(caret, direction = -1, extendSelection = true, adjacentUtf16Length = 1)
+        val collapsed = EditPanelRules.moveHorizontally(left, direction = 1, extendSelection = true, adjacentUtf16Length = 1)
+        val right = EditPanelRules.moveHorizontally(collapsed, direction = 1, extendSelection = true, adjacentUtf16Length = 1)
+
+        assertEquals(EditPanelSelection(anchor = 3, focus = 2), left)
+        assertEquals(EditPanelSelection(anchor = 3, focus = 3), collapsed)
+        assertEquals(EditPanelSelection(anchor = 3, focus = 4), right)
+    }
+
+    /** 選択モードを切ると左右キーは範囲の適切な端へ畳み、コピーと切り取りはパスワードで無効になる。 */
+    @Test
+    fun editPanelRulesCollapseSelectionAndBlockPasswordClipboardActions() {
+        val backwardsSelection = EditPanelSelection(anchor = 5, focus = 2)
+        assertEquals(
+            EditPanelSelection(anchor = 2, focus = 2),
+            EditPanelRules.moveHorizontally(backwardsSelection, -1, extendSelection = false, adjacentUtf16Length = 0),
+        )
+        assertEquals(
+            EditPanelSelection(anchor = 5, focus = 5),
+            EditPanelRules.moveHorizontally(backwardsSelection, 1, extendSelection = false, adjacentUtf16Length = 0),
+        )
+        assertFalse(EditPanelRules.isEnabled(EditPanelAction.COPY, isPassword = true, hasSelection = true, hasClipboardText = true))
+        assertFalse(EditPanelRules.isEnabled(EditPanelAction.CUT, isPassword = true, hasSelection = true, hasClipboardText = true))
+        assertTrue(EditPanelRules.isEnabled(EditPanelAction.COPY, isPassword = false, hasSelection = true, hasClipboardText = false))
+    }
+
+    /** 編集パネルの左右操作もEditorSessionのselection端点を更新する。 */
+    @Test
+    fun editPanelHorizontalMoveUpdatesEditorSelectionAnchorAndFocus() {
+        val connection = ModelEditorConnection(text = "abcdef", selectionStart = 3, selectionEnd = 3)
+        val session = EditorSession(connection, normalPolicy())
+
+        assertTrue(session.moveEditPanelHorizontally(direction = -1, extendSelection = true))
+        assertEquals(3 to 2, connection.currentSelection())
+        assertTrue(session.moveEditPanelHorizontally(direction = 1, extendSelection = true))
+        assertEquals(3 to 3, connection.currentSelection())
+        assertTrue(session.moveEditPanelHorizontally(direction = 1, extendSelection = true))
+        assertEquals(3 to 4, connection.currentSelection())
+    }
+
+    /** 選択範囲を縮めるときは選択中の端から書記素を数え、絵文字のUTF-16途中へ移動しない。 */
+    @Test
+    fun editPanelSelectionShrinksBySelectedGraphemeWidth() {
+        val backward = ModelEditorConnection(text = "あ😀い", selectionStart = 4, selectionEnd = 1)
+        val backwardSession = EditorSession(
+            backward,
+            normalPolicy(),
+            initialSelectionStart = 4,
+            initialSelectionEnd = 1,
+        )
+        val forward = ModelEditorConnection(text = "あ😀い", selectionStart = 1, selectionEnd = 4)
+        val forwardSession = EditorSession(
+            forward,
+            normalPolicy(),
+            initialSelectionStart = 1,
+            initialSelectionEnd = 4,
+        )
+
+        assertTrue(backwardSession.moveEditPanelHorizontally(direction = 1, extendSelection = true))
+        assertEquals(4 to 3, backward.currentSelection())
+        assertTrue(forwardSession.moveEditPanelHorizontally(direction = -1, extendSelection = true))
+        assertEquals(1 to 3, forward.currentSelection())
+    }
+
+    /** 編集パネルの削除は選択範囲を既存の削除Undoへ渡す。 */
+    @Test
+    fun editPanelRangeDeleteKeepsDeletionUndo() {
+        val connection = ModelEditorConnection(text = "abcdef", selectionStart = 1, selectionEnd = 4)
+        val session = EditorSession(connection, normalPolicy(), initialSelectionStart = 1, initialSelectionEnd = 4)
+
+        assertTrue(session.deleteFromEditPanel())
+        assertEquals("aef", connection.text)
+        assertTrue(session.canUndoDeletion)
+        assertTrue(session.undoDeletion())
+        assertEquals("abcdef", connection.text)
+    }
+
+    /** 未確定compositionを編集パネルのHome操作前に既存の確定経路で一度だけ確定する。 */
+    @Test
+    fun editPanelOperationCommitsCompositionOnceBeforeKeyStroke() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy())
+        assertTrue(session.inputText("かな"))
+
+        assertTrue(session.sendEditPanelKeyStroke(KeyEvent.KEYCODE_MOVE_HOME))
+
+        assertEquals(1, connection.commitTextCalls)
+        assertEquals("かな", connection.text)
+        assertFalse(session.hasComposition)
+    }
+
+    /** 編集パネルの全選択と貼り付けはAndroid標準メニューへ渡し、貼り付け前のcompositionを確定する。 */
+    @Test
+    fun editPanelContextActionsUseStandardEditorCommands() {
+        val connection = ModelEditorConnection(text = "abc", selectionStart = 1, selectionEnd = 1)
+        val session = EditorSession(connection, normalPolicy(), initialSelectionStart = 1, initialSelectionEnd = 1)
+
+        assertTrue(session.performEditPanelContextAction(EditPanelContextAction.SELECT_ALL))
+        assertEquals(0 to 3, connection.currentSelection())
+        assertTrue(session.hasEditPanelSelection)
+        assertTrue(session.performEditPanelContextAction(EditPanelContextAction.COPY))
+        assertTrue(session.inputText("かな"))
+        assertTrue(session.performEditPanelContextAction(EditPanelContextAction.PASTE))
+
+        assertEquals(listOf(android.R.id.selectAll, android.R.id.copy, android.R.id.paste), connection.contextMenuActions)
+        assertEquals(1, connection.commitTextCalls)
+        assertFalse(session.hasComposition)
+    }
+
+    /** パスワード欄では編集パネルから標準コピーと切り取りを実行しない。 */
+    @Test
+    fun editPanelBlocksCopyAndCutInPasswordField() {
+        val connection = ModelEditorConnection(text = "secret", selectionStart = 0, selectionEnd = 6)
+        val session = EditorSession(connection, normalPolicy().copy(isPassword = true), 0, 6)
+
+        assertFalse(session.performEditPanelContextAction(EditPanelContextAction.COPY))
+        assertFalse(session.performEditPanelContextAction(EditPanelContextAction.CUT))
+        assertTrue(connection.contextMenuActions.isEmpty())
+    }
+
     /** 予測応答は読みの世代が一致するときだけ表示し、選択すると未確定全体を確定する。 */
     @Test
     fun typedPredictionReplacesWholeCompositionAndRejectsStaleResponse() {
@@ -2694,9 +2819,12 @@ private class FakeEditorConnection : EditorConnectionPort {
     val deleteCalls = mutableListOf<Pair<Int, Int>>()
     val selectionCalls = mutableListOf<Pair<Int, Int>>()
     val editorActions = mutableListOf<Int>()
+    val keyStrokes = mutableListOf<Pair<Int, Int>>()
+    val contextMenuActions = mutableListOf<Int>()
     var enterKeys = 0
     var deleteKeys = 0
     var selectedTextValue: CharSequence? = null
+    var currentSelectionValue: Pair<Int, Int>? = null
 
     override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
         composingTexts += text.toString()
@@ -2744,11 +2872,28 @@ private class FakeEditorConnection : EditorConnectionPort {
         return true
     }
 
+    /** 修飾状態を含むキー操作を記録する。 */
+    override fun sendKeyStroke(keyCode: Int, metaState: Int): Boolean {
+        if (invalidated) return false
+        keyStrokes += keyCode to metaState
+        return true
+    }
+
     override fun textBeforeCursor(maxChars: Int): CharSequence? = if (invalidated) null else beforeCursor
 
     override fun textAfterCursor(maxChars: Int): CharSequence? = if (invalidated) null else afterCursor
 
     override fun selectedText(): CharSequence? = if (invalidated) null else selectedTextValue
+
+    /** Android標準メニューの操作IDを記録する。 */
+    override fun performContextMenuAction(actionId: Int): Boolean {
+        if (invalidated) return false
+        contextMenuActions += actionId
+        return true
+    }
+
+    /** テストで設定したselection端点を返す。 */
+    override fun currentSelection(): Pair<Int, Int>? = if (invalidated) null else currentSelectionValue
 
     override fun invalidate() {
         invalidated = true
@@ -2765,6 +2910,8 @@ private class ModelEditorConnection(
         private set
     var finishComposingCalls = 0
         private set
+    var commitTextCalls = 0
+        private set
     var textBeforeCursorCalls = 0
         private set
     private var selectionStart = selectionStart
@@ -2776,6 +2923,8 @@ private class ModelEditorConnection(
     var composingAccepted = true
     var commitAccepted = true
     var finishAccepted = true
+    val keyStrokes = mutableListOf<Pair<Int, Int>>()
+    val contextMenuActions = mutableListOf<Int>()
 
     /** host側だけでcomposing spanを終了する。 */
     fun hostFinishComposition() {
@@ -2809,6 +2958,7 @@ private class ModelEditorConnection(
 
     override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
         if (!active || !commitAccepted) return false
+        commitTextCalls += 1
         val start = composingStart ?: minOf(selectionStart, selectionEnd)
         val end = composingEnd ?: maxOf(selectionStart, selectionEnd)
         replace(start, end, text.toString())
@@ -2851,6 +3001,13 @@ private class ModelEditorConnection(
 
     override fun sendDeleteKey(): Boolean = active
 
+    /** 修飾状態を含むキー操作を記録する。 */
+    override fun sendKeyStroke(keyCode: Int, metaState: Int): Boolean {
+        if (!active) return false
+        keyStrokes += keyCode to metaState
+        return true
+    }
+
     override fun textBeforeCursor(maxChars: Int): CharSequence? {
         textBeforeCursorCalls += 1
         if (!active) return null
@@ -2868,6 +3025,30 @@ private class ModelEditorConnection(
         if (!active || !selectedTextSupported) return null
         return text.substring(minOf(selectionStart, selectionEnd), maxOf(selectionStart, selectionEnd))
     }
+
+    /** Android標準メニュー操作を記録し、選択状態を模擬する。 */
+    override fun performContextMenuAction(actionId: Int): Boolean {
+        if (!active) return false
+        contextMenuActions += actionId
+        when (actionId) {
+            android.R.id.selectAll -> {
+                selectionStart = 0
+                selectionEnd = text.length
+            }
+            android.R.id.cut -> {
+                val start = minOf(selectionStart, selectionEnd)
+                val end = maxOf(selectionStart, selectionEnd)
+                if (start == end) return false
+                replace(start, end, "")
+                selectionStart = start
+                selectionEnd = start
+            }
+        }
+        return true
+    }
+
+    /** モデルEditorのselection端点を返す。 */
+    override fun currentSelection(): Pair<Int, Int>? = if (active) selectionStart to selectionEnd else null
 
     override fun invalidate() {
         active = false

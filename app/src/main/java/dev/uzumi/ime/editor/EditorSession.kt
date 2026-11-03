@@ -1,5 +1,6 @@
 package dev.uzumi.ime.editor
 
+import android.view.KeyEvent
 import dev.uzumi.ime.conversion.ConversionCandidate
 import dev.uzumi.ime.conversion.CandidateVisibility
 import dev.uzumi.ime.conversion.ConversionClient
@@ -93,6 +94,9 @@ class EditorSession(
     } else {
         null
     }
+    // 編集パネルの範囲選択で、固定端と移動端の向きを保つ。
+    private var selectionAnchor: Int? = initialSelectionStart.takeIf { initialSelectionStart >= 0 && initialSelectionEnd >= 0 }
+    private var selectionFocus: Int? = initialSelectionEnd.takeIf { initialSelectionStart >= 0 && initialSelectionEnd >= 0 }
     private var compositionStart: Int? = null
     private var expectedComposition: CompositionGeometry? = null
     private val staleCompositions = mutableListOf<CompositionGeometry>()
@@ -158,6 +162,18 @@ class EditorSession(
      */
     val hasComposition: Boolean
         get() = active && (liveCore?.display?.isNotEmpty() ?: !buffer.isEmpty)
+
+    /** 編集パネルの左右移動に使う、向きを保ったselectionを返す。 */
+    val editPanelSelection: EditPanelSelection?
+        get() = if (active && selectionAnchor != null && selectionFocus != null) {
+            EditPanelSelection(selectionAnchor!!, selectionFocus!!)
+        } else {
+            null
+        }
+
+    /** Editor上で文字範囲を選択しているかを返す。 */
+    val hasEditPanelSelection: Boolean
+        get() = editPanelSelection?.hasRange == true
 
     // 直前の削除内容と復元位置。別操作・位置変更・外部編集の後は使わない。
     private var deletionUndo: DeletionUndo? = null
@@ -674,8 +690,7 @@ class EditorSession(
         if (!connection.deleteSurroundingText(deleteLength, 0)) return false
         val shiftedStart = compositionStart?.let { (it - deleteLength).coerceAtLeast(0) }
         compositionStart = shiftedStart
-        selectionStart = shiftedStart
-        selectionEnd = shiftedStart
+        setKnownSelection(shiftedStart, shiftedStart)
         recordExpectedComposition(CompositionGeometry(shiftedStart, ownedDisplay.length, cursorOffset = 0))
         return true
     }
@@ -894,8 +909,7 @@ class EditorSession(
     /** 遅れて届くEditorの選択通知を、削除操作が送った選択遷移として照合する。 */
     private fun recordExpectedExternalSelection(oldStart: Int, oldEnd: Int, cursor: Int) {
         recordCommittedSelection(SelectionTransition(oldStart, oldEnd, cursor, cursor))
-        selectionStart = cursor
-        selectionEnd = cursor
+        setKnownSelection(cursor, cursor)
     }
 
     /** compositionの後ろに削除した確定本文を、削除直後のカーソル位置へ戻す。 */
@@ -1026,8 +1040,7 @@ class EditorSession(
             }
             val target = start + buffer.cursorUtf16Offset()
             if (connection.setSelection(target, target)) {
-                selectionStart = target
-                selectionEnd = target
+                setKnownSelection(target, target)
                 recordExpectedComposition(
                     CompositionGeometry(
                         start = start,
@@ -1043,6 +1056,119 @@ class EditorSession(
         return moveOutsideComposition(delta)
     }
 
+    /** 編集パネルの左右キーを処理し、選択中は固定端を保ったまま移動端を伸縮する。 */
+    fun moveEditPanelHorizontally(direction: Int, extendSelection: Boolean): Boolean {
+        if (!active || (direction != -1 && direction != 1) || !commitComposition()) return false
+        if (policy.isSensitive) return sendHorizontalEditKey(direction, extendSelection)
+        refreshSelectionFromEditor()
+        val current = editPanelSelection ?: return false
+        val adjacentLength = if (!extendSelection && current.hasRange) {
+            0
+        } else {
+            adjacentGraphemeLength(current, direction, extendSelection)
+                ?: return sendHorizontalEditKey(direction, extendSelection)
+        }
+        val next = EditPanelRules.moveHorizontally(current, direction, extendSelection, adjacentLength)
+        if (next == current) return false
+        if (!connection.setSelection(next.anchor, next.focus)) return false
+        setKnownSelection(next.anchor, next.focus)
+        deletionUndo = null
+        clearPredictions()
+        return true
+    }
+
+    /** ↑↓やHome/Endなどの標準キー操作を、未確定を確定してからEditorへ送る。 */
+    fun sendEditPanelKeyStroke(keyCode: Int, metaState: Int = 0): Boolean {
+        if (!active || !commitComposition()) return false
+        deletionUndo = null
+        clearPredictions()
+        val accepted = connection.sendKeyStroke(keyCode, metaState)
+        if (accepted) refreshSelectionFromEditor()
+        return accepted
+    }
+
+    /** Android標準の全選択・コピー・切り取り・貼り付けを実行し、選択位置を同期する。 */
+    fun performEditPanelContextAction(action: EditPanelContextAction): Boolean {
+        if (!active || (policy.isPassword && action in setOf(EditPanelContextAction.COPY, EditPanelContextAction.CUT))) {
+            return false
+        }
+        if (!commitComposition()) return false
+        if (action == EditPanelContextAction.COPY || action == EditPanelContextAction.CUT) {
+            refreshSelectionFromEditor()
+            if (!hasEditPanelSelection) return false
+        }
+        resetInputSequences()
+        clearPredictions()
+        if (action != EditPanelContextAction.COPY) deletionUndo = null
+        val actionId = when (action) {
+            EditPanelContextAction.SELECT_ALL -> android.R.id.selectAll
+            EditPanelContextAction.COPY -> android.R.id.copy
+            EditPanelContextAction.CUT -> android.R.id.cut
+            EditPanelContextAction.PASTE -> android.R.id.paste
+        }
+        val accepted = connection.performContextMenuAction(actionId)
+        if (accepted) refreshSelectionFromEditor()
+        return accepted
+    }
+
+    /** 編集パネルの削除を既存Backspace経路へ渡し、選択範囲の復元記録を維持する。 */
+    fun deleteFromEditPanel(): Boolean {
+        if (!active || !commitComposition()) return false
+        refreshSelectionFromEditor()
+        return deleteBackward()
+    }
+
+    /** 機密欄では本文を読まず、標準DPADキーへ修飾状態を付けて左右移動する。 */
+    private fun sendHorizontalEditKey(direction: Int, extendSelection: Boolean): Boolean {
+        deletionUndo = null
+        clearPredictions()
+        val keyCode = if (direction < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT
+        val metaState = if (extendSelection) KeyEvent.META_SHIFT_ON else 0
+        return connection.sendKeyStroke(keyCode, metaState)
+    }
+
+    /** 現在のfocusに隣接する一書記素のUTF-16幅をEditorから得る。 */
+    private fun adjacentGraphemeLength(
+        selection: EditPanelSelection,
+        direction: Int,
+        extendSelection: Boolean,
+    ): Int? {
+        if (selection.hasRange && extendSelection) {
+            val movingIntoSelection =
+                (selection.focus > selection.anchor && direction < 0) ||
+                    (selection.focus < selection.anchor && direction > 0)
+            if (movingIntoSelection) {
+                val selected = connection.selectedText()?.toString() ?: return null
+                val clusters = GraphemeClusters.split(selected)
+                return if (selection.focus > selection.anchor) {
+                    clusters.lastOrNull()?.length ?: 0
+                } else {
+                    clusters.firstOrNull()?.length ?: 0
+                }
+            }
+        }
+        val context = if (direction < 0) {
+            connection.textBeforeCursor(64)?.toString()
+        } else {
+            connection.textAfterCursor(64)?.toString()
+        } ?: return null
+        val clusters = GraphemeClusters.split(context)
+        return if (direction < 0) clusters.lastOrNull()?.length ?: 0 else clusters.firstOrNull()?.length ?: 0
+    }
+
+    /** Editorから選択indexだけを取り直し、本文はcomposition・学習・ログへ渡さない。 */
+    fun refreshSelectionFromEditor(): Boolean {
+        if (!active || policy.isSensitive) return false
+        val current = connection.currentSelection() ?: return false
+        if (current.first < 0 || current.second < 0) return false
+        if (editPanelSelection != EditPanelSelection(current.first, current.second)) {
+            deletionUndo = null
+            clearPredictions()
+        }
+        setKnownSelection(current.first, current.second)
+        return true
+    }
+
     /**
      * compositionが無いときのカーソル移動。範囲選択中はAndroid標準（Selection.moveLeft/moveRight）と同じく
      * ←で選択の開始、→で終了へ畳む。選択が無いときだけ、周辺文字列の書記素幅だけ外部selectionを動かす。
@@ -1054,8 +1180,7 @@ class EditorSession(
             val collapsed = if (delta < 0) selectedStart else selectedEnd
             val accepted = connection.setSelection(collapsed, collapsed)
             if (accepted) {
-                selectionStart = collapsed
-                selectionEnd = collapsed
+                setKnownSelection(collapsed, collapsed)
             }
             return accepted
         }
@@ -1077,8 +1202,7 @@ class EditorSession(
         if (target < 0) return false
         val accepted = connection.setSelection(target, target)
         if (accepted) {
-            selectionStart = target
-            selectionEnd = target
+            setKnownSelection(target, target)
         }
         return accepted
     }
@@ -1852,8 +1976,7 @@ class EditorSession(
     private fun acceptLiveSelection(core: LiveConversionCore, start: Int, cursor: Int): Boolean {
         val offset = cursor - start
         compositionStart = start
-        selectionStart = cursor
-        selectionEnd = cursor
+        setKnownSelection(cursor, cursor)
         if (offset == liveCursorUtf16) return true
         val index = core.clusterIndexForDisplayOffset(offset)
         if (index != null) {
@@ -1938,8 +2061,7 @@ class EditorSession(
             val oldGeometry = expectedComposition
             clearCompositionExpectations()
             oldGeometry?.let(::rememberStaleComposition)
-            selectionStart = start
-            selectionEnd = start
+            setKnownSelection(start, start)
             refreshDeletionLocation()
             return true
         }
@@ -1952,8 +2074,7 @@ class EditorSession(
             ),
         )
         if (start == null) {
-            selectionStart = null
-            selectionEnd = null
+            setKnownSelection(null, null)
             refreshDeletionLocation()
             return true
         }
@@ -1966,8 +2087,7 @@ class EditorSession(
             connection.setSelection(target, target)
         }
         if (selectionAccepted) {
-            selectionStart = target
-            selectionEnd = target
+            setKnownSelection(target, target)
             if (target != end) {
                 recordExpectedComposition(
                     CompositionGeometry(
@@ -1989,8 +2109,7 @@ class EditorSession(
         val previousStart = selectionStart
         val previousEnd = selectionEnd
         if (start == null) {
-            selectionStart = null
-            selectionEnd = null
+            setKnownSelection(null, null)
             return
         }
         val destination = start + text.length
@@ -2004,8 +2123,7 @@ class EditorSession(
                 ),
             )
         }
-        selectionStart = destination
-        selectionEnd = destination
+        setKnownSelection(destination, destination)
     }
 
     /** 現在のselectionが既知なら、正規化済みの開始位置を返す。 */
@@ -2017,13 +2135,22 @@ class EditorSession(
 
     /** 不明値を0へ変換せず、既知のselectionだけを正規化して保存する。 */
     private fun updateKnownSelection(start: Int, end: Int) {
-        if (start < 0 || end < 0) {
+        setKnownSelection(start, end)
+    }
+
+    /** selectionの向きと正規化範囲を同時に保存し、不明値は不明のまま保つ。 */
+    private fun setKnownSelection(anchor: Int?, focus: Int?) {
+        if (anchor == null || focus == null || anchor < 0 || focus < 0) {
+            selectionAnchor = null
+            selectionFocus = null
             selectionStart = null
             selectionEnd = null
             return
         }
-        selectionStart = minOf(start, end)
-        selectionEnd = maxOf(start, end)
+        selectionAnchor = anchor
+        selectionFocus = focus
+        selectionStart = minOf(anchor, focus)
+        selectionEnd = maxOf(anchor, focus)
     }
 
     /** 現在送信したcompositionを保持し、一つ前までの通知を遅延判定へ残す。 */
@@ -2056,8 +2183,7 @@ class EditorSession(
 
         if (buffer.setCursor(clusterIndex)) markCompositionChanged()
         compositionStart = start
-        selectionStart = cursor
-        selectionEnd = cursor
+        setKnownSelection(cursor, cursor)
         return true
     }
 

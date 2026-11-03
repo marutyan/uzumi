@@ -41,6 +41,8 @@ data class ToolbarPreferences(
         val AVAILABLE_ACTIONS = listOf(
             ToolbarAction.PASTE,
             ToolbarAction.CLIPBOARD_HISTORY,
+            ToolbarAction.EDIT,
+            ToolbarAction.MICROPHONE,
             ToolbarAction.UNDO,
             ToolbarAction.USER_DICTIONARY,
             ToolbarAction.TEMPLATES,
@@ -81,6 +83,8 @@ data class ToolbarPreferences(
 enum class ToolbarAction(val icon: String) {
     PASTE("▣"),
     CLIPBOARD_HISTORY("📋"),
+    EDIT("✎"),
+    MICROPHONE("🎙"),
     UNDO("↶"),
     USER_DICTIONARY("辞"),
     TEMPLATES("定"),

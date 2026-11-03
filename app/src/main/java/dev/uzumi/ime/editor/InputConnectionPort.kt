@@ -2,6 +2,7 @@ package dev.uzumi.ime.editor
 
 import android.os.SystemClock
 import android.view.KeyEvent
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 
 /**
@@ -32,6 +33,9 @@ interface EditorConnectionPort {
     /** actionの指定がない欄へ、ソフトキーボードのEnterキーの押下と解放を送る。 */
     fun sendEnterKey(): Boolean
 
+    /** 修飾キーを付けたキーの押下と解放を送る。 */
+    fun sendKeyStroke(keyCode: Int, metaState: Int): Boolean
+
     /** 周辺文字列を読めない互換入力欄（TYPE_NULL）へ、Deleteキーの押下と解放を送る。 */
     fun sendDeleteKey(): Boolean
 
@@ -43,6 +47,12 @@ interface EditorConnectionPort {
 
     /** 選択範囲の文字列を取得する。取得できないEditorではnullを返す。 */
     fun selectedText(): CharSequence?
+
+    /** Android標準のコピー・切り取り・貼り付け・全選択操作を実行する。 */
+    fun performContextMenuAction(actionId: Int): Boolean
+
+    /** Editorの選択位置を本文を保持せずに取得する。 */
+    fun currentSelection(): Pair<Int, Int>?
 
     /** 接続を無効にする。 */
     fun invalidate()
@@ -100,6 +110,16 @@ class AndroidInputConnectionPort(
 
     override fun sendDeleteKey(): Boolean = sendDownUpKey(KeyEvent.KEYCODE_DEL)
 
+    /** 指定した修飾キーを保ったまま、ソフトキーボード由来のキー操作を送る。 */
+    override fun sendKeyStroke(keyCode: Int, metaState: Int): Boolean {
+        val time = SystemClock.uptimeMillis()
+        val flags = KeyEvent.FLAG_SOFT_KEYBOARD or KeyEvent.FLAG_KEEP_TOUCH_MODE
+        return call {
+            delegate.sendKeyEvent(KeyEvent(time, time, KeyEvent.ACTION_DOWN, keyCode, 0, metaState, -1, 0, flags)) &&
+                delegate.sendKeyEvent(KeyEvent(time, time, KeyEvent.ACTION_UP, keyCode, 0, metaState, -1, 0, flags))
+        }
+    }
+
     /** 指定したキーの押下と解放を、ソフトキーボードからの入力として送る。 */
     private fun sendDownUpKey(keyCode: Int): Boolean {
         val time = SystemClock.uptimeMillis()
@@ -124,6 +144,26 @@ class AndroidInputConnectionPort(
     override fun selectedText(): CharSequence? {
         if (!active) return null
         return runCatching { delegate.getSelectedText(0) }.getOrNull()
+    }
+
+    /** Editor標準のコピー・切り取り・貼り付け・全選択メニューを実行する。 */
+    override fun performContextMenuAction(actionId: Int): Boolean =
+        call { delegate.performContextMenuAction(actionId) }
+
+    /** ExtractedTextの選択indexだけを取り出し、本文は保持しない。 */
+    override fun currentSelection(): Pair<Int, Int>? {
+        if (!active) return null
+        return runCatching {
+            val request = ExtractedTextRequest().apply {
+                hintMaxChars = 1
+                hintMaxLines = 1
+            }
+            delegate.getExtractedText(request, 0)?.let { extracted ->
+                if (extracted.startOffset < 0 || extracted.selectionStart < 0 || extracted.selectionEnd < 0) null
+                else (extracted.startOffset + extracted.selectionStart) to
+                    (extracted.startOffset + extracted.selectionEnd)
+            }
+        }.getOrNull()
     }
 
     private fun call(operation: () -> Boolean): Boolean {
