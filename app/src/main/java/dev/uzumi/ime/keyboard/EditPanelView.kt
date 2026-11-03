@@ -93,7 +93,7 @@ class EditPanelView(
             minHeight = px(MIN_TOUCH_DP)
             setPadding(px(3f), 0, px(3f), 0)
             background = GradientDrawable().apply {
-                setColor(if (selected) colors.keyActive else colors.bar)
+                setColor(if (selected) this@EditPanelView.colors.keyActive else this@EditPanelView.colors.bar)
                 setStroke(px(1f), this@EditPanelView.colors.divider)
             }
             isEnabled = enabled
