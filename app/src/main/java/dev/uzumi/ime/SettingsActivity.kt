@@ -79,6 +79,11 @@ class SettingsActivity : Activity() {
             UzumiSettings.toolbarPreferences(this).candidateRows,
             UzumiSettings::setCandidateRows,
         ))
+        content.addView(switchRow(
+            R.string.settings_clipboard_history,
+            R.string.settings_clipboard_history_description,
+            UzumiSettings.isClipboardHistoryEnabled(this),
+        ) { UzumiSettings.setClipboardHistoryEnabled(this, it) })
 
         content.addView(section(R.string.settings_section_feedback))
         content.addView(switchRow(R.string.settings_vibration, null,
@@ -408,8 +413,10 @@ class SettingsActivity : Activity() {
         }
     }
 
+    /** 機能選択画面に表示するタイル名を返す。 */
     private fun toolbarActionLabel(action: ToolbarAction): String = when (action) {
         ToolbarAction.PASTE -> getString(R.string.toolbar_paste)
+        ToolbarAction.CLIPBOARD_HISTORY -> getString(R.string.toolbar_clipboard_history)
         ToolbarAction.UNDO -> getString(R.string.toolbar_undo)
         ToolbarAction.USER_DICTIONARY -> getString(R.string.open_user_dictionary)
         ToolbarAction.SETTINGS -> getString(R.string.open_settings)

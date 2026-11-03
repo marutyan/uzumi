@@ -33,6 +33,9 @@ object UzumiSettings {
     /** ローマ字かな入力がONでも小文字の英語を打てるよう、英字QWERTYは既定で切替に含める。 */
     const val DEFAULT_ROMAJI_ENGLISH_QWERTY = true
 
+    /** コピーした文字を履歴へ保存する設定の既定値。 */
+    const val DEFAULT_CLIPBOARD_HISTORY_ENABLED = true
+
     // キーボードの高さ（dp）、拡大表示、振動、キー音、削除ドラッグを保存するキー。
     private const val KEY_HEIGHT = "keyboard_height"
     private const val KEY_ROW_HEIGHT_DP = "keyboard_row_height_dp"
@@ -43,6 +46,8 @@ object UzumiSettings {
     private const val KEY_TOOLBAR_ACTIONS = "toolbar_actions"
     private const val KEY_TOOLBAR_ROWS = "toolbar_rows"
     private const val KEY_CANDIDATE_ROWS = "candidate_rows"
+    // クリップボード履歴の表示・保存を切り替えるキー。
+    private const val KEY_CLIPBOARD_HISTORY_ENABLED = "clipboard_history_enabled"
 
     /** キーボードの見た目と反応の設定を読む。未設定の項目は既定値にする。 */
     fun keyboardPreferences(context: Context): KeyboardPreferences {
@@ -88,6 +93,14 @@ object UzumiSettings {
     fun setCandidateRows(context: Context, rows: Int) {
         preferences(context).edit().putInt(KEY_CANDIDATE_ROWS, ToolbarPreferences.normalizeRows(rows)).apply()
     }
+
+    /** クリップボード履歴を表示・保存する設定を読む。 */
+    fun isClipboardHistoryEnabled(context: Context): Boolean =
+        preferences(context).getBoolean(KEY_CLIPBOARD_HISTORY_ENABLED, DEFAULT_CLIPBOARD_HISTORY_ENABLED)
+
+    /** クリップボード履歴の表示・保存を切り替える。 */
+    fun setClipboardHistoryEnabled(context: Context, enabled: Boolean) =
+        putBoolean(context, KEY_CLIPBOARD_HISTORY_ENABLED, enabled)
 
     /** 保存済みのdp値を読み、初回だけ従来の「低・中・高」を同じ高さへ引き継ぐ。 */
     fun keyboardHeightDp(context: Context): Int {

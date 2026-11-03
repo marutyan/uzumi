@@ -47,4 +47,11 @@ class ToolbarPreferencesTest {
         assertEquals(3, rows.size)
         assertEquals(listOf(ToolbarAction.UNDO, ToolbarAction.SETTINGS, ToolbarAction.CLOSE_KEYBOARD), rows.flatten())
     }
+
+    /** 履歴を既存の機能タイル選択へ追加し、新規設定では使える状態にする。 */
+    @Test
+    fun clipboardHistoryIsAnAvailableDefaultAction() {
+        assertEquals(true, ToolbarPreferences.AVAILABLE_ACTIONS.contains(ToolbarAction.CLIPBOARD_HISTORY))
+        assertEquals(true, ToolbarPreferences.DEFAULT_ACTIONS.contains(ToolbarAction.CLIPBOARD_HISTORY))
+    }
 }
