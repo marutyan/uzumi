@@ -76,11 +76,12 @@ internal object ClipboardHistoryRules {
 
     /** 固定項目を別枠で保ち、未固定項目はコピー時刻が新しい順に最大件数へ収める。 */
     private fun limitItems(items: List<ClipboardHistoryItem>): List<ClipboardHistoryItem> {
-        val pinned = items.filter { it.pinned }
-        val unpinned = items.filterNot { it.pinned }
+        // 並び（新しいものが先頭、固定項目もその位置のまま）は変えず、上限を超えた古い未固定項目だけを落とす。
+        val keptUnpinned = items.filterNot { it.pinned }
             .sortedByDescending(ClipboardHistoryItem::copiedAtMillis)
             .take(MAX_UNPINNED_ITEMS)
-        return pinned + unpinned
+            .toSet()
+        return items.filter { it.pinned || it in keptUnpinned }
     }
 }
 
