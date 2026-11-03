@@ -126,6 +126,47 @@ class EditorSessionTest {
         assertFalse(session.hasComposition)
     }
 
+    /** 選択モードの矢印キーはShiftキーの押下と解放で挟み、入力欄に記録されるShift状態で選択を伸ばさせる。 */
+    @Test
+    fun shiftedEditKeyStrokeWrapsArrowWithShiftKeyPressAndRelease() {
+        val shifted = EditorKeyStrokes.sequence(KeyEvent.KEYCODE_DPAD_UP, KeyEvent.META_SHIFT_ON)
+        val shiftMeta = KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
+
+        assertEquals(
+            listOf(
+                EditorKeyStrokeStep(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT, shiftMeta),
+                EditorKeyStrokeStep(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_UP, shiftMeta),
+                EditorKeyStrokeStep(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_UP, shiftMeta),
+                EditorKeyStrokeStep(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT, 0, releasesShift = true),
+            ),
+            shifted,
+        )
+        assertEquals(
+            listOf(
+                EditorKeyStrokeStep(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT, 0),
+                EditorKeyStrokeStep(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_LEFT, 0),
+            ),
+            EditorKeyStrokes.sequence(KeyEvent.KEYCODE_DPAD_LEFT, 0),
+        )
+    }
+
+    /** 機密欄の選択モードの←→は本文を読まず、Shift付きのキー操作として入力欄へ送る。 */
+    @Test
+    fun sensitiveEditPanelSelectionSendsShiftedArrowKey() {
+        val connection = ModelEditorConnection(text = "secret", selectionStart = 2, selectionEnd = 2)
+        val session = EditorSession(
+            connection,
+            normalPolicy().copy(isPassword = true),
+            initialSelectionStart = 2,
+            initialSelectionEnd = 2,
+        )
+
+        assertTrue(session.moveEditPanelHorizontally(direction = 1, extendSelection = true))
+
+        assertEquals(listOf(KeyEvent.KEYCODE_DPAD_RIGHT to KeyEvent.META_SHIFT_ON), connection.keyStrokes)
+        assertEquals(0, connection.textBeforeCursorCalls)
+    }
+
     /** 編集パネルの全選択と貼り付けはAndroid標準メニューへ渡し、貼り付け前のcompositionを確定する。 */
     @Test
     fun editPanelContextActionsUseStandardEditorCommands() {

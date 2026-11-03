@@ -110,13 +110,21 @@ class AndroidInputConnectionPort(
 
     override fun sendDeleteKey(): Boolean = sendDownUpKey(KeyEvent.KEYCODE_DEL)
 
-    /** 指定した修飾キーを保ったまま、ソフトキーボード由来のキー操作を送る。 */
+    /**
+     * 指定した修飾キーを保ったまま、ソフトキーボード由来のキー操作を送る。Shift付きではShiftキー自体の押下と解放で挟み、
+     * 途中で失敗してもShiftの解放だけは送って、入力欄にShiftの押下状態を残さない。
+     */
     override fun sendKeyStroke(keyCode: Int, metaState: Int): Boolean {
         val time = SystemClock.uptimeMillis()
         val flags = KeyEvent.FLAG_SOFT_KEYBOARD or KeyEvent.FLAG_KEEP_TOUCH_MODE
         return call {
-            delegate.sendKeyEvent(KeyEvent(time, time, KeyEvent.ACTION_DOWN, keyCode, 0, metaState, -1, 0, flags)) &&
-                delegate.sendKeyEvent(KeyEvent(time, time, KeyEvent.ACTION_UP, keyCode, 0, metaState, -1, 0, flags))
+            var accepted = true
+            EditorKeyStrokes.sequence(keyCode, metaState).forEach { step ->
+                if (!accepted && !step.releasesShift) return@forEach
+                val sent = delegate.sendKeyEvent(KeyEvent(time, time, step.action, step.keyCode, 0, step.metaState, -1, 0, flags))
+                accepted = accepted && sent
+            }
+            accepted
         }
     }
 
@@ -169,5 +177,41 @@ class AndroidInputConnectionPort(
     private fun call(operation: () -> Boolean): Boolean {
         if (!active) return false
         return runCatching { operation() }.getOrDefault(false)
+    }
+}
+
+/** 入力欄へ送る一つのキーイベント。releasesShiftは途中で失敗しても送るShiftキーの解放か。 */
+data class EditorKeyStrokeStep(
+    val action: Int,
+    val keyCode: Int,
+    val metaState: Int,
+    val releasesShift: Boolean = false,
+)
+
+/**
+ * 編集操作のキーを送る順序を決める。標準のEditTextは選択を伸ばすかをイベントのmetaStateではなく、
+ * 入力欄側に記録されたShiftキーの押下状態で判断するため、Shift付きではShiftキーの押下と解放で矢印キーを挟む。
+ */
+object EditorKeyStrokes {
+    /** Shiftの有無に応じて、押下・解放のキーイベント列を返す。 */
+    fun sequence(keyCode: Int, metaState: Int): List<EditorKeyStrokeStep> {
+        if (metaState and KeyEvent.META_SHIFT_ON == 0) {
+            return listOf(
+                EditorKeyStrokeStep(KeyEvent.ACTION_DOWN, keyCode, metaState),
+                EditorKeyStrokeStep(KeyEvent.ACTION_UP, keyCode, metaState),
+            )
+        }
+        val shifted = metaState or KeyEvent.META_SHIFT_LEFT_ON
+        return listOf(
+            EditorKeyStrokeStep(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT, shifted),
+            EditorKeyStrokeStep(KeyEvent.ACTION_DOWN, keyCode, shifted),
+            EditorKeyStrokeStep(KeyEvent.ACTION_UP, keyCode, shifted),
+            EditorKeyStrokeStep(
+                KeyEvent.ACTION_UP,
+                KeyEvent.KEYCODE_SHIFT_LEFT,
+                metaState and (KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON).inv(),
+                releasesShift = true,
+            ),
+        )
     }
 }
