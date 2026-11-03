@@ -1666,18 +1666,12 @@ class UzumiInputMethodService : InputMethodService() {
 
     /**
      * ライブ変換の候補を並べ、対象segmentの現在の表記を選択中として示す。過去segmentを訂正中は、左端に読みの札、
-     * 右端に「末尾」を出す。直前の操作を取り消せるときは左端に「元に戻す」を出す。
+     * 右端に「末尾」を出す。ライブ変換の取り消し（候補の選び直し・文節の伸縮など）は候補の幅を削らないよう
+     * 候補バーにチップを出さず、機能バーと機能一覧の「元に戻す」タイルで行う。
      */
     private fun liveEntries(current: EditorSession, leading: LinearLayout, trailing: LinearLayout): List<CandidateEntry> {
         val views = barViews ?: return emptyList()
         val state = current.liveCandidateState() ?: return emptyList()
-        if (state.canUndo && !current.canUndoDeletion) {
-            leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.live_undo), true) {
-                evaluation.record(OperationKind.CORRECTION)
-                if (session === current) current.undoLive()
-                refreshCandidates()
-            })
-        }
         if (!state.focusAtInput) {
             state.focusedReading?.let { reading ->
                 leading.addView(views.chip(reading, getString(R.string.live_focused_reading, reading), false, null))
