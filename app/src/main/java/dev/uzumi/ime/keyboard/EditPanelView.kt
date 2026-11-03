@@ -84,11 +84,9 @@ class EditPanelView(
             text = context.getString(R.string.toolbar_tile_label, icon, context.getString(label))
             contentDescription = context.getString(label)
             setTextSize(TypedValue.COMPLEX_UNIT_DIP, TILE_TEXT_DP)
-            setTextColor(when {
-                selected -> colors.onAccent
-                enabled -> colors.text
-                else -> colors.textSecondary
-            })
+            // 選択ON（地色keyActive）でも通常の文字色を使う。keyActiveは淡い強調色で、onAccentでは読めない。
+            // Shiftキーの有効表示と同じ組み合わせにする。
+            setTextColor(if (enabled) colors.text else colors.textSecondary)
             setTypeface(typeface, Typeface.NORMAL)
             gravity = Gravity.CENTER
             maxLines = 2
