@@ -47,4 +47,10 @@ class ToolbarPreferencesTest {
         assertEquals(3, rows.size)
         assertEquals(listOf(ToolbarAction.UNDO, ToolbarAction.SETTINGS, ToolbarAction.CLOSE_KEYBOARD), rows.flatten())
     }
+
+    /** 定型文タイルを設定画面から一つ選べる。 */
+    @Test
+    fun templatePickerIsAvailableOnce() {
+        assertEquals(1, ToolbarPreferences.AVAILABLE_ACTIONS.count { it == ToolbarAction.TEMPLATES })
+    }
 }

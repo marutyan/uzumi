@@ -1,5 +1,6 @@
 package dev.uzumi.ime.conversion
 
+import dev.uzumi.ime.dictionary.UserDictionaryCategory
 import dev.uzumi.ime.dictionary.UserDictionaryEntry
 import dev.uzumi.ime.dictionary.UserDictionaryLookup
 import dev.uzumi.ime.editor.GraphemeClusters
@@ -210,6 +211,20 @@ class LiveConversionAdapterTest {
         )
 
         assertEquals(listOf(ResultSegment("うずみ", "Uzumi", listOf("Uzumi", "鵜済み", "うずみ"))), merged)
+    }
+
+    /** 複数行定型文をライブ候補へ加え、選択・確定用の値から改行を落とさない。 */
+    @Test
+    fun multilineTemplateAppearsAsWholeReadingCandidate() {
+        val template = "先頭行\n\t二行目"
+        val merged = UserDictionaryCandidates.mergeLive(
+            "めーる",
+            listOf(ResultSegment("めーる", "メール", listOf("メール", "めいる"))),
+            FakeLookup(listOf(UserDictionaryEntry("めーる", template, UserDictionaryCategory.TEMPLATE))),
+        )
+
+        assertEquals(template, merged.single().surface)
+        assertEquals(listOf(template, "メール", "めいる", "めーる"), merged.single().candidates)
     }
 
     /**

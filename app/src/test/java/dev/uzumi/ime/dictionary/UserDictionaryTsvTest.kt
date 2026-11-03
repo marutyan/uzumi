@@ -43,13 +43,34 @@ class UserDictionaryTsvTest {
         val entries = listOf(
             UserDictionaryEntry("うずみ", "Uzumi", UserDictionaryCategory.PROPER_NOUN),
             UserDictionaryEntry("やまだ", "山田", UserDictionaryCategory.PERSON_NAME),
+            UserDictionaryEntry("めーる", " 署名\\n表記 \n\tか\u3099\r\n 終わり ", UserDictionaryCategory.TEMPLATE),
         )
         val text = UserDictionaryTsv.format(entries)
         assertEquals(
-            "${UserDictionaryTsv.HEADER}\nうずみ\tUzumi\t固有名詞\nやまだ\t山田\t人名\n",
+            "${UserDictionaryTsv.HEADER}\nうずみ\tUzumi\t固有名詞\nやまだ\t山田\t人名\n" +
+                "めーる\t 署名\\\\n表記 \\n\\tか\u3099\\r\\n 終わり \t定型文\n",
             text,
         )
         assertEquals(TsvParseResult(entries, emptyList()), UserDictionaryTsv.parse(text))
+    }
+
+    /** 旧形式の短縮よみにあるバックスラッシュはそのまま保ち、定型文の既知のエスケープだけを復元する。 */
+    @Test
+    fun keepsLegacyBackslashesAndDecodesTemplateEscapes() {
+        val result = UserDictionaryTsv.parse(
+            "# Uzumi user dictionary v2\n" +
+                "しょーと\t旧\\n表記\t短縮よみ\n" +
+                "てんぷれ\t先頭\\n\\\\n\\t末尾\t定型文\n",
+        )
+
+        assertEquals(
+            listOf(
+                UserDictionaryEntry("しょーと", "旧\\n表記", UserDictionaryCategory.SHORTCUT),
+                UserDictionaryEntry("てんぷれ", "先頭\n\\n\t末尾", UserDictionaryCategory.TEMPLATE),
+            ),
+            result.entries,
+        )
+        assertEquals(emptyList<TsvLineFailure>(), result.failures)
     }
 
     /** BOM、CRLF、注釈、空行、分類列の省略、Mozcのコメント列を受け付け、不正な行は行番号と理由を返す。 */

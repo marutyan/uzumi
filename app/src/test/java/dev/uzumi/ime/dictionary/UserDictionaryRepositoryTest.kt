@@ -40,6 +40,24 @@ class UserDictionaryRepositoryTest {
         assertFalse(reopened.hadLoadProblem)
     }
 
+    /** 複数行定型文を本文どおり保存・復元し、評価用Viewでは既存短縮よみを保ったまま除外する。 */
+    @Test
+    fun persistsTemplatesAndCanHideOnlyThemFromConversion() {
+        val dictionary = open()
+        val body = " 先頭\\n表記 \n\tか\u3099\r\n末尾 "
+        val template = UserDictionaryEntry("めーる", body, UserDictionaryCategory.TEMPLATE)
+        val shortcut = UserDictionaryEntry("めーる", "返信\\n", UserDictionaryCategory.SHORTCUT)
+
+        assertNull(dictionary.add(template))
+        assertNull(dictionary.add(shortcut))
+
+        val reopened = open()
+        assertEquals(listOf(template, shortcut), reopened.allEntries())
+        assertEquals(listOf(template, shortcut), reopened.exactMatches("めーる"))
+        assertEquals(listOf(shortcut), reopened.withoutTemplates().exactMatches("めーる"))
+        assertEquals(listOf(shortcut), reopened.withoutTemplates().prefixMatches("め", 1))
+    }
+
     /** 同じ読みと表記の組は分類が違っても重複として拒否し、編集で別項目と重なる場合も拒否する。 */
     @Test
     fun rejectsDuplicatesAndMissingTargets() {

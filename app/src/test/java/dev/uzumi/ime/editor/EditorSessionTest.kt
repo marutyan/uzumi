@@ -288,6 +288,23 @@ class EditorSessionTest {
         assertTrue(client.committedAll.isEmpty())
     }
 
+    /** 定型文の本文は未確定入力の後ろへ改行を保って確定し、変換や学習へ送らない。 */
+    @Test
+    fun templateSelectionPastesMultilineBodyWithoutLearning() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        val template = "署名\n\n か\u3099っこう\\n"
+
+        assertTrue(session.inputText("かな"))
+        assertTrue(session.pasteText(template))
+
+        assertEquals("かな署名\n\n か\u3099っこう\\n", connection.text)
+        assertTrue(session.compositionSnapshot().reading.isEmpty())
+        assertTrue(client.requests.isEmpty())
+        assertTrue(client.committedAll.isEmpty())
+    }
+
     /** 一覧で選んだ絵文字列も未確定の読みを先に確定し、変換・学習へ渡さずそのまま入力する。 */
     @Test
     fun emojiPickerSelectionFinishesCompositionAndKeepsTheSequence() {

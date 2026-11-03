@@ -42,6 +42,7 @@ import dev.uzumi.ime.conversion.NeuralModelSpec
 import dev.uzumi.ime.conversion.PredictionCandidate
 import dev.uzumi.ime.conversion.PredictionResult
 import dev.uzumi.ime.dictionary.UserDictionaries
+import dev.uzumi.ime.dictionary.UserDictionaryCategory
 import dev.uzumi.ime.clipboard.RecentClipboard
 import dev.uzumi.ime.editor.AndroidInputConnectionPort
 import dev.uzumi.ime.editor.EditorSession
@@ -72,6 +73,7 @@ import dev.uzumi.ime.keyboard.ToolbarAction
 import dev.uzumi.ime.keyboard.ToolbarBarViews
 import dev.uzumi.ime.keyboard.ToolbarPreferences
 import dev.uzumi.ime.keyboard.ToolbarTilePanel
+import dev.uzumi.ime.keyboard.TemplatePickerPanel
 import dev.uzumi.ime.learning.LearningStores
 import dev.uzumi.ime.learning.HiddenCandidateStores
 import dev.uzumi.ime.live.CandidateResult
@@ -117,6 +119,7 @@ class UzumiInputMethodService : InputMethodService() {
     private var candidateGrid: CandidateGridView? = null
     private var candidateActionPanel: CandidateActionPanel? = null
     private var toolbarPanel: ToolbarTilePanel? = null
+    private var templatePanel: TemplatePickerPanel? = null
     // 入力Viewを作ったときのキーボード設定。設定画面で変わっていれば、次に表示するときに作り直す。
     private var builtPreferences: KeyboardPreferences? = null
     private var builtToolbarPreferences: ToolbarPreferences? = null
@@ -238,6 +241,7 @@ class UzumiInputMethodService : InputMethodService() {
         candidateGrid?.hide()
         candidateActionPanel?.hide()
         toolbarPanel?.hide()
+        templatePanel?.hide()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(views.colors.keyboardBackground)
@@ -314,6 +318,9 @@ class UzumiInputMethodService : InputMethodService() {
         toolbarPanel = ToolbarTilePanel(this).also { panel ->
             keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
         }
+        templatePanel = TemplatePickerPanel(this).also { panel ->
+            keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
+        }
         candidateActionPanel = CandidateActionPanel(this).also { actionPanel ->
             keyboardArea.addView(actionPanel, FrameLayout.LayoutParams(match, match))
         }
@@ -377,6 +384,7 @@ class UzumiInputMethodService : InputMethodService() {
         candidateGrid?.hide()
         candidateActionPanel?.hide()
         toolbarPanel?.hide()
+        templatePanel?.hide()
         currentPolicy = null
         autoCapsMode = 0
         refreshCandidates()
@@ -480,6 +488,7 @@ class UzumiInputMethodService : InputMethodService() {
         candidateGrid?.hide()
         candidateActionPanel?.hide()
         toolbarPanel?.hide()
+        templatePanel?.hide()
         stopClipboardObservation()
         clearInlineSuggestions()
         super.onFinishInputView(finishingInput)
@@ -492,6 +501,7 @@ class UzumiInputMethodService : InputMethodService() {
         candidateGrid?.hide()
         candidateActionPanel?.hide()
         toolbarPanel?.hide()
+        templatePanel?.hide()
         stopClipboardObservation()
         closeSession()
         clearInlineSuggestions()
@@ -947,6 +957,7 @@ class UzumiInputMethodService : InputMethodService() {
             if (grid?.isShowing == true) {
                 grid.hide()
             } else {
+                templatePanel?.hide()
                 showCandidateGrid(current, entries)
                 // ライブ変換では、一覧を開いた文節の候補を明示変換と同じだけ取り直す。届いたら一覧を描き直す。
                 if (current?.isLiveMode == true && session === current) current.requestLiveCandidates()
@@ -1011,6 +1022,7 @@ class UzumiInputMethodService : InputMethodService() {
             if (panel.isShowing) {
                 panel.hide()
             } else {
+                templatePanel?.hide()
                 panel.show(availableToolbarActions(current), ::toolbarActionLabel) { action ->
                     panel.hide()
                     handleToolbarAction(action)
@@ -1050,19 +1062,58 @@ class UzumiInputMethodService : InputMethodService() {
             ToolbarAction.USER_DICTIONARY -> startActivity(
                 Intent(this, UserDictionaryActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             )
+            ToolbarAction.TEMPLATES -> showTemplatePicker()
             ToolbarAction.SETTINGS -> openSettings()
             ToolbarAction.CLOSE_KEYBOARD -> requestHideSelf(0)
         }
         refreshCandidates()
     }
 
+    /** 各タイルの識別名を、候補バーと設定画面で共通の文言へ変換する。 */
     private fun toolbarActionLabel(action: ToolbarAction): String = when (action) {
         // 本文の冒頭は候補バーの提案だけに出し、機能バーでは同じ本文を重ねて見せない。
         ToolbarAction.PASTE -> getString(R.string.toolbar_paste)
         ToolbarAction.UNDO -> getString(R.string.toolbar_undo)
         ToolbarAction.USER_DICTIONARY -> getString(R.string.open_user_dictionary)
+        ToolbarAction.TEMPLATES -> getString(R.string.toolbar_templates)
         ToolbarAction.SETTINGS -> getString(R.string.open_settings)
         ToolbarAction.CLOSE_KEYBOARD -> getString(R.string.close_keyboard)
+    }
+
+    /** 定型文を別threadで読み込み、タップされた本文を貼り付け経路で入力する。 */
+    private fun showTemplatePicker() {
+        val current = session ?: return
+        val panel = templatePanel ?: return
+        candidateGrid?.hide()
+        toolbarPanel?.hide()
+        panel.showLoading()
+        val executor = conversionExecutor ?: run {
+            panel.hide()
+            return
+        }
+        val expectedSession = current.sessionEpoch
+        try {
+            executor.execute {
+                val templates = runCatching {
+                    UserDictionaries.get(applicationContext).allEntries()
+                        .filter { it.category == UserDictionaryCategory.TEMPLATE }
+                }.getOrDefault(emptyList())
+                mainHandler.post {
+                    if (session !== current || current.sessionEpoch != expectedSession || !inputViewVisible ||
+                        templatePanel !== panel || !panel.isShowing
+                    ) return@post
+                    panel.show(templates) { entry ->
+                        panel.hide()
+                        if (session === current && current.sessionEpoch == expectedSession && !evaluation.isRecording) {
+                            current.pasteText(entry.surface)
+                            refreshCandidates()
+                        }
+                    }
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            panel.hide()
+        }
     }
 
     /** ✕で閉じた提案は同じclipでは再表示せず、通常の候補バーへ戻す。 */

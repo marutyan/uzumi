@@ -652,10 +652,12 @@ class SettingsActivity : Activity() {
         }
     }
 
+    /** 選択中の機能名を設定画面へ表示する共通文言に変換する。 */
     private fun toolbarActionLabel(action: ToolbarAction): String = when (action) {
         ToolbarAction.PASTE -> getString(R.string.toolbar_paste)
         ToolbarAction.UNDO -> getString(R.string.toolbar_undo)
         ToolbarAction.USER_DICTIONARY -> getString(R.string.open_user_dictionary)
+        ToolbarAction.TEMPLATES -> getString(R.string.toolbar_templates)
         ToolbarAction.SETTINGS -> getString(R.string.open_settings)
         ToolbarAction.CLOSE_KEYBOARD -> getString(R.string.close_keyboard)
     }

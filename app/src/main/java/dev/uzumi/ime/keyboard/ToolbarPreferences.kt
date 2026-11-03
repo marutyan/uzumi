@@ -42,6 +42,7 @@ data class ToolbarPreferences(
             ToolbarAction.PASTE,
             ToolbarAction.UNDO,
             ToolbarAction.USER_DICTIONARY,
+            ToolbarAction.TEMPLATES,
             ToolbarAction.SETTINGS,
             ToolbarAction.CLOSE_KEYBOARD,
         )
@@ -79,6 +80,7 @@ enum class ToolbarAction(val icon: String) {
     PASTE("▣"),
     UNDO("↶"),
     USER_DICTIONARY("辞"),
+    TEMPLATES("定"),
     SETTINGS("⚙"),
     CLOSE_KEYBOARD("⌄"),
 }

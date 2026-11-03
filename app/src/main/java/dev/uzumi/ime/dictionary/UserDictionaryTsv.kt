@@ -17,31 +17,36 @@ data class TsvParseResult(
 /**
  * 保存ファイルとimport/exportで共通に使うテキスト形式を読み書きする。
  * 形式はUTF-8の「読み<TAB>表記<TAB>分類」で、分類列は省略すると名詞になる。空行と`#`で始まる行は読み飛ばす。
+ * 定型文の表記だけは `\\`、`\n`、`\r`、`\t` でエスケープし、複数行やタブを一行のTSVへ保存する。
+ * v2ヘッダーがあるファイルだけで定型文のエスケープを解釈し、v1以前のバックスラッシュ表記を保つ。
  * Mozcのユーザー辞書が出力する4列目（コメント）は読込み時だけ受け付けて無視し、書き出しは3列にする。
  */
 object UserDictionaryTsv {
     /** 書き出すファイルの先頭に置く形式名。読込み時は注釈行として無視される。 */
-    const val HEADER = "# Uzumi user dictionary v1"
+    const val HEADER = "# Uzumi user dictionary v2"
 
-    /** 項目を保存・export用のテキストへ変換する。項目は検証済みで、タブや改行を含まない前提とする。 */
+    /** 項目を保存・export用のテキストへ変換し、定型文の改行・タブ・バックスラッシュを保持する。 */
     fun format(entries: List<UserDictionaryEntry>): String = buildString {
         append(HEADER).append('\n')
         entries.forEach { entry ->
             append(entry.reading).append('\t')
-            append(entry.surface).append('\t')
+            append(if (entry.category == UserDictionaryCategory.TEMPLATE) escapeTemplate(entry.surface) else entry.surface)
+            append('\t')
             append(entry.category.label).append('\n')
         }
     }
 
-    /** テキストを行ごとに解析し、正規化と検証を通った項目だけを返す。重複の扱いは辞書側で決める。 */
+    /** テキストを行ごとに解析し、v2ヘッダーがあれば定型文を復元した上で検証する。重複の扱いは辞書側で決める。 */
     fun parse(text: String): TsvParseResult {
         val entries = mutableListOf<UserDictionaryEntry>()
         val failures = mutableListOf<TsvLineFailure>()
-        text.removePrefix("\uFEFF").split('\n').forEachIndexed { index, rawLine ->
+        val lines = text.removePrefix("\uFEFF").split('\n')
+        val templateEscapes = lines.any { it.removeSuffix("\r") == HEADER }
+        lines.forEachIndexed { index, rawLine ->
             val line = rawLine.removeSuffix("\r")
             if (line.isBlank() || line.startsWith("#")) return@forEachIndexed
             val lineNumber = index + 1
-            when (val parsed = parseLine(line)) {
+            when (val parsed = parseLine(line, templateEscapes)) {
                 is LineResult.Parsed -> entries += parsed.entry
                 is LineResult.Failed -> failures += TsvLineFailure(lineNumber, parsed.error)
             }
@@ -69,7 +74,7 @@ object UserDictionaryTsv {
     }
 
     /** 列数と分類名を確認し、項目の規則で検証する。 */
-    private fun parseLine(line: String): LineResult {
+    private fun parseLine(line: String, templateEscapes: Boolean): LineResult {
         val columns = line.split('\t')
         if (columns.size !in 2..4) return LineResult.Failed(UserDictionaryError.WRONG_COLUMN_COUNT)
         val categoryLabel = columns.getOrNull(2)?.trim().orEmpty()
@@ -79,8 +84,50 @@ object UserDictionaryTsv {
             UserDictionaryCategory.fromLabel(categoryLabel)
                 ?: return LineResult.Failed(UserDictionaryError.UNKNOWN_CATEGORY)
         }
-        val entry = UserDictionaryRules.normalize(UserDictionaryEntry(columns[0], columns[1], category))
+        val surface = if (templateEscapes && category == UserDictionaryCategory.TEMPLATE) {
+            unescapeTemplate(columns[1])
+        } else {
+            columns[1]
+        }
+        val entry = UserDictionaryRules.normalize(UserDictionaryEntry(columns[0], surface, category))
         val error = UserDictionaryRules.validate(entry)
         return if (error == null) LineResult.Parsed(entry) else LineResult.Failed(error)
+    }
+
+    /** TSVの一行構造を保ちながら、定型文に含まれる改行・タブ・バックスラッシュを表現する。 */
+    private fun escapeTemplate(value: String): String = buildString {
+        value.forEach { character ->
+            append(when (character) {
+                '\\' -> "\\\\"
+                '\n' -> "\\n"
+                '\r' -> "\\r"
+                '\t' -> "\\t"
+                else -> character.toString()
+            })
+        }
+    }
+
+    /** 定型文の既知エスケープだけを復元し、未知のバックスラッシュ表記は元の文字列として残す。 */
+    private fun unescapeTemplate(value: String): String = buildString {
+        var index = 0
+        while (index < value.length) {
+            val character = value[index]
+            if (character != '\\' || index + 1 >= value.length) {
+                append(character)
+                index++
+                continue
+            }
+            when (value[index + 1]) {
+                '\\' -> append('\\')
+                'n' -> append('\n')
+                'r' -> append('\r')
+                't' -> append('\t')
+                else -> {
+                    append('\\')
+                    append(value[index + 1])
+                }
+            }
+            index += 2
+        }
     }
 }
