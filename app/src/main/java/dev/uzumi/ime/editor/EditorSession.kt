@@ -290,9 +290,15 @@ class EditorSession(
         return result.copy(candidates = candidates.filter { !it.englishVariant || keepEnglish })
     }
 
-    /** 重複表記と非表示候補を除いた後、候補バーに出す予測を最大5件にする。 */
+    /**
+     * 重複表記と非表示候補を除いた後、候補バーに出す予測を最大5件にする。英語表記はMozc予測の後ろに並ぶため、
+     * 5件で切ると一覧にしか出なくなる。英語候補が5件に入らないときは、最初の英語候補を5件目に置く。
+     */
     fun predictionBarResult(): PredictionResult? = predictionResult()?.let { result ->
-        result.copy(candidates = result.candidates.take(MAX_PREDICTIONS_IN_BAR))
+        val bar = result.candidates.take(MAX_PREDICTIONS_IN_BAR)
+        val english = result.candidates.firstOrNull(PredictionCandidate::englishVariant)
+        val candidates = if (english == null || english in bar) bar else bar.dropLast(1) + english
+        result.copy(candidates = candidates)
     }
 
     /** 予測の右に並ぶ通常の候補の表記。ライブ変換では注目segmentの候補、それ以外は明示変換・基本候補。 */

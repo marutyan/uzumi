@@ -496,6 +496,29 @@ class EditorSessionTest {
         assertEquals(listOf(request to candidates[2]), client.committed)
     }
 
+    /** Mozc予測が5件以上あっても、最初の英語候補を候補バーの5件目に残す。 */
+    @Test
+    fun keepsFirstEnglishPredictionInBarBehindManyMozcPredictions() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+        assertTrue(session.inputText("あっぷる"))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        val mozc = List(6) { PredictionCandidate(it + 1, "予測${it + 1}", "あっぷる") }
+        val english = listOf(
+            PredictionCandidate(null, "apple", "あっぷる", englishVariant = true),
+            PredictionCandidate(null, "Apple", "あっぷる", englishVariant = true),
+        )
+        assertTrue(session.applyPredictionResult(PredictionResult(request, mozc + english)))
+
+        assertEquals(
+            listOf("予測1", "予測2", "予測3", "予測4", "apple"),
+            session.predictionBarResult()!!.candidates.map { it.value },
+        )
+        assertEquals(8, session.predictionResult()!!.candidates.size)
+    }
+
     /** Mozc候補が無い、または表示中の値と重なって除外されたとき、英語候補だけを先頭へ出さない。 */
     @Test
     fun hidesEnglishPredictionsWithoutVisibleMozcCandidateBeforeThem() {
