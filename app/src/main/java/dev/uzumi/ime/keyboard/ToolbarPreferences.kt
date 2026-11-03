@@ -40,6 +40,7 @@ data class ToolbarPreferences(
         /** 現時点で実際に動作する機能。未実装機能は選択肢にも表示しない。 */
         val AVAILABLE_ACTIONS = listOf(
             ToolbarAction.PASTE,
+            ToolbarAction.CLIPBOARD_HISTORY,
             ToolbarAction.UNDO,
             ToolbarAction.USER_DICTIONARY,
             ToolbarAction.TEMPLATES,
@@ -50,6 +51,7 @@ data class ToolbarPreferences(
         /** よく使う機能を最初から上段に置く。Undoは戻せる操作があるときだけ表示する。 */
         val DEFAULT_ACTIONS = listOf(
             ToolbarAction.PASTE,
+            ToolbarAction.CLIPBOARD_HISTORY,
             ToolbarAction.UNDO,
             ToolbarAction.USER_DICTIONARY,
             ToolbarAction.SETTINGS,
@@ -78,6 +80,7 @@ data class ToolbarPreferences(
 /** 候補バーと機能タイルで共通に使う、実装済みの機能。 */
 enum class ToolbarAction(val icon: String) {
     PASTE("▣"),
+    CLIPBOARD_HISTORY("📋"),
     UNDO("↶"),
     USER_DICTIONARY("辞"),
     TEMPLATES("定"),

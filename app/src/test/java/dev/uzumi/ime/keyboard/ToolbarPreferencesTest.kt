@@ -53,4 +53,11 @@ class ToolbarPreferencesTest {
     fun templatePickerIsAvailableOnce() {
         assertEquals(1, ToolbarPreferences.AVAILABLE_ACTIONS.count { it == ToolbarAction.TEMPLATES })
     }
+
+    /** 履歴を既存の機能タイル選択へ追加し、新規設定では使える状態にする。 */
+    @Test
+    fun clipboardHistoryIsAnAvailableDefaultAction() {
+        assertEquals(true, ToolbarPreferences.AVAILABLE_ACTIONS.contains(ToolbarAction.CLIPBOARD_HISTORY))
+        assertEquals(true, ToolbarPreferences.DEFAULT_ACTIONS.contains(ToolbarAction.CLIPBOARD_HISTORY))
+    }
 }

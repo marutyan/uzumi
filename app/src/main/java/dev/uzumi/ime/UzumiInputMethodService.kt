@@ -41,6 +41,11 @@ import dev.uzumi.ime.conversion.MozcDataInstaller
 import dev.uzumi.ime.conversion.NeuralModelSpec
 import dev.uzumi.ime.conversion.PredictionCandidate
 import dev.uzumi.ime.conversion.PredictionResult
+import dev.uzumi.ime.clipboard.ClipboardHistoryCapturePolicy
+import dev.uzumi.ime.clipboard.ClipboardHistoryIdentity
+import dev.uzumi.ime.clipboard.ClipboardHistoryItem
+import dev.uzumi.ime.clipboard.ClipboardHistoryRules
+import dev.uzumi.ime.clipboard.ClipboardHistoryStore
 import dev.uzumi.ime.dictionary.UserDictionaries
 import dev.uzumi.ime.dictionary.UserDictionaryCategory
 import dev.uzumi.ime.clipboard.RecentClipboard
@@ -62,6 +67,7 @@ import dev.uzumi.ime.evaluation.TimingSample
 import dev.uzumi.ime.keyboard.CandidateBarViews
 import dev.uzumi.ime.keyboard.CandidateActionPanel
 import dev.uzumi.ime.keyboard.CandidateGridView
+import dev.uzumi.ime.keyboard.ClipboardHistoryPanel
 import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardAction
 import dev.uzumi.ime.keyboard.KeyboardColors
@@ -84,6 +90,7 @@ import dev.uzumi.ime.live.RequestIdentity
 import dev.uzumi.ime.neural.NeuralRuntimeConnection
 import dev.uzumi.ime.neural.NeuralSelection
 import dev.uzumi.ime.neural.shouldRecreateNeuralConnection
+import java.io.File
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -120,6 +127,7 @@ class UzumiInputMethodService : InputMethodService() {
     private var candidateActionPanel: CandidateActionPanel? = null
     private var toolbarPanel: ToolbarTilePanel? = null
     private var templatePanel: TemplatePickerPanel? = null
+    private var clipboardHistoryPanel: ClipboardHistoryPanel? = null
     // 入力Viewを作ったときのキーボード設定。設定画面で変わっていれば、次に表示するときに作り直す。
     private var builtPreferences: KeyboardPreferences? = null
     private var builtToolbarPreferences: ToolbarPreferences? = null
@@ -131,8 +139,14 @@ class UzumiInputMethodService : InputMethodService() {
     private var toolbarViews: ToolbarBarViews? = null
     // クリップボード本文はRecentClipboardの一時候補にだけ保持し、ログや設定へ保存しない。
     private var recentClipboard: RecentClipboard? = null
+    // 本文をIME表示中だけ取得し、他の設定・履歴とは分けたnoBackupFilesDirへ保存する。
+    private val clipboardHistoryStore by lazy {
+        ClipboardHistoryStore(File(noBackupFilesDir, CLIPBOARD_HISTORY_FILE_NAME))
+    }
     private var clipboardSuggestion: RecentClipboard.Suggestion? = null
     private var clipboardExpiry: Runnable? = null
+    private var clipboardHistoryExpiry: Runnable? = null
+    private var clipboardHistorySessionEpoch: Long? = null
     private var clipboardSuggestionSessionEpoch: Long? = null
     private var inputViewVisible = false
     // Inline Autofill候補の表示部品。中身はOSが描画し、IMEは読まない（ログ・計数・学習・設定へ送らない）。
@@ -217,13 +231,16 @@ class UzumiInputMethodService : InputMethodService() {
         worker.start()
         EvaluationStatusSource.provider = ::evaluationStatus
         EvaluationStatusSource.neuralMemoryRequester = { neuralConnection?.requestMemory() }
+        scheduleClipboardHistoryExpiry()
     }
 
-    /** 保留中のUI更新を捨て、エンジン側sessionを破棄してからworkerを止める。 */
+    /** 保留中のUI更新と履歴期限timerを捨て、エンジン側sessionを破棄してworkerを止める。 */
     override fun onDestroy() {
         EvaluationStatusSource.provider = null
         EvaluationStatusSource.neuralMemoryRequester = null
         stopClipboardObservation()
+        clipboardHistoryExpiry?.let(mainHandler::removeCallbacks)
+        clipboardHistoryExpiry = null
         closeSession()
         applyNeuralSelection(null, restarting = false)
         mainHandler.removeCallbacksAndMessages(null)
@@ -242,6 +259,8 @@ class UzumiInputMethodService : InputMethodService() {
         candidateActionPanel?.hide()
         toolbarPanel?.hide()
         templatePanel?.hide()
+        clipboardHistoryPanel?.hide()
+        clipboardHistorySessionEpoch = null
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(views.colors.keyboardBackground)
@@ -321,6 +340,10 @@ class UzumiInputMethodService : InputMethodService() {
         templatePanel = TemplatePickerPanel(this).also { panel ->
             keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
         }
+        clipboardHistoryPanel = ClipboardHistoryPanel(this).also { panel ->
+            keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
+        }
+        clipboardHistorySessionEpoch = null
         candidateActionPanel = CandidateActionPanel(this).also { actionPanel ->
             keyboardArea.addView(actionPanel, FrameLayout.LayoutParams(match, match))
         }
@@ -385,6 +408,8 @@ class UzumiInputMethodService : InputMethodService() {
         candidateActionPanel?.hide()
         toolbarPanel?.hide()
         templatePanel?.hide()
+        clipboardHistoryPanel?.hide()
+        clipboardHistorySessionEpoch = null
         currentPolicy = null
         autoCapsMode = 0
         refreshCandidates()
@@ -489,6 +514,7 @@ class UzumiInputMethodService : InputMethodService() {
         candidateActionPanel?.hide()
         toolbarPanel?.hide()
         templatePanel?.hide()
+        clipboardHistoryPanel?.hide()
         stopClipboardObservation()
         clearInlineSuggestions()
         super.onFinishInputView(finishingInput)
@@ -502,6 +528,7 @@ class UzumiInputMethodService : InputMethodService() {
         candidateActionPanel?.hide()
         toolbarPanel?.hide()
         templatePanel?.hide()
+        clipboardHistoryPanel?.hide()
         stopClipboardObservation()
         closeSession()
         clearInlineSuggestions()
@@ -751,15 +778,24 @@ class UzumiInputMethodService : InputMethodService() {
         keyboardPanel?.setAutoCapsMode(autoCapsMode)
     }
 
-    /** IME表示中だけクリップボード変更を監視し、期限付きの一時候補を更新する。 */
+    /** IME表示中だけクリップボード変更を監視し、貼り付け提案と履歴を更新する。 */
     private fun startClipboardObservation() {
         val manager = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager ?: return
         val observer = recentClipboard ?: RecentClipboard(manager, onClipboardChanged = {
+            val identity = recentClipboard?.currentHistoryIdentity()
+            val capturePolicy = clipboardHistoryCapturePolicy()
+            val historyEnabled = UzumiSettings.isClipboardHistoryEnabled(this)
+            val visibleAtChange = inputViewVisible
             mainHandler.post {
+                if (identity != null && visibleAtChange && historyEnabled) {
+                    captureClipboardHistory(identity, capturePolicy, historyEnabled)
+                }
                 if (inputViewVisible) refreshClipboardSuggestion()
             }
         }).also { recentClipboard = it }
         if (observer.startObserving()) {
+            captureClipboardHistory()
+            scheduleClipboardHistoryExpiry()
             refreshClipboardSuggestion()
         } else {
             clipboardSuggestion = null
@@ -794,10 +830,149 @@ class UzumiInputMethodService : InputMethodService() {
         refreshCandidates()
     }
 
-    /** キーボード非表示時に監視・期限処理・本文を参照できる候補を破棄する。 */
+    /** キーボード非表示時にclipboard監視と提案を止め、履歴期限timerは継続する。 */
     private fun stopClipboardObservation() {
         recentClipboard?.close()
         clearClipboardSuggestion()
+        clipboardHistorySessionEpoch = null
+        clipboardHistoryPanel?.hide()
+    }
+
+    /** clip通知時に観測したpolicyと識別情報を使い、機密本文や遅れて変わった欄の条件を持ち込まない。 */
+    private fun captureClipboardHistory(
+        observedIdentity: ClipboardHistoryIdentity? = null,
+        capturePolicy: ClipboardHistoryCapturePolicy = clipboardHistoryCapturePolicy(),
+        historyEnabledAtChange: Boolean = UzumiSettings.isClipboardHistoryEnabled(this),
+    ) {
+        if (!historyEnabledAtChange) return
+        val observer = recentClipboard
+        val identity = observedIdentity ?: observer?.currentHistoryIdentity() ?: return
+        val store = clipboardHistoryStore
+        if (store.wasHandled(identity)) return
+
+        val mayStoreText = ClipboardHistoryRules.mayStoreText(
+            clipboardSensitive = identity.clipboardSensitive,
+            capturePolicy = capturePolicy,
+        )
+        if (!mayStoreText || evaluation.isRecording || !UzumiSettings.isClipboardHistoryEnabled(this) ||
+            !inputViewVisible || session?.isActive != true || observer == null
+        ) {
+            store.markHandled(identity)
+        } else {
+            val text = observer.readForHistory(identity, sensitiveField = capturePolicy.sensitiveField)
+            if (text == null) store.markHandled(identity) else store.add(identity, text)
+        }
+        scheduleClipboardHistoryExpiry()
+        if (clipboardHistoryPanel?.isShowing == true) refreshClipboardHistoryPanel()
+    }
+
+    /** clipboard listenerが届いた時点の欄・学習・評価状態を本文なしで記録する。 */
+    private fun clipboardHistoryCapturePolicy(): ClipboardHistoryCapturePolicy {
+        val policy = currentPolicy
+        return ClipboardHistoryCapturePolicy(
+            sensitiveField = policy?.isSensitive ?: true,
+            learningSuppressed = policy?.suppressLearning ?: true,
+            evaluationRecording = evaluation.isRecording,
+        )
+    }
+
+    /** 履歴パネルを開ける表示状態、設定、入力欄、評価状態かを一か所で確認する。 */
+    private fun canShowClipboardHistory(): Boolean {
+        val current = session
+        return inputViewVisible && current?.isActive == true &&
+            UzumiSettings.isClipboardHistoryEnabled(this) && !current.policy.suppressLearning &&
+            !evaluation.isRecording
+    }
+
+    /** キーボード面へ履歴を重ね、候補一覧や機能一覧とは同時に表示しない。 */
+    private fun showClipboardHistory() {
+        if (!canShowClipboardHistory()) return
+        candidateGrid?.hide()
+        toolbarPanel?.hide()
+        clipboardHistorySessionEpoch = session?.sessionEpoch
+        refreshClipboardHistoryPanel()
+    }
+
+    /** 現在の履歴をパネルへ反映し、各ボタンを同じ編集セッションへ結び付ける。 */
+    private fun refreshClipboardHistoryPanel() {
+        val panel = clipboardHistoryPanel ?: return
+        val current = session
+        val epoch = clipboardHistorySessionEpoch
+        if (!panel.isShowing && epoch == null) return
+        if (!canShowClipboardHistory() || current == null || epoch != current.sessionEpoch) {
+            panel.hide()
+            clipboardHistorySessionEpoch = null
+            return
+        }
+        panel.show(
+            items = clipboardHistoryStore.readItems(),
+            onPaste = { item -> pasteClipboardHistoryItem(item, current.sessionEpoch) },
+            onPin = { item, pinned -> setClipboardHistoryPinned(item, pinned, current.sessionEpoch) },
+            onDelete = { item -> deleteClipboardHistoryItem(item, current.sessionEpoch) },
+            onClearAll = { confirmClearClipboardHistory(current.sessionEpoch) },
+            onClose = {
+                panel.hide()
+                clipboardHistorySessionEpoch = null
+            },
+        )
+        scheduleClipboardHistoryExpiry()
+    }
+
+    /** 期限切れでない同一履歴項目を、変換や学習を通さない既存の貼り付け経路へ渡す。 */
+    private fun pasteClipboardHistoryItem(item: ClipboardHistoryItem, sessionEpoch: Long) {
+        val current = session ?: return
+        if (!canShowClipboardHistory() || current.sessionEpoch != sessionEpoch) return
+        val stored = clipboardHistoryStore.readItems().firstOrNull {
+            it.text == item.text && it.copiedAtMillis == item.copiedAtMillis
+        } ?: return
+        if (!current.pasteText(stored.text)) return
+        clipboardHistoryPanel?.hide()
+        clipboardHistorySessionEpoch = null
+        scheduleConversionTimeout(current)
+        refreshCandidates()
+    }
+
+    /** 選んだ履歴の固定状態を更新し、期限切れを含む最新一覧を再描画する。 */
+    private fun setClipboardHistoryPinned(item: ClipboardHistoryItem, pinned: Boolean, sessionEpoch: Long) {
+        if (!canShowClipboardHistory() || session?.sessionEpoch != sessionEpoch) return
+        clipboardHistoryStore.setPinned(item.text, pinned)
+        refreshClipboardHistoryPanel()
+    }
+
+    /** 選んだ履歴を削除し、現在clipの処理済み識別情報を維持する。 */
+    private fun deleteClipboardHistoryItem(item: ClipboardHistoryItem, sessionEpoch: Long) {
+        if (!canShowClipboardHistory() || session?.sessionEpoch != sessionEpoch) return
+        clipboardHistoryStore.delete(item.text)
+        refreshClipboardHistoryPanel()
+    }
+
+    /** 全削除前に確認し、同じ現在clipが次回表示時に再追加されないよう識別情報を残す。 */
+    private fun confirmClearClipboardHistory(sessionEpoch: Long) {
+        if (!canShowClipboardHistory() || session?.sessionEpoch != sessionEpoch) return
+        clipboardHistoryPanel?.showClearConfirmation {
+            if (canShowClipboardHistory() && session?.sessionEpoch == sessionEpoch) {
+                clipboardHistoryStore.clearAll(recentClipboard?.currentHistoryIdentity())
+                refreshClipboardHistoryPanel()
+                scheduleClipboardHistoryExpiry()
+            }
+        }
+    }
+
+    /** 未固定履歴の最古期限に合わせ、IME非表示や設定OFFでもサービス中は自動削除を続ける。 */
+    private fun scheduleClipboardHistoryExpiry() {
+        clipboardHistoryExpiry?.let(mainHandler::removeCallbacks)
+        clipboardHistoryExpiry = null
+        val nextExpiry = clipboardHistoryStore.nextExpiryMillis() ?: return
+        val expiry = Runnable {
+            clipboardHistoryExpiry = null
+            clipboardHistoryStore.readItems()
+            if (clipboardHistoryPanel?.isShowing == true) {
+                refreshClipboardHistoryPanel()
+            }
+            scheduleClipboardHistoryExpiry()
+        }
+        clipboardHistoryExpiry = expiry
+        mainHandler.postDelayed(expiry, (nextExpiry - System.currentTimeMillis()).coerceAtLeast(0L))
     }
 
     /** 設定値を変えず、キーボード最小高を残した画面内のバー段数上限を返す。 */
@@ -832,6 +1007,10 @@ class UzumiInputMethodService : InputMethodService() {
      * 入力していない間は、設定への入口と案内、キーボードを閉じるボタンを出す。
      */
     private fun refreshCandidates() {
+        if (evaluation.isRecording) {
+            clipboardHistoryPanel?.hide()
+            clipboardHistorySessionEpoch = null
+        }
         keyboardPanel?.setComposing(session?.hasComposition == true)
         keyboardPanel?.setSegmentResizable(session?.canResizeSegment == true)
         val row = candidateRow ?: return
@@ -954,6 +1133,8 @@ class UzumiInputMethodService : InputMethodService() {
         trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
             evaluation.record(OperationKind.OTHER)
             toolbarPanel?.hide()
+            clipboardHistoryPanel?.hide()
+            clipboardHistorySessionEpoch = null
             if (grid?.isShowing == true) {
                 grid.hide()
             } else {
@@ -1019,6 +1200,8 @@ class UzumiInputMethodService : InputMethodService() {
         trailing.addView(views.symbolButton("▦", getString(R.string.toolbar_open)) {
             val panel = toolbarPanel ?: return@symbolButton
             candidateGrid?.hide()
+            clipboardHistoryPanel?.hide()
+            clipboardHistorySessionEpoch = null
             if (panel.isShowing) {
                 panel.hide()
             } else {
@@ -1038,6 +1221,7 @@ class UzumiInputMethodService : InputMethodService() {
                 // 明示的な貼り付けは60秒の自動提案期限に縛らず、テキストclipがある間は出す。
                 ToolbarAction.PASTE -> current?.isActive == true && inputViewVisible &&
                     (hasCurrentClipboardSuggestion(current) || recentClipboard?.hasCurrentText() == true)
+                ToolbarAction.CLIPBOARD_HISTORY -> canShowClipboardHistory()
                 ToolbarAction.UNDO -> current?.let {
                     it.canUndoDeletion || it.liveCandidateState()?.canUndo == true
                 } == true
@@ -1050,6 +1234,7 @@ class UzumiInputMethodService : InputMethodService() {
         val current = session
         when (action) {
             ToolbarAction.PASTE -> pasteFromClipboard()
+            ToolbarAction.CLIPBOARD_HISTORY -> showClipboardHistory()
             ToolbarAction.UNDO -> {
                 evaluation.record(OperationKind.CORRECTION)
                 if (current == null || session !== current) return
@@ -1073,6 +1258,7 @@ class UzumiInputMethodService : InputMethodService() {
     private fun toolbarActionLabel(action: ToolbarAction): String = when (action) {
         // 本文の冒頭は候補バーの提案だけに出し、機能バーでは同じ本文を重ねて見せない。
         ToolbarAction.PASTE -> getString(R.string.toolbar_paste)
+        ToolbarAction.CLIPBOARD_HISTORY -> getString(R.string.toolbar_clipboard_history)
         ToolbarAction.UNDO -> getString(R.string.toolbar_undo)
         ToolbarAction.USER_DICTIONARY -> getString(R.string.open_user_dictionary)
         ToolbarAction.TEMPLATES -> getString(R.string.toolbar_templates)
@@ -1144,6 +1330,7 @@ class UzumiInputMethodService : InputMethodService() {
         if (!inputViewVisible || !current.isActive) return
         val observer = recentClipboard ?: return
         val suggestion = clipboardSuggestion?.takeIf { hasCurrentClipboardSuggestion(current) }
+        captureClipboardHistory()
         val text = if (suggestion != null) observer.readForPaste(suggestion) else observer.readCurrentForPaste()
         if (text == null) {
             refreshClipboardSuggestion()
@@ -1486,6 +1673,9 @@ class UzumiInputMethodService : InputMethodService() {
     }
 
     private companion object {
+        /** noBackupFilesDirへ保存する履歴ファイル名。 */
+        const val CLIPBOARD_HISTORY_FILE_NAME = "clipboard-history.tsv"
+
         /** 変換応答を待つ上限。超えたら読みとかな・カナ候補へ戻す。 */
         const val CONVERSION_TIMEOUT_MILLIS = 2_000L
 
