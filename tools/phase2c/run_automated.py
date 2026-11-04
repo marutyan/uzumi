@@ -11,6 +11,7 @@
 変換結果を待つときは、固定の待ち時間ではなく、debugビルドの受信口の`EVAL_STATUS`（IMEの状態を数値と真偽だけで返す）を
 短い間隔で読み、送った押下をIMEが処理し終え、変換の仕事が残っていない状態になるまで待つ（道具の版2）。
 ←で文節へ移った後、伸縮の後、候補一覧（∨）を開いた後は、候補の取り直しの結果が届くまでも待つ（道具の版3）。
+明示変換では、候補を選んでも文節が確定しないため、→で次の文節へ移りながら先頭から直す（道具の版4）。
 上限の時間を超えたら、その課題を中断として記録して止める。画面の読み取り（`uiautomator dump`）は、判断に画面が要る
 手順（課題の準備、候補を探す手順、最終文の照合）でだけ1回ずつ行う。
 
@@ -51,7 +52,8 @@ TASKS_TSV = REPO / "docs" / "phase2c-tasks.tsv"
 # 版1：固定の待ち時間（0.8秒）と画面の読み直しで変換結果を待つ（2026-09-24の本測定）。
 # 版2：状態の確認口（EVAL_STATUS）で処理の終わりを待ち、画面の読み取りを判断に要る手順だけにする。
 # 版3：版2の待ち方に伸縮の手順を合わせ、←・伸縮・∨の後は候補の取り直しの結果（candidates_outstanding）も待つ。
-TOOL_VERSION = 3
+# 版4：明示変換の訂正を、候補を選んでも文節が確定しないアプリの操作（commit 8c4c989以降）に合わせ、→で次の文節へ移る。
+TOOL_VERSION = 4
 
 # 評価条件で決めた課題の並べ替えseed。
 ORDER_SEED = 20261001
@@ -706,19 +708,23 @@ def remaining_targets(targets: List[str], committed: str) -> List[str]:
 
 def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all: bool = False,
                  reading: str = "") -> Snapshot:
-    """明示変換（条件O）の訂正。変換キーで変換し、先頭文節の候補を目標と照合して選ぶ。
+    """明示変換（条件O）の訂正。変換キーで変換し、注目文節の候補を目標と照合して、先頭の文節から順に直す。
 
-    先頭文節の候補のうち目標の残りの接頭辞になる最長の候補を選ぶ（第一候補なら確定操作、他は訂正操作）。
-    選ぶと先頭文節が確定し、残りの読みが変換し直される。先頭文節ごとにしか選べないため、
-    後ろの文節だけが誤っていても前の文節の第一候補を選んで確定していく。
-    [commit_all]がtrueなら、表示が目標と一致しても未確定の文節が残る間は候補を選んで確定し続ける
-    （句点を読みに含めて入力した過去訂正の課題では、句点の後に確定の操作が要るため）。
-    候補の全範囲に目標が無ければ、先頭文節の区切りを伸縮する規則（plan_explicit_resize）を試す。[reading]は
+    注目文節の候補のうち目標の残りの接頭辞になる最長の候補を、その文節の正しい表記とみなす（版3と同じ）。
+    版4では、アプリの明示変換の操作（commit `8c4c989`以降）に合わせる。候補を選んでも注目文節の表記が変わるだけで、
+    文節は確定せず、注目も動かない。そこで、注目文節に正しい表記が出ていれば「→」で次の文節へ移り、出ていなければ
+    その候補を選ぶ（第一候補なら確定操作、他は訂正操作）。「→」は計数では訂正操作になる。
+    表示全体が目標と一致したら終える。[commit_all]がtrueなら（句点を読みに含めて入力した過去訂正の課題）、
+    未確定の表示を確定するために改行キーを1回押す（計数では終端操作になる）。
+    候補の全範囲に目標が無ければ、注目文節の区切りを伸縮する規則（plan_explicit_resize）を試す。[reading]は
     compositionの読みで、伸縮の位置を目標の表記から求めるためだけに使う。
     """
+    # 注目文節より前の文節の表記。どれも目標と一致を確かめてから「→」で通り過ぎたもの。
     committed = ""
     converted = False
     resizes = 0
+    # 直前に候補を選んだときの表記。候補バーの値だけでは注目文節の表記を決められない場合に使う。
+    chosen: Optional[str] = None
     snap = settle_snapshot(kb)
     for _ in range(MAX_FIX_STEPS):
         display = snap.field_text[len(committed):] if snap.field_text.startswith(committed) else None
@@ -728,8 +734,13 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all:
             return snap
         if "" in rest and display == "":
             return snap
-        if display in rest and not commit_all:
-            return snap
+        if display in rest:
+            if not commit_all:
+                return snap
+            if converted:
+                kb.send([Press(kb.state[0], "改行")])
+                steps.append("commit-enter")
+                return settle_snapshot(kb)
         if not converted:
             kb.send(plan_switch(kb.state, "KANA"))
             kb.send([Press("KANA", "変換")])
@@ -737,9 +748,26 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all:
             converted = True
             snap = settle_snapshot(kb)
             continue
-        choice = pick_prefix([c for c, _ in snap.candidates], rest)
+        values = [c for c, _ in snap.candidates]
+        # 注目文節の今の表記：直前に選んだ候補、または表示の残りの先頭に一致する最長の候補。
+        if chosen is not None and display.startswith(chosen):
+            current = chosen
+        else:
+            current = next((v for v in sorted(values, key=len, reverse=True) if display.startswith(v)), None)
+        choice = pick_prefix(values, rest)
         source = snap.candidates
-        seen = set(c for c, _ in snap.candidates)
+        seen = set(values)
+        if choice is not None and choice[1] == current:
+            if len(committed) + len(current) >= len(snap.field_text):
+                # 最後の文節が正しい表記なのに、表示全体が目標と一致しない。目標の残りを直せる文節が無い。
+                steps.append("no-candidate")
+                return snap
+            move_right(kb)
+            steps.append("right")
+            committed += current
+            chosen = None
+            snap = settle_snapshot(kb)
+            continue
         if choice is None and GRID_BUTTON in snap.buttons:
             snap, source, choice = search_grid(kb, snap, lambda values: pick_prefix(values, rest), steps, seen)
         if choice is None:
@@ -751,12 +779,13 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all:
             long_press_arrow(kb, direction, count)
             steps.append(f"resize-head{'-' if direction < 0 else '+'}{count}")
             resizes += 1
+            chosen = None
             snap = settle_snapshot(kb)
             continue
         index, value = choice
         kb.tap(source[index][1])
         steps.append(f"pick{index}")
-        committed += value
+        chosen = value
         snap = settle_snapshot(kb)
     steps.append("step-limit")
     return snap
@@ -1127,6 +1156,14 @@ def move_left(kb: Keyboard) -> None:
     kb.candidates_requested = True
 
 
+def move_right(kb: Keyboard) -> None:
+    """「→」を押す。明示変換の表示中は、注目文節を次の文節へ移す（版4）。数字面と記号面には無いため、かなの面へ移ってから押す。"""
+    if kb.state[0] not in ("KANA", "QWERTY"):
+        kb.send(plan_switch(kb.state, "KANA"))
+    kb.send([Press(kb.state[0], "カーソルを右へ移動")])
+    kb.candidates_requested = True
+
+
 def pick_suffix(values: List[str], current: str, aligned: List[str]) -> Optional[Tuple[int, str]]:
     """対象の文節の表記を置き換えると、目標の対応する位置の末尾に一致する候補（最長、同じ長さなら前）。"""
     best = None
@@ -1242,7 +1279,7 @@ def run_past_correction(kb: Keyboard, task: Task, condition: str, steps: List[st
     打ち直し、ライブ変換の訂正（fix_live）をしてから句点を入れる。確定済みの文字列を候補で直す操作は無いため、
     削除と打ち直しが候補の選択だけで直す手順の下限になる。
     条件O：明示変換では句点も読みに入り表示は確定しないため、句点まで入れてから変換し、先頭の文節から
-    候補を選んで最後まで確定する（fix_explicitのcommit_all）。
+    直してから改行キーで確定する（fix_explicitのcommit_all）。
     どちらも、最初の押下の直前と最後の押下の直後の端末の時刻を返し、完了時間の終点を揃える。
     """
     first_ms = device_ms()
