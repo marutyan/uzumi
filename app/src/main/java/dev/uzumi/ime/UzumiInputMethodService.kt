@@ -1581,7 +1581,11 @@ class UzumiInputMethodService : InputMethodService() {
         )
     }
 
-    /** 予測候補を候補バーの項目にする。Mozcの部分key候補は、選択結果を待って残りの読みを反映する。 */
+    /**
+     * 予測候補を候補バーの項目にする。Mozcの部分key候補は、選択結果を待って残りの読みを反映する。
+     * 選んだときに学習する読みと同じ読みを持たせ、長押しで学習を削除できるようにする。読みの先頭だけを変換する候補は
+     * 確定するまで学習の読みが決まらないため持たせない（その学習は、先頭の読みだけを入力した通常の候補から消せる）。
+     */
     private fun predictionEntry(
         current: EditorSession,
         result: PredictionResult,
@@ -1590,6 +1594,8 @@ class UzumiInputMethodService : InputMethodService() {
         label = candidate.value,
         selected = false,
         surface = candidate.value,
+        learnedReading = (candidate.reading ?: result.request.reading)
+            .takeIf { candidate.partialKey == null && !candidate.englishVariant && !result.request.isZeroQuery },
         isPrediction = true,
     ) {
         current.selectPrediction(result.request, candidate)
