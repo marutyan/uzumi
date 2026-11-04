@@ -163,11 +163,11 @@ class CandidateGridView(context: Context) : ScrollView(context) {
         visibility = View.GONE
     }
 
-    /** 候補[values]を並べ、[dividerIndex]の前に区切りを入れる。[selected]を示し、押された元indexを[onPick]へ渡す。 */
+    /** 候補[values]を並べ、[dividerIndexes]の各位置の前に区切りを入れる。[selected]を示し、押された元indexを[onPick]へ渡す。 */
     fun show(
         values: List<String>,
         selected: Int,
-        dividerIndex: Int? = null,
+        dividerIndexes: Set<Int> = emptySet(),
         predictionIndexes: Set<Int> = emptySet(),
         onLongClick: ((Int) -> Boolean)? = null,
         onPick: (Int) -> Unit,
@@ -180,7 +180,7 @@ class CandidateGridView(context: Context) : ScrollView(context) {
             }
             chunk.forEachIndexed { column, value ->
                 val index = rowIndex * COLUMNS + column
-                if (index == dividerIndex) row.addView(views.divider())
+                if (index in dividerIndexes) row.addView(views.divider())
                 row.addView(views.item(
                     value,
                     index == selected,

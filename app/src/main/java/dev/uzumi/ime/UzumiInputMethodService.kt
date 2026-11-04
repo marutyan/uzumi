@@ -1525,7 +1525,7 @@ class UzumiInputMethodService : InputMethodService() {
         grid.show(
             values = entries.map { it.label },
             selected = entries.indexOfFirst { it.selected },
-            dividerIndex = entries.indexOfFirst { it.sectionBreakBefore }.takeIf { it >= 0 },
+            dividerIndexes = entries.indices.filter { entries[it].sectionBreakBefore }.toSet(),
             predictionIndexes = entries.indices.filter { entries[it].isPrediction }.toSet(),
             onLongClick = { index -> openCandidateActionMenu(current, entries[index]) },
         ) { index ->
@@ -1583,7 +1583,7 @@ class UzumiInputMethodService : InputMethodService() {
 
     /**
      * 予測候補を候補バーの項目にする。Mozcの部分key候補は、選択結果を待って残りの読みを反映する。
-     * 選んだときに学習する読みと同じ読みを持たせ、長押しで学習を削除できるようにする。読みの先頭だけを変換する候補は
+     * 選んだときに学習する読み（英語表記を含む）と同じ読みを持たせ、長押しで学習を削除できるようにする。読みの先頭だけを変換する候補は
      * 確定するまで学習の読みが決まらないため持たせない（その学習は、先頭の読みだけを入力した通常の候補から消せる）。
      */
     private fun predictionEntry(
@@ -1595,7 +1595,7 @@ class UzumiInputMethodService : InputMethodService() {
         selected = false,
         surface = candidate.value,
         learnedReading = (candidate.reading ?: result.request.reading)
-            .takeIf { candidate.partialKey == null && !candidate.englishVariant && !result.request.isZeroQuery },
+            .takeIf { candidate.partialKey == null && !result.request.isZeroQuery },
         isPrediction = true,
     ) {
         current.selectPrediction(result.request, candidate)
