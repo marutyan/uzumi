@@ -1100,17 +1100,18 @@ class UzumiInputMethodService : InputMethodService() {
         val barLayout = current?.takeIf { predictionsShown }?.predictionBarLayout()
         val listLayout = current?.takeIf { predictionsShown }?.predictionLayout()
         val regularEntries = if (current?.isLiveMode == true) liveEntries(current, leading, trailing) else explicitEntries(current)
-        // 予測は通常の候補の左に最大2件、残りを右に置く。区切りは、左の予測の後と右の予測の前に入れる。
+        // 通常の候補の上位3件の直後に予測を最大2件混ぜ、残りの予測は通常の候補の後ろに置く。通常の候補が無いとき
+        // （次の語の予測）は予測だけが並ぶ。区切りは、予測と通常の候補が切り替わる位置に入れる。
         val entriesFor = { layout: EditorSession.PredictionLayout? ->
             val toEntry = { candidate: PredictionCandidate -> predictionEntry(current!!, layout!!.result, candidate) }
-            val before = layout?.beforeRegular.orEmpty().map(toEntry)
-            val regular = regularEntries.mapIndexed { index, entry ->
-                entry.withSectionBreak(before.isNotEmpty() && index == 0)
+            val top = regularEntries.take(EditorSession.PredictionLayout.MAX_REGULAR_BEFORE_PREDICTIONS)
+            val early = layout?.early.orEmpty().map(toEntry)
+            val rest = regularEntries.drop(top.size)
+            val late = layout?.late.orEmpty().map(toEntry)
+            val ordered = top + early + rest + late
+            ordered.mapIndexed { index, entry ->
+                entry.withSectionBreak(index > 0 && entry.isPrediction != ordered[index - 1].isPrediction)
             }
-            val after = layout?.afterRegular.orEmpty().mapIndexed { index, candidate ->
-                toEntry(candidate).withSectionBreak(index == 0 && (before.isNotEmpty() || regular.isNotEmpty()))
-            }
-            before + regular + after
         }
         val entries = entriesFor(barLayout)
         val listEntries = entriesFor(listLayout)

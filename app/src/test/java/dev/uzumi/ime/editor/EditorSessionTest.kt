@@ -496,7 +496,7 @@ class EditorSessionTest {
         assertEquals(listOf(request to candidates[2]), client.committed)
     }
 
-    /** 通常の候補の前に置く予測は最大2件にし、読みの先頭だけを変換する候補はすべて後ろへ回す。 */
+    /** 上位に混ぜる予測は打った読みで始まる最大2件にし、先頭だけの変換と表記ゆれの一致は後ろへ回す。 */
     @Test
     fun predictionLayoutKeepsPartialCandidatesAfterRegularOnes() {
         val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
@@ -507,6 +507,7 @@ class EditorSessionTest {
         val request = client.requests.single()
         val candidates = listOf(
             PredictionCandidate(1, "騎士", partialKey = "きし"),
+            PredictionCandidate(6, "義者", "ぎしゃ"),
             PredictionCandidate(2, "記者会見", "きしゃかいけん"),
             PredictionCandidate(3, "器", partialKey = "き"),
             PredictionCandidate(4, "記者団", "きしゃだん"),
@@ -515,8 +516,8 @@ class EditorSessionTest {
         assertTrue(session.applyPredictionResult(PredictionResult(request, candidates)))
 
         val layout = session.predictionLayout()!!
-        assertEquals(listOf("記者会見", "記者団"), layout.beforeRegular.map { it.value })
-        assertEquals(listOf("騎士", "器", "汽車ぽっぽ"), layout.afterRegular.map { it.value })
+        assertEquals(listOf("記者会見", "記者団"), layout.early.map { it.value })
+        assertEquals(listOf("騎士", "義者", "器", "汽車ぽっぽ"), layout.late.map { it.value })
     }
 
     /** Mozc予測が5件以上あっても、最初の英語候補を候補バーの5件目に残す。 */
