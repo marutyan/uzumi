@@ -27,10 +27,11 @@ REPO = Path(__file__).resolve().parents[2]
 NEW_TOOL = REPO / "tools" / "phase2c" / "run_automated.py"
 DEV_TASKS = REPO / "docs" / "phase3a-dev-tasks.tsv"
 PHASE2C_TASKS = REPO / "docs" / "phase2c-tasks.tsv"
-# 旧い版の道具が入ったcommit。版1の待ち方に伸縮の手順を加えた版で、Phase 2cの版2の結果（2026-09-24）を作った。
-OLD_TOOL_COMMIT = "2f27b80"
-# 旧い版の`run_automated.py`のSHA-256。取り出した道具が結果を作った道具と同じことを確かめるために使う。
-OLD_TOOL_SHA256 = "13c903f19cfd15796a887cd5ef7c6b873d8942d9923282958979740816daceb6"
+# 旧い版の道具が入ったcommit。道具の版3（版2の待ち方＋伸縮の手順、2026-09-24に版1の待ち方の版と比べたもの）。
+# 版4の確認では、この版と比べる。
+OLD_TOOL_COMMIT = "a47e173"
+# 旧い版の`run_automated.py`のSHA-256。取り出した道具が比べる対象の道具と同じことを確かめるために使う。
+OLD_TOOL_SHA256 = "ac4877173d74728f800d6035f90a1a740584dba65805c62eab4325f3a0d4e809"
 # 練習の課題ID。Phase 2cの課題文のうち、同等性の確認に使ってよいのはこれだけ。
 PRACTICE_IDS = ["R01", "R02", "R03", "R04", "R05", "R06"]
 
