@@ -14,12 +14,13 @@ import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Input
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.KeyEvent
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Output
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Preedit
+import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Result
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.SessionCommand
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoConfig.Config
 
 /** Mozc protocolの命令列と、辞書なし状態の検出を偽のnativeで検証する。 */
 class MozcConversionEngineTest {
-    /** 入力途中のsuggestion要求は混合候補を明示し、読みの続きを持つ予測候補だけを返す。 */
+    /** 入力途中のsuggestion要求は混合候補と部分予測を有効にし、読みが続く候補を返す。 */
     @Test
     fun suggestRequestsFullReadingPredictions() {
         val native = FakeMozcNative().apply {
@@ -57,12 +58,40 @@ class MozcConversionEngineTest {
         assertTrue(requests.first().isIncognitoMode)
         assertTrue(requests.first().mixedConversion)
         assertFalse(requests.first().zeroQuerySuggestion)
+        assertTrue(requests.first().autoPartialSuggestion)
         assertTrue(requests.last().isIncognitoMode)
         assertFalse(requests.last().mixedConversion)
         assertFalse(requests.last().zeroQuerySuggestion)
+        assertFalse(requests.last().autoPartialSuggestion)
         // 予測の一時設定と、その後の通常設定への復元のどちらでも表記ゆれ変換を保つ。
         assertTrue(requests.all { it.kanaModifierInsensitiveConversion })
         assertFalse(native.inputs.any { it.key.specialKey == KeyEvent.SpecialKey.SPACE })
+    }
+
+    /** 表示候補を除外する前にMozcから50件を取得し、候補バー向けの早期切り捨てをしない。 */
+    @Test
+    fun suggestReadsUpToFiftyCandidates() {
+        val native = FakeMozcNative().apply {
+            respond = { input ->
+                if (input.type == Input.CommandType.SEND_KEY && input.key.hasKeyString()) {
+                    predictionOutput(*List(55) { index ->
+                        CandidateWord.newBuilder()
+                            .setId(index)
+                            .setKey("ありがとう")
+                            .setValue("候補$index")
+                    }.toTypedArray())
+                } else {
+                    Output.newBuilder().setConsumed(true).build()
+                }
+            }
+        }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        val candidates = engine.suggest(sessionId = 5, reading = "ありがと")
+
+        assertEquals(50, candidates.size)
+        assertEquals("候補0", candidates.first().value)
+        assertEquals("候補49", candidates.last().value)
     }
 
     /**
@@ -77,10 +106,10 @@ class MozcConversionEngineTest {
 
         assertEquals(
             listOf(
-                // keyが入力の接頭辞の候補は表記の読み全体が分からないため、IME側の学習へ読みを渡さない。
-                PredictionCandidate(0, "了解しました", null),
+                // 12キーの表記ゆれを許可した場合も、入力側の読みから確定範囲を取る。
+                PredictionCandidate(0, "了解しました", partialKey = "りょうかいし"),
                 PredictionCandidate(1, "利用介しました", "りようかいしました"),
-                PredictionCandidate(4, "利用開始ました", null),
+                PredictionCandidate(4, "利用開始ました", partialKey = "りようかいし"),
                 PredictionCandidate(5, "リヨウカイシマシタ", "りようかいしました"),
                 PredictionCandidate(6, "領解しました", "りょうかいしました"),
                 PredictionCandidate(7, "りょうかいしました", "りょうかいしました"),
@@ -99,7 +128,7 @@ class MozcConversionEngineTest {
         assertEquals(
             listOf(
                 PredictionCandidate(1, "利用介しました", "りようかいしました"),
-                PredictionCandidate(4, "利用開始ました", null),
+                PredictionCandidate(4, "利用開始ました", partialKey = "りようかいし"),
                 PredictionCandidate(5, "リヨウカイシマシタ", "りようかいしました"),
             ),
             engine.suggest(sessionId = 5, reading = "りようかいしました"),
@@ -224,14 +253,29 @@ class MozcConversionEngineTest {
         assertEquals(2, requests.size)
         assertTrue(requests.first().zeroQuerySuggestion)
         assertTrue(requests.first().mixedConversion)
+        assertTrue(requests.first().autoPartialSuggestion)
         assertFalse(requests.last().zeroQuerySuggestion)
         assertFalse(requests.last().mixedConversion)
+        assertFalse(requests.last().autoPartialSuggestion)
     }
 
     /** 予測の選択はSUBMIT_CANDIDATEに予測候補のIDを付けて送り、Mozcの履歴へ学習させる。 */
     @Test
     fun commitPredictionSendsCandidateId() {
-        val native = FakeMozcNative()
+        val native = FakeMozcNative().apply {
+            respond = { input ->
+                if (input.type == Input.CommandType.SEND_COMMAND &&
+                    input.command.type == SessionCommand.CommandType.SUBMIT_CANDIDATE
+                ) {
+                    Output.newBuilder().setConsumed(true).setResult(Result.newBuilder()
+                        .setType(Result.ResultType.STRING)
+                        .setValue("候補")
+                        .setKey("よみ")).build()
+                } else {
+                    Output.newBuilder().setConsumed(true).build()
+                }
+            }
+        }
         val engine = MozcConversionEngine(native, { File("profile") }, { null })
 
         assertTrue(engine.commitPrediction(sessionId = 5, candidateId = 3))
@@ -239,6 +283,50 @@ class MozcConversionEngineTest {
         val command = native.inputs.single().command
         assertEquals(SessionCommand.CommandType.SUBMIT_CANDIDATE, command.type)
         assertEquals(3, command.id)
+    }
+
+    /** SUBMIT_CANDIDATEが確定結果を返さない場合は、選択成功として扱わない。 */
+    @Test
+    fun submitPredictionWithoutResultFails() {
+        val engine = MozcConversionEngine(FakeMozcNative(), { File("profile") }, { null })
+
+        assertNull(engine.submitPrediction(sessionId = 5, candidateId = 3))
+        assertFalse(engine.commitPrediction(sessionId = 5, candidateId = 3))
+    }
+
+    /** SUBMIT_CANDIDATEの出力からMozcが実際に残した読みと確定keyを返す。 */
+    @Test
+    fun submitPredictionReturnsActualRemainingReading() {
+        val native = FakeMozcNative().apply {
+            respond = { input ->
+                if (input.type == Input.CommandType.SEND_COMMAND &&
+                    input.command.type == SessionCommand.CommandType.SUBMIT_CANDIDATE
+                ) {
+                    Output.newBuilder()
+                        .setConsumed(true)
+                        .setResult(Result.newBuilder()
+                            .setType(Result.ResultType.STRING)
+                            .setValue("今日")
+                            .setKey("きょう"))
+                        .setPreedit(Preedit.newBuilder()
+                            .setCursor(1)
+                            .addSegment(Preedit.Segment.newBuilder()
+                                .setAnnotation(Preedit.Segment.Annotation.UNDERLINE)
+                                .setKey("は")
+                                .setValue("は")
+                                .setValueLength(1)))
+                        .build()
+                } else {
+                    Output.newBuilder().setConsumed(true).build()
+                }
+            }
+        }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        assertEquals(
+            EnginePredictionCommit(remainingReading = "は", resultReading = "きょう"),
+            engine.submitPrediction(sessionId = 5, candidateId = 21),
+        )
     }
 
     /** libmozc.soが無いビルドでは、辞書を探さずにUnavailableを返す。 */
@@ -546,6 +634,43 @@ class MozcConversionEngineTest {
         assertEquals(SessionCommand.CommandType.REVERT, native.inputs.last().command.type)
     }
 
+    /**
+     * 学習の削除は、読みを一文節に変換して表記が第一候補なら、その候補IDでMozcの履歴から消し、確定せずに取り消す。
+     * 実際のMozcでは「かき」の柿を学習して第一候補にした後、この命令で柿が4番目へ戻ることをsession_handler_mainで確かめた。
+     */
+    @Test
+    fun deleteFromHistorySendsTopCandidateIdAndReverts() {
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        assertTrue(engine.deleteFromHistory(sessionId = 5, reading = "かき", surface = "柿"))
+
+        assertEquals(listOf("柿"), mozc.deletedFromHistory)
+        assertTrue(mozc.submitted.isEmpty())
+        assertEquals(SessionCommand.CommandType.REVERT, native.inputs.last().command.type)
+    }
+
+    /**
+     * 第一候補でない表記には削除を送らない。Mozcの文節履歴の削除は文節の第一候補の表記を消すため、
+     * 送ると別の語（ここでは「下記」の前にある「柿」）の学習を消してしまう。
+     */
+    @Test
+    fun deleteFromHistorySkipsCandidateThatIsNotFirst() {
+        val mozc = StatefulMozc()
+        val native = FakeMozcNative().apply { respond = mozc::respond }
+        val engine = MozcConversionEngine(native, { File("profile") }, { null })
+
+        assertFalse(engine.deleteFromHistory(sessionId = 5, reading = "かき", surface = "下記"))
+
+        assertTrue(mozc.deletedFromHistory.isEmpty())
+        assertTrue(mozc.submitted.isEmpty())
+        val requests = native.inputs.filter { it.type == Input.CommandType.SET_REQUEST }.map { it.request }
+        // 予測でも確かめた後、予測用のrequestを通常の設定へ戻す。
+        assertFalse(requests.last().mixedConversion)
+        assertEquals(SessionCommand.CommandType.REVERT, native.inputs.last().command.type)
+    }
+
     private fun createTempDir(): File = Files.createTempDirectory("mozc-engine-test").toFile()
 }
 
@@ -580,6 +705,9 @@ private class FakeMozcNative : MozcNativeBridge {
 private class StatefulMozc {
     /** SUBMITで確定した表記。学習が行われたかの確認に使う。 */
     val submitted = mutableListOf<String>()
+
+    /** DELETE_CANDIDATE_FROM_HISTORYで履歴から消すよう指定された表記。 */
+    val deletedFromHistory = mutableListOf<String>()
     private val composition = StringBuilder()
     private val keys = mutableListOf<String>()
     // 文節ごとに選んでいる候補のID。
@@ -595,6 +723,7 @@ private class StatefulMozc {
         "きょうは" to listOf("今日は" to "きょう", "京は" to "きょう"),
         "いい" to listOf("いい" to null, "良い" to null),
         "きょう" to listOf("今日" to null, "京" to null),
+        "かき" to listOf("柿" to null, "下記" to null),
         "こうえんに" to listOf("公園に" to "こうえん", "項園に" to null, "講演に" to "こうえん"),
     )
 
@@ -614,6 +743,11 @@ private class StatefulMozc {
             }
 
             input.command.type == SessionCommand.CommandType.REVERT -> clear()
+            input.command.type == SessionCommand.CommandType.DELETE_CANDIDATE_FROM_HISTORY -> {
+                deletedFromHistory += candidatesOf(keys[focus])[input.command.id].first
+                // 実際のMozcと同じく、削除の後は変換を取り消してcompositionへ戻る。
+                converting = false
+            }
         }
         return output()
     }

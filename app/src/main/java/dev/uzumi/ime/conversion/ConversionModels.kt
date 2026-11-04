@@ -1,5 +1,21 @@
 package dev.uzumi.ime.conversion
 
+/** NG表記を候補から除き、現在値の置換時に入力文字を失わない代替表記を一か所で決める。 */
+object CandidateVisibility {
+    /** 現在値の次から候補を探し、候補が尽きた場合は編集文字を残すため入力された読みを返す。 */
+    fun nextAllowed(values: List<String>, current: String, reading: String, hidden: Set<String>): String? {
+        if (current !in hidden) return current
+        val index = values.indexOf(current)
+        val ordered = if (index >= 0) values.drop(index + 1) + values.take(index) else values
+        return ordered.firstOrNull { it.isNotEmpty() && it !in hidden }
+            ?: reading.takeIf(String::isNotEmpty)
+    }
+
+    /** 評価記録中は比較条件を保つため、候補を取り除かず元の並びを返す。 */
+    fun <T> filter(values: List<T>, hidden: Set<String>, isRecording: Boolean, surface: (T) -> String): List<T> =
+        if (isRecording || hidden.isEmpty()) values else values.filterNot { surface(it) in hidden }
+}
+
 /**
  * 一つの変換要求を識別する世代情報。
  * 応答はこの値が編集セッションの現在値と一致する場合だけ適用し、古い応答による上書きを防ぐ。
@@ -37,11 +53,27 @@ data class PredictionRequest(
         get() = reading.isEmpty()
 }
 
-/** Mozcが返す予測候補。候補IDは、選択時に同じ予測sessionで確定学習するために保持する。 */
-data class PredictionCandidate(val id: Int, val value: String, val reading: String? = null)
+/** MozcまたはIME内の予測候補。idがnullの候補はMozcへ送らず、表記を直接確定する。 */
+data class PredictionCandidate(
+    val id: Int?,
+    val value: String,
+    val reading: String? = null,
+    val englishVariant: Boolean = false,
+    // Mozcの候補keyが入力読みの先頭と一致する場合の手がかり。実際の部分確定は選択結果で判定する。
+    val partialKey: String? = null,
+)
 
 /** 要求の世代に結び付いた予測候補。 */
 data class PredictionResult(val request: PredictionRequest, val candidates: List<PredictionCandidate>)
+
+/** Mozcが予測候補を確定した後の読みと、まだ変換していない入力読み。 */
+data class PredictionCommitResult(
+    val request: PredictionRequest,
+    val candidate: PredictionCandidate,
+    val succeeded: Boolean,
+    val remainingReading: String?,
+    val learningReading: String?,
+)
 
 /** 変換結果の一文節。readingはその文節が占める読み、valueは表示表記、candidatesはその文節だけの候補。 */
 data class ConversionSegment(
@@ -56,6 +88,16 @@ data class ConversionSegment(
     val chosen: Boolean = false,
     // IME側の学習語だけから作った候補を表示しているなら、その学習語の読み。エンジンはこの表記を知らない。
     val learnedReading: String? = null,
+    // 同梱の英語辞書から追加した候補。確定時は英語語彙の学習規則を使う。
+    val englishVariant: Boolean = false,
+    // 非表示候補を避けている間の表示だけを保存し、評価記録時や解除時に元へ戻す。
+    val unfilteredValue: String? = null,
+    /** 非表示候補を避ける前の候補選択状態。 */
+    val unfilteredChosen: Boolean? = null,
+    /** 非表示候補を避ける前のユーザー辞書由来の判定。 */
+    val unfilteredFromUserDictionary: Boolean? = null,
+    /** 非表示候補を避ける前の学習語の読み。nullも元の値として復元する。 */
+    val unfilteredLearnedReading: String? = null,
 ) {
     /** 表示中の表記がエンジンの候補か。falseの文節を含む確定は、エンジンへ区切りと表記を学習させない。 */
     val engineCandidate: Boolean
@@ -73,6 +115,10 @@ data class ConversionCandidate(
     val fromUserDictionary: Boolean = false,
     // IME側の学習語だけから作った候補なら、その学習語の読み。エンジンの候補ではないため、確定時はエンジンへ送らない。
     val learnedReading: String? = null,
+    // 同梱の英語辞書から追加した候補。確定時は英語語彙の学習規則を使う。
+    val englishVariant: Boolean = false,
+    // ライブ表示の自動置換では使わない顔文字・絵文字か。ユーザー辞書の品詞判定もWorkerで反映する。
+    val isEmoticon: Boolean = false,
 ) {
     companion object {
         /** エンジンの候補一覧に無い、表示中の表記そのものを候補にするときのID。エンジン・登録語・学習語のIDと重ならない。 */

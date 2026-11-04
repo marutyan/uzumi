@@ -324,4 +324,50 @@ class FlickDirectionTest {
         assertEquals(200f, gesture.lastX)
         assertTrue(gesture.isLongPressActive)
     }
+
+    /** 縦と横それぞれの判定では、縦横どちらも閾値以下なら中心で、斜めに動かしても円より遅れて方向が決まる。 */
+    @Test
+    fun axisJudgeUsesEachAxisSeparately() {
+        val judge = FlickJudge.AXIS
+        // 閾値ちょうどは中心（円の判定では20未満が中心なので、閾値ちょうどは方向になる）
+        assertEquals(FlickDirection.CENTER, determineFlickDirection(20f, 0f, threshold, judge))
+        assertEquals(FlickDirection.RIGHT, determineFlickDirection(20f, 0f, threshold))
+        // 斜め(15, 15)は距離21で円では方向になるが、縦横それぞれでは中心のまま
+        assertEquals(FlickDirection.DOWN, determineFlickDirection(15f, 15f, threshold))
+        assertEquals(FlickDirection.CENTER, determineFlickDirection(15f, 15f, threshold, judge))
+        // どちらかの軸が閾値を超えたら、大きい方の軸で方向を決める
+        assertEquals(FlickDirection.LEFT, determineFlickDirection(-21f, 5f, threshold, judge))
+        assertEquals(FlickDirection.UP, determineFlickDirection(19f, -21f, threshold, judge))
+        assertEquals(FlickDirection.DOWN, determineFlickDirection(0f, 25f, threshold, judge))
+        // 閾値0以下は常に中心
+        assertEquals(FlickDirection.CENTER, determineFlickDirection(50f, 0f, 0f, judge))
+    }
+
+    /** 既定の入力の操作は、これまでの判定（円・半径20dp、端末の長押し、トグル1秒）と同じ。Simejiに近い設定は縦横12dp。 */
+    @Test
+    fun inputTuningDefaultsKeepPreviousBehavior() {
+        val defaults = InputTuning()
+        assertEquals(20, defaults.flickThresholdDp)
+        assertEquals(FlickJudge.CIRCLE, defaults.flickJudge)
+        assertEquals(0, defaults.longPressMillis)
+        assertEquals(dev.uzumi.ime.editor.KanaKeyToggle.WINDOW_MILLIS, defaults.toggleWindowMillis.toLong())
+        assertEquals(defaults, InputTuning.fromStorage(emptyMap()))
+        val simeji = defaults.simejiLike()
+        assertEquals(12, simeji.flickThresholdDp)
+        assertEquals(FlickJudge.AXIS, simeji.flickJudge)
+        assertEquals(defaults.longPressMillis, simeji.longPressMillis)
+        assertEquals(defaults.toggleWindowMillis, simeji.toggleWindowMillis)
+        // 保存値の往復と、範囲外・読めない値の扱い
+        val tuned = InputTuning(flickThresholdDp = 8, flickJudge = FlickJudge.AXIS, longPressMillis = 350, toggleWindowMillis = 1500)
+        assertEquals(tuned, InputTuning.fromStorage(tuned.toStorage()))
+        val clamped = InputTuning.fromStorage(
+            mapOf(
+                InputTuning.KEY_FLICK_THRESHOLD to "1",
+                InputTuning.KEY_FLICK_JUDGE to "FUTURE",
+                InputTuning.KEY_LONG_PRESS to "5000",
+                InputTuning.KEY_TOGGLE_WINDOW to "abc",
+            ),
+        )
+        assertEquals(InputTuning(flickThresholdDp = 6, longPressMillis = 800), clamped)
+    }
 }

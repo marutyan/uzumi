@@ -8,7 +8,7 @@ import android.widget.TextView
 import java.io.FileNotFoundException
 
 /**
- * APKに同梱した第三者の著作権表示（Mozc由来資産のNOTICE）を原文のまま表示する。
+ * APKに同梱した第三者の著作権表示を原文のまま表示する。
  * 配布条件として求められる表示を、アプリ内から利用者が読めるようにするための画面である。
  */
 class LicenseActivity : Activity() {
@@ -30,8 +30,8 @@ class LicenseActivity : Activity() {
     }
 
     /**
-     * 同梱した表示文書を読む。Mozcの表示に、ニューラル変換の生成物を取り込んだビルドではllama.cppの表示を続ける。
-     * どちらも無かった場合はnullを返す。
+     * 同梱した表示文書を読む。Mozc、llama.cpp、同梱フォントのライセンスを続けて表示する。
+     * どれも無かった場合はnullを返す。
      */
     private fun readNotice(): String? {
         val notices = NOTICE_ASSET_PATHS.mapNotNull { path ->
@@ -45,7 +45,12 @@ class LicenseActivity : Activity() {
     }
 
     private companion object {
-        /** Gradleがthird_party/mozc/NOTICE.txtとthird_party/llama.cpp/NOTICE.txtを取り込むassetsの場所。 */
-        val NOTICE_ASSET_PATHS = listOf("licenses/mozc-NOTICE.txt", "licenses/llama.cpp-NOTICE.txt")
+        /** Gradleが各ライセンス原本を取り込むassetsの場所。 */
+        val NOTICE_ASSET_PATHS = listOf(
+            "licenses/mozc-NOTICE.txt",
+            "licenses/llama.cpp-NOTICE.txt",
+            "licenses/zen-maru-gothic-OFL.txt",
+            "licenses/yusei-magic-OFL.txt",
+        )
     }
 }

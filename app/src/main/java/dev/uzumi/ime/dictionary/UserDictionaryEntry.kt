@@ -4,6 +4,7 @@ import java.text.Normalizer
 
 /**
  * ユーザー辞書の一項目。読みと表記の組で一意になり、管理画面・保存形式・IME候補の参照で共通に使う。
+ * 定型文の本文は空白・改行・Unicodeの結合形も入力どおり保持する。
  */
 data class UserDictionaryEntry(
     val reading: String,
@@ -21,6 +22,7 @@ enum class UserDictionaryCategory(val label: String) {
     PLACE_NAME("地名"),
     ORGANIZATION("組織"),
     SHORTCUT("短縮よみ"),
+    TEMPLATE("定型文"),
     SYMBOL("記号"),
     EMOTICON("顔文字"),
     ;
@@ -40,6 +42,7 @@ enum class UserDictionaryError {
     READING_NOT_HIRAGANA,
     EMPTY_SURFACE,
     SURFACE_TOO_LONG,
+    TEMPLATE_TOO_LONG,
     SURFACE_HAS_CONTROL_CHARACTER,
     WRONG_COLUMN_COUNT,
     UNKNOWN_CATEGORY,
@@ -59,13 +62,26 @@ object UserDictionaryRules {
     /** 表記の最大長（Unicodeコードポイント数）。候補行へ出す一語として十分な長さに制限する。 */
     const val MAX_SURFACE_LENGTH = 128
 
+    /** 定型文の最大長（Unicodeコードポイント数）。複数行の本文を保存しつつ、極端な登録で候補表示を圧迫しない。 */
+    const val MAX_TEMPLATE_LENGTH = 8192
+
     /** 登録できる総数。IMEのプロセスが全項目をメモリ上のindexへ保持するため上限を置く。 */
     const val MAX_ENTRY_COUNT = 50_000
 
-    /** 前後の空白を除き、読みと表記をNFCへ揃える。結合濁点で入力された読みも合成済みの読みと同じ項目として扱う。 */
+    /**
+     * importで読むTSVの最大byte数（UTF-8）。登録上限の件数を十分に収め、巨大な入力でメモリを使い切らないようにする。
+     * ファイルからのimportと、設定バックアップに含めた辞書の両方に使う。
+     */
+    const val MAX_IMPORT_BYTES = 8 * 1024 * 1024
+
+    /** 読みはNFCへ揃え、通常語は前後を整える。定型文本文は空白やUnicodeの結合形を含め入力どおり残す。 */
     fun normalize(entry: UserDictionaryEntry): UserDictionaryEntry = entry.copy(
         reading = normalizeReading(entry.reading),
-        surface = Normalizer.normalize(entry.surface.trim(), Normalizer.Form.NFC),
+        surface = if (entry.category == UserDictionaryCategory.TEMPLATE) {
+            entry.surface
+        } else {
+            Normalizer.normalize(entry.surface.trim(), Normalizer.Form.NFC)
+        },
     )
 
     /** 検索・参照に使う読みを登録時と同じ形へ揃える。 */
@@ -87,9 +103,15 @@ object UserDictionaryRules {
             reading.codePointCount(0, reading.length) > MAX_READING_LENGTH -> UserDictionaryError.READING_TOO_LONG
             !reading.all(::isReadingCharacter) -> UserDictionaryError.READING_NOT_HIRAGANA
             surface.isEmpty() -> UserDictionaryError.EMPTY_SURFACE
-            surface.codePointCount(0, surface.length) > MAX_SURFACE_LENGTH -> UserDictionaryError.SURFACE_TOO_LONG
-            // タブと改行は保存形式の区切りになるため、表記に制御文字を許さない。
-            surface.any(Char::isISOControl) -> UserDictionaryError.SURFACE_HAS_CONTROL_CHARACTER
+            entry.category == UserDictionaryCategory.TEMPLATE &&
+                surface.codePointCount(0, surface.length) > MAX_TEMPLATE_LENGTH -> UserDictionaryError.TEMPLATE_TOO_LONG
+            entry.category != UserDictionaryCategory.TEMPLATE &&
+                surface.codePointCount(0, surface.length) > MAX_SURFACE_LENGTH -> UserDictionaryError.SURFACE_TOO_LONG
+            entry.category == UserDictionaryCategory.TEMPLATE && surface.any {
+                it.isISOControl() && it != '\n' && it != '\r' && it != '\t'
+            } -> UserDictionaryError.SURFACE_HAS_CONTROL_CHARACTER
+            entry.category != UserDictionaryCategory.TEMPLATE && surface.any(Char::isISOControl) ->
+                UserDictionaryError.SURFACE_HAS_CONTROL_CHARACTER
             else -> null
         }
     }

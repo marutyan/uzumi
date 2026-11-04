@@ -1,5 +1,6 @@
 package dev.uzumi.ime.conversion
 
+import dev.uzumi.ime.dictionary.UserDictionaryCategory
 import dev.uzumi.ime.dictionary.UserDictionaryEntry
 import dev.uzumi.ime.dictionary.UserDictionaryLookup
 import dev.uzumi.ime.editor.GraphemeClusters
@@ -13,6 +14,9 @@ import dev.uzumi.ime.live.ProtectedRange
 import dev.uzumi.ime.live.RequestIdentity
 import dev.uzumi.ime.live.ResultSegment
 import dev.uzumi.ime.live.SegmentState
+import java.io.BufferedReader
+import java.io.File
+import java.io.StringReader
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -22,6 +26,103 @@ import org.junit.Test
 
 /** ライブ変換の範囲分割、Mozc結果の写像、ユーザー辞書の候補合成、学習単位の作成を検証する。 */
 class LiveConversionAdapterTest {
+    /** 読みやすいテスト用TSVから、英語表記の不変辞書を作る。 */
+    private fun englishDictionary(tsv: String): EnglishWordDictionary =
+        EnglishWordDictionary.parse(BufferedReader(StringReader(tsv)))
+
+    /** 同梱辞書は数百語を含み、空行・列崩れ・同じ読みと表記の重複がない。 */
+    @Test
+    fun englishDictionaryAssetHasNoBlankOrDuplicateRows() {
+        val asset = File("src/main/assets/english-words.tsv")
+        val lines = asset.readLines(Charsets.UTF_8)
+        val pairs = lines.map { line ->
+            assertTrue(line.isNotBlank())
+            val columns = line.split('\t')
+            assertEquals(2, columns.size)
+            assertTrue(columns.all(String::isNotBlank))
+            assertTrue(columns[0].all { it in '\u3041'..'\u309F' || it == 'ー' })
+            columns[0] to columns[1]
+        }
+        assertTrue(lines.size >= 200)
+        assertEquals(pairs.size, pairs.toSet().size)
+
+        val dictionary = EnglishWordDictionary.load(asset.inputStream())
+        assertEquals(listOf("email", "Email", "E-mail"), dictionary.exactMatches("いーめーる").map { it.surface })
+    }
+
+    /**
+     * 同梱辞書は英単語・固有名詞の日本語読みから英語の綴りを引くもので、意味の訳と誤った綴りを含めない。
+     * 略した呼び名（いんすた、ぱそこん等）から正式な英語表記を引く行は、利用者の決定で残す。
+     */
+    @Test
+    fun englishDictionaryAssetMapsReadingsToSpellingsOnly() {
+        val dictionary = EnglishWordDictionary.load(File("src/main/assets/english-words.tsv").inputStream())
+        val excluded = listOf(
+            "あぷりけーしょんぷろぐらみんぐ" to "API",
+            "えーてぃーおーえむ" to "Atom",
+            "えむえーしー" to "Mac",
+            "ぱん" to "bread",
+            "めも" to "note",
+            "せってい" to "settings",
+            "けんさく" to "search",
+            "けいたい" to "mobile",
+            "こんびに" to "convenience store",
+            "ばーじょんあっぷ" to "version up",
+            "ばーじょんかんり" to "version control",
+        )
+        excluded.forEach { (reading, surface) ->
+            assertTrue(dictionary.exactMatches(reading).none { it.surface == surface })
+        }
+        assertEquals(listOf("MAC"), dictionary.exactMatches("えむえーしー").map { it.surface })
+        listOf("いんすた" to "Instagram", "すたば" to "Starbucks", "ぷれぜん" to "presentation", "すーぱー" to "supermarket", "ぱそこん" to "PC")
+            .forEach { (reading, surface) -> assertTrue(dictionary.exactMatches(reading).any { it.surface == surface }) }
+    }
+
+    /** TSVの読み込みは空行と重複のある辞書を拒否する。 */
+    @Test
+    fun englishDictionaryRejectsBlankAndDuplicateRows() {
+        assertTrue(runCatching {
+            EnglishWordDictionary.parse(BufferedReader(StringReader("いーめーる\temail\n\n")))
+        }.isFailure)
+        assertTrue(runCatching {
+            EnglishWordDictionary.parse(BufferedReader(StringReader("いーめーる\temail\nいーめーる\temail\n")))
+        }.isFailure)
+    }
+
+    /** ライブ変換の第一候補と表示値を保ち、英語表記をMozc候補の後ろへ足す。 */
+    @Test
+    fun englishLiveCandidatesAppendAfterEngineWithoutChangingDisplay() {
+        val dictionary = englishDictionary("めーる\tmail\nめーる\tMail\n")
+        val converter = SegmentedLiveConverter(
+            convertRange = { reading, _ -> listOf(ResultSegment(reading, "メール表示", listOf("Mozc候補", "メール表示"))) },
+            englishWords = dictionary,
+        )
+        val identity = RequestIdentity(1, 1, "めーる", 0, 3, emptyList(), 3, 0)
+
+        val segment = assertNotNullAndGet(converter.convert(LiveRequest(identity, "めーる", learningAllowed = true)))
+            .segments.single()
+
+        assertEquals("メール表示", segment.surface)
+        assertEquals(listOf("Mozc候補", "メール表示", "mail", "Mail"), segment.candidates)
+    }
+
+    /** 注目segmentの候補再取得にも英語候補を末尾へ足し、既存表記の重複を除く。 */
+    @Test
+    fun englishCandidatesAppendToRefetchedSegmentCandidates() {
+        val dictionary = englishDictionary("めーる\tmail\nめーる\tMail\n")
+
+        val candidates = mergeSegmentCandidates(
+            reading = "めーる",
+            engineCandidates = listOf("メール", "mail"),
+            userDictionary = null,
+            exactSurfaces = null,
+            englishWords = dictionary,
+        )
+
+        assertEquals(listOf("メール", "mail", "Mail"), candidates)
+        assertTrue(mergeSegmentCandidates("めーる", emptyList(), null, null).isEmpty())
+    }
+
     /** 保護範囲と対象範囲内の入力カーソルで区切り、自由な部分範囲だけを変換器へ渡す。 */
     @Test
     fun splitsTargetAtProtectedRangesAndInputCursor() {
@@ -138,6 +239,20 @@ class LiveConversionAdapterTest {
         )
 
         assertEquals(listOf(ResultSegment("うずみ", "Uzumi", listOf("Uzumi", "鵜済み", "うずみ"))), merged)
+    }
+
+    /** 複数行定型文をライブ候補へ加え、選択・確定用の値から改行を落とさない。 */
+    @Test
+    fun multilineTemplateAppearsAsWholeReadingCandidate() {
+        val template = "先頭行\n\t二行目"
+        val merged = UserDictionaryCandidates.mergeLive(
+            "めーる",
+            listOf(ResultSegment("めーる", "メール", listOf("メール", "めいる"))),
+            FakeLookup(listOf(UserDictionaryEntry("めーる", template, UserDictionaryCategory.TEMPLATE))),
+        )
+
+        assertEquals(template, merged.single().surface)
+        assertEquals(listOf(template, "メール", "めいる", "めーる"), merged.single().candidates)
     }
 
     /**

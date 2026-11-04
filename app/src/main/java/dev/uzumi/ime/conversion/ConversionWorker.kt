@@ -2,6 +2,9 @@ package dev.uzumi.ime.conversion
 
 import dev.uzumi.ime.dictionary.UserDictionaryLookup
 import dev.uzumi.ime.evaluation.LiveRequestReport
+import dev.uzumi.ime.dictionary.withoutTemplates
+import dev.uzumi.ime.editor.GraphemeClusters
+import dev.uzumi.ime.editor.KanaModifier
 import dev.uzumi.ime.learning.LearningStore
 import dev.uzumi.ime.live.CandidateRequest
 import dev.uzumi.ime.live.CandidateResult
@@ -59,8 +62,8 @@ interface PredictionClient {
     /** 最新の予測要求をキューへ積み、結果を後から返す。 */
     fun requestPrediction(request: PredictionRequest)
 
-    /** 表示した予測候補を選んだことを、対応するMozc sessionへ伝える。 */
-    fun commitPrediction(request: PredictionRequest, candidateId: Int)
+    /** 表示した候補を確定し、Mozc IDがある場合だけ対応する予測sessionへ学習を伝える。 */
+    fun commitPrediction(request: PredictionRequest, candidate: PredictionCandidate)
 }
 
 /**
@@ -82,6 +85,8 @@ class ConversionWorker(
     private val onCandidateResult: (Long, CandidateResult) -> Unit = { _, _ -> },
     // ユーザー辞書を返す。初回はファイルを読むため、worker threadからだけ呼ぶ。
     private val userDictionary: () -> UserDictionaryLookup? = { null },
+    // 完全一致した読みへ英語表記を追加する読み取り専用辞書。
+    private val englishWords: () -> EnglishWordLookup? = { null },
     // IME側の学習キャッシュを返す。初回はファイルを読むため、worker threadからだけ呼ぶ。nullなら学習を使わない。
     private val learningStore: () -> LearningStore? = { null },
     // 評価モードで、ライブ変換の要求ごとの評価用の報告を受け取る（編集セッションの世代、報告）。worker threadから呼ばれる。
@@ -92,6 +97,8 @@ class ConversionWorker(
     private val nanoTime: () -> Long = System::nanoTime,
     // 予測応答はsessionEpochとrevisionを保ったままUIへ返す。
     private val onPredictionResult: (PredictionResult) -> Unit = {},
+    // Mozc候補のSUBMIT_CANDIDATE結果。worker threadから呼ばれるため、UIへはpostして反映する。
+    private val onPredictionCommitResult: (PredictionCommitResult) -> Unit = {},
 ) : ConversionClient, LiveConversionClient, PredictionClient {
     @Volatile
     private var currentHealth: EngineHealth = EngineHealth.Loading
@@ -202,20 +209,65 @@ class ConversionWorker(
      * 対応する予測要求がまだ最新なら、選択した候補をIME側の学習へ記録し、
      * Mozcの予測sessionへも確定して履歴を学習させる。
      */
-    override fun commitPrediction(request: PredictionRequest, candidateId: Int) {
-        if (request.incognito || isEnded(request.sessionEpoch)) return
+    override fun commitPrediction(request: PredictionRequest, candidate: PredictionCandidate) {
+        if (isEnded(request.sessionEpoch)) return
         executor.execute {
             if (lastPredictionRequests[request.sessionEpoch] != request) return@execute
-            val candidate = lastPredictionCandidates[request.sessionEpoch].orEmpty()
-                .firstOrNull { it.id == candidateId } ?: return@execute
-            candidate.reading?.let { reading -> lookupLearningStore()?.record(reading, candidate.value) }
-            val sessionId = predictionSessions[request.sessionEpoch] ?: return@execute
-            val insensitive = kanaModifierInsensitive(request.kanaModifierInsensitive)
-            if (!runCatching { engine.setIncognito(false, insensitive) }.getOrDefault(false)) return@execute
-            runCatching { engine.commitPrediction(sessionId, candidateId) }
+            val selected = lastPredictionCandidates[request.sessionEpoch].orEmpty()
+                .firstOrNull { it == candidate } ?: return@execute
+            var engineCommit: EnginePredictionCommit? = null
+            if (selected.id != null) {
+                val sessionId = predictionSessions[request.sessionEpoch]
+                val insensitive = kanaModifierInsensitive(request.kanaModifierInsensitive)
+                if (sessionId != null && runCatching { engine.setIncognito(request.incognito, insensitive) }.getOrDefault(false)) {
+                    engineCommit = runCatching { engine.submitPrediction(sessionId, selected.id) }.getOrNull()
+                }
+            }
+            val learningReading = engineCommit?.let { predictionLearningReading(request, selected, it) }
+                ?: selected.reading.takeIf { selected.id == null }
+            if (!request.incognito) {
+                learningReading?.let { reading ->
+                    lookupLearningStore()?.let { store ->
+                        if (selected.englishVariant) store.recordEnglishVariant(reading, selected.value)
+                        else store.record(reading, selected.value)
+                    }
+                }
+            }
             lastPredictionRequests.remove(request.sessionEpoch)
             lastPredictionCandidates.remove(request.sessionEpoch)
+            onPredictionCommitResult(
+                PredictionCommitResult(
+                    request = request,
+                    candidate = selected,
+                    succeeded = selected.id == null || engineCommit != null,
+                    remainingReading = engineCommit?.remainingReading,
+                    learningReading = learningReading,
+                ),
+            )
         }
+    }
+
+    /** Mozcの応答に残った読みを基準に、IME学習へ実際に確定した読みを渡す。 */
+    private fun predictionLearningReading(
+        request: PredictionRequest,
+        candidate: PredictionCandidate,
+        commit: EnginePredictionCommit,
+    ): String? {
+        if (request.isZeroQuery) return commit.resultReading ?: candidate.reading
+        if (commit.remainingReading.isEmpty()) {
+            return if (candidate.partialKey != null) request.reading else candidate.reading ?: request.reading
+        }
+        val remainingClusters = GraphemeClusters.split(commit.remainingReading).size
+        val typedRemaining = GraphemeClusters.split(request.reading).takeLast(remainingClusters).joinToString("")
+        val comparable: (String) -> String = if (request.kanaModifierInsensitive) {
+            { value -> KanaModifier.stripModifiers(value) }
+        } else {
+            { value -> value }
+        }
+        if (remainingClusters == 0 || comparable(typedRemaining) != comparable(commit.remainingReading)) return null
+        val consumed = request.reading.removeSuffix(typedRemaining)
+        if (consumed.isEmpty()) return null
+        return commit.resultReading?.takeIf { comparable(it) == comparable(consumed) } ?: consumed
     }
 
     /**
@@ -253,12 +305,17 @@ class ConversionWorker(
      */
     private fun recordCommittedUnits(store: LearningStore, units: List<List<LearnedSegment>>) {
         val dictionary = lookupUserDictionary()
+        val english = lookupEnglishWords()
         // 読みと表記がユーザー辞書の登録語と一致するsegmentか。
         fun registered(segment: LearnedSegment): Boolean =
             dictionary?.exactMatches(segment.reading)?.any { it.surface == segment.surface } == true
         val emoticons = EmoticonJudge(dictionary, learningStore = null)
         for (unit in units) {
-            unit.filterNot(::registered).forEach { store.record(it.reading, it.surface) }
+            unit.filterNot(::registered).forEach { segment ->
+                val isEnglishVariant = english?.exactMatches(segment.reading)?.any { it.surface == segment.surface } == true
+                if (isEnglishVariant) store.recordEnglishVariant(segment.reading, segment.surface)
+                else store.record(segment.reading, segment.surface)
+            }
             // 登録語と顔文字・絵文字のsegmentより前だけを句にする。
             val phraseSource = unit.takeWhile { !registered(it) && !emoticons.isEmoticon(it.reading, it.surface) }
             for (end in 2..phraseSource.size) {
@@ -269,6 +326,48 @@ class ConversionWorker(
                     createIfMissing = phrase.any { it.chosen },
                 )
             }
+        }
+    }
+
+    /**
+     * 候補の長押しの「この学習を削除」。IME側の学習から読みと表記の行を消し、エンジンの履歴からも同じ組を消す。
+     * どちらもworker threadで行い、エンジンのsessionは読みから作り直すため、表示中の候補IDには依らない。
+     * 学習禁止欄と評価の記録中は何もしない。onRemovedはIME側の行を消せたかを渡し、worker threadから呼ぶ。
+     */
+    fun deleteLearning(
+        sessionEpoch: Long,
+        reading: String,
+        surface: String,
+        learningAllowed: Boolean,
+        onRemoved: (Boolean) -> Unit,
+    ) {
+        if (!learningAllowed) return
+        executor.execute {
+            if (evaluationActive()) return@execute
+            val removed = lookupLearningStore()?.remove(reading, surface) == true
+            if (currentHealth is EngineHealth.Ready && runCatching { engine.setIncognito(false) }.getOrDefault(false)) {
+                if (!isEnded(sessionEpoch)) {
+                    val sessionId = sessionFor(sessionEpoch)
+                    if (sessionId != null) {
+                        // 読みから作り直した状態は直前の明示変換の状態ではないため、その確定の学習通知を照合させない。
+                        lastConverted.remove(sessionEpoch)
+                        runCatching { engine.deleteFromHistory(sessionId, reading, surface) }
+                    }
+                } else {
+                    // 削除を押した直後に入力欄が閉じても、Mozcの履歴だけ残らないよう一時のsessionで消す。
+                    runCatching {
+                        val temporary = engine.createSession()
+                        if (temporary != null) {
+                            try {
+                                engine.deleteFromHistory(temporary, reading, surface)
+                            } finally {
+                                engine.deleteSession(temporary)
+                            }
+                        }
+                    }
+                }
+            }
+            onRemoved(removed)
         }
     }
 
@@ -288,7 +387,11 @@ class ConversionWorker(
             val sessionId = sessionForCommit(request) ?: return@execute
             val chosen = segments.filter { it.chosen && !it.fromUserDictionary }
             lookupLearningStore()?.let { store ->
-                chosen.forEach { store.record(it.learnedReading ?: it.reading, it.value) }
+                chosen.forEach {
+                    val reading = it.learnedReading ?: it.reading
+                    if (it.englishVariant) store.recordEnglishVariant(reading, it.value)
+                    else store.record(reading, it.value)
+                }
             }
             if (segments.all(ConversionSegment::engineCandidate)) {
                 if (chosen.isEmpty()) {
@@ -390,7 +493,20 @@ class ConversionWorker(
             }.copy(segments = listOf(shown))
             val withUser = UserDictionaryCandidates.mergeExplicit(segment.reading, learned, dictionary)
             val arranged = EmoticonCandidates.arrangeExplicit(withUser, emoticons)
-            arranged.segments.single().copy(candidates = arranged.headCandidates)
+            val english = if (request.incognito || evaluationActive()) emptyList() else {
+                lookupEnglishWords()?.exactMatches(segment.reading).orEmpty()
+            }
+            var nextEnglishId = ENGLISH_CANDIDATE_ID_BASE
+            val englishCandidates = english.map { entry ->
+                ConversionCandidate(
+                    id = nextEnglishId++,
+                    value = entry.surface,
+                    reading = entry.reading,
+                    learnedReading = entry.reading,
+                    englishVariant = true,
+                )
+            }.filterNot { extra -> arranged.headCandidates.any { it.value == extra.value } }
+            arranged.segments.single().copy(candidates = arranged.headCandidates + englishCandidates)
         }
     }
 
@@ -456,25 +572,46 @@ class ConversionWorker(
             engine.convertSegments(sessionId, chunk)?.let { toLiveSegments(chunk, it) }
         }
         // 評価モードの間だけ件数を集める。H3の照合に使うMozcの文節は、変換器を通さずエンジンから直接取り出す。
-        val collector = if (evaluationActive()) {
+        val recordingEvaluation = evaluationActive()
+        val collector = if (recordingEvaluation) {
             LiveEvaluationCollector(mozcDirect = { reading ->
                 runCatching { engine.convertSegments(sessionId, reading) }.getOrNull()?.let { toLiveSegments(reading, it) }
             })
         } else {
             null
         }
+        val emoticons = emoticonJudge(request.learningAllowed)
         val neural = neuralBackend?.let { backend ->
+            val deadlineNanos = pending.requestedAtNanos + NeuralInferenceSettings.TIMEOUT_MILLIS * 1_000_000
             val model = backend.modelFor(
-                deadlineNanos = pending.requestedAtNanos + NeuralInferenceSettings.TIMEOUT_MILLIS * 1_000_000,
+                deadlineNanos = deadlineNanos,
                 owner = pending.sequence,
                 isSuperseded = { latestLiveRequest.get() != null },
                 record = { collector?.onCall(it) },
             )
+            // 評価中は候補補充をせず、通常時も期限内で最新の要求だけに同期照会する。
+            val joinedCandidates: ((String, String) -> List<String>?)? = if (recordingEvaluation) {
+                null
+            } else {
+                { reading, surface ->
+                    if (evaluationActive() || emoticons.isEmoticon(reading, surface) ||
+                        latestLiveRequest.get() != null || nanoTime() >= deadlineNanos
+                    ) {
+                        null
+                    } else {
+                        runCatching { engine.convertSegment(sessionId, "", reading, "") }
+                            .getOrNull()
+                            ?.takeIf { it.reading == reading && it.value.isNotEmpty() }
+                            ?.let { listOf(it.value) + it.candidates }
+                    }
+                }
+            }
             // 学習禁止欄と機密欄では、保護範囲や先に変換した表記を左文脈としてモデルへ渡さない。
             NeuralRangeConverter(
                 model,
                 mozcRange,
                 collector ?: NeuralConversionObserver.NONE,
+                joinedCandidates = joinedCandidates,
                 useLeftContext = request.learningAllowed,
             )
         }
@@ -490,12 +627,14 @@ class ConversionWorker(
                 }
             },
             userDictionary = lookupUserDictionary(),
+            // 評価記録中と学習禁止欄では英語候補を追加せず、既存の比較条件と機密保護を維持する。
+            englishWords = if (request.learningAllowed && !evaluationActive()) lookupEnglishWords() else null,
             // 学習禁止欄では学習語を参照しない。完全一致した学習語のうちscoreが最も高いものを表示する。
             learnedSurfaces = learnedSurfaces(request.learningAllowed),
             // 部分範囲の先頭からの読みに一致する句で区切りを合わせる。学習禁止欄では参照しない。
             learnedPhrases = learnedPhrases(request.learningAllowed),
             // 顔文字・絵文字はニューラル変換やMozcの第一候補、学習語、登録語でも表示値にしない。
-            emoticons = emoticonJudge(request.learningAllowed),
+            emoticons = emoticons,
             // ユーザーが伸縮で区切りを決めた読みは、Mozcの文節の幅を合わせて一文節として変換する。
             convertFixed = { reading ->
                 if (isAsciiOnly(reading)) {
@@ -509,7 +648,18 @@ class ConversionWorker(
         )
         // 新しい入力でニューラルの推論を中断した場合（NeuralRequestCancelled）も、結果を返さない。
         val result = runCatching { converter.convert(request) }.getOrNull()
-        if (result != null) onLiveResult(sessionEpoch, result)
+        if (result != null) {
+            val learnedStore = lookupLearningStore().takeIf { request.learningAllowed && !evaluationActive() }
+            val withLearningSource = result.copy(segments = result.segments.map { segment ->
+                val learned = learnedStore?.let { store ->
+                    (store.exactMatches(segment.reading, Int.MAX_VALUE) + store.exactPhraseMatches(segment.reading, Int.MAX_VALUE))
+                        .map { it.surface }
+                        .toSet()
+                }.orEmpty()
+                segment.copy(learnedCandidates = learned)
+            })
+            onLiveResult(sessionEpoch, withLearningSource)
+        }
         collector?.let { onLiveReport(sessionEpoch, it.report(result, pending.requestedAtNanos)) }
     }
 
@@ -533,14 +683,34 @@ class ConversionWorker(
             learnedSurfaces(request.learningAllowed),
             learnedPhrases(request.learningAllowed),
         )
+        val englishLookup = if (request.learningAllowed && !evaluationActive()) lookupEnglishWords() else null
+        val englishMatches = englishLookup?.exactMatches(request.reading).orEmpty()
+        val currentCandidates = segment.candidates.toHashSet() + segment.value
+        val englishWords = englishLookup?.takeIf { englishMatches.any { entry -> entry.surface !in currentCandidates } }
+        val engineCandidates = if (englishWords != null && segment.value !in segment.candidates) {
+            listOf(segment.value) + segment.candidates
+        } else {
+            segment.candidates
+        }
+        val judge = emoticonJudge(request.learningAllowed)
         val candidates = mergeSegmentCandidates(
             request.reading,
-            segment.candidates,
+            engineCandidates,
             lookupUserDictionary(),
             exactSurfaces,
-            emoticonJudge(request.learningAllowed),
+            judge,
+            englishWords = englishWords,
         )
-        onCandidateResult(sessionEpoch, CandidateResult(request, candidates))
+        val automaticCandidates = candidates.filterNot { judge.isEmoticon(request.reading, it) }
+            .ifEmpty { listOf(request.reading) }
+        val learnedCandidates = if (evaluationActive()) emptySet() else {
+            (lookupLearningStore()?.exactMatches(request.reading, Int.MAX_VALUE).orEmpty() +
+                lookupLearningStore()?.exactPhraseMatches(request.reading, Int.MAX_VALUE).orEmpty())
+                .map { it.surface }
+                .filter { it in candidates }
+                .toSet()
+        }
+        onCandidateResult(sessionEpoch, CandidateResult(request, candidates, automaticCandidates, learnedCandidates))
     }
 
     /**
@@ -579,9 +749,19 @@ class ConversionWorker(
             }
         }.getOrDefault(emptyList())
         val judge = EmoticonJudge(lookupUserDictionary(), lookupLearningStore().takeUnless { request.incognito })
-        val candidates = generated
+        val engineCandidates = generated
             .filterNot { EmoticonText.isEmoticon(it.value) || judge.isEmoticon(it.reading ?: request.reading, it.value) }
-            .take(MAX_VISIBLE_PREDICTIONS)
+            .distinctBy { it.value }
+        val englishCandidates = if (engineCandidates.isEmpty() || request.reading.isEmpty() || request.incognito || evaluationActive()) {
+            emptyList()
+        } else {
+            val existing = engineCandidates.mapTo(HashSet()) { it.value }
+            lookupEnglishWords()?.exactMatches(request.reading).orEmpty()
+                .filterNot { it.surface in existing }
+                .map { PredictionCandidate(id = null, value = it.surface, reading = it.reading, englishVariant = true) }
+                .distinctBy { it.value }
+        }
+        val candidates = engineCandidates + englishCandidates
         lastPredictionRequests[request.sessionEpoch] = request
         lastPredictionCandidates[request.sessionEpoch] = candidates
         onPredictionResult(PredictionResult(request, candidates))
@@ -611,6 +791,10 @@ class ConversionWorker(
 
     /** ユーザー辞書を開いて返す。読めなければ登録語なしで変換を続ける。 */
     private fun lookupUserDictionary(): UserDictionaryLookup? = runCatching { userDictionary() }.getOrNull()
+        ?.let { dictionary -> if (evaluationActive()) dictionary.withoutTemplates() else dictionary }
+
+    /** 同梱の読み→英語表記辞書を開く。失敗時は英語候補を加えず通常の変換を続ける。 */
+    private fun lookupEnglishWords(): EnglishWordLookup? = runCatching { englishWords() }.getOrNull()
 
     /** 学習キャッシュを開いて返す。開けなければ学習なしで変換を続ける。 */
     private fun lookupLearningStore(): LearningStore? = runCatching { learningStore() }.getOrNull()
@@ -673,7 +857,7 @@ class ConversionWorker(
         /** KNOWN_READINGの候補に辞書があれば必ず含まれる表記。 */
         const val KNOWN_CONVERSION = "漢字"
 
-        /** 候補バーの先頭に表示する予測候補の最大件数。 */
-        private const val MAX_VISIBLE_PREDICTIONS = 3
+        /** 英語辞書候補へ、ユーザー辞書・学習語・Mozc IDと重ならないIDを割り当てる。 */
+        private const val ENGLISH_CANDIDATE_ID_BASE = Int.MIN_VALUE + 0x20000
     }
 }

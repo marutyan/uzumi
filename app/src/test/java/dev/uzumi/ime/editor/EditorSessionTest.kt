@@ -1,6 +1,7 @@
 package dev.uzumi.ime.editor
 
 import android.view.inputmethod.EditorInfo
+import android.view.KeyEvent
 import dev.uzumi.ime.conversion.ConversionCandidate
 import dev.uzumi.ime.conversion.ConversionClient
 import dev.uzumi.ime.conversion.ConversionOutcome
@@ -11,6 +12,7 @@ import dev.uzumi.ime.conversion.LearnedSegment
 import dev.uzumi.ime.conversion.LiveConversionClient
 import dev.uzumi.ime.conversion.PredictionCandidate
 import dev.uzumi.ime.conversion.PredictionClient
+import dev.uzumi.ime.conversion.PredictionCommitResult
 import dev.uzumi.ime.conversion.PredictionRequest
 import dev.uzumi.ime.conversion.PredictionResult
 import dev.uzumi.ime.evaluation.EvaluationCounter
@@ -20,6 +22,8 @@ import dev.uzumi.ime.live.DisplaySpan
 import dev.uzumi.ime.live.FakeLiveConverter
 import dev.uzumi.ime.live.FixedRange
 import dev.uzumi.ime.live.LiveConversionCore
+import dev.uzumi.ime.live.ResultSegment
+import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.ConversionRequest as LiveRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -28,7 +32,220 @@ import org.junit.Test
 
 /** InputConnectionの成功・失敗と編集状態の同期境界を検証する。 */
 class EditorSessionTest {
-    /** 予測応答は読みの世代が一致するときだけ表示し、選択すると未確定全体を確定する。 */
+    /** 選択モード中の左右移動は固定端を保ち、反対方向で選択を縮める。 */
+    @Test
+    fun editPanelHorizontalSelectionKeepsAnchorWhileShrinkingAndReversing() {
+        val caret = EditPanelSelection(anchor = 3, focus = 3)
+        val left = EditPanelRules.moveHorizontally(caret, direction = -1, extendSelection = true, adjacentUtf16Length = 1)
+        val collapsed = EditPanelRules.moveHorizontally(left, direction = 1, extendSelection = true, adjacentUtf16Length = 1)
+        val right = EditPanelRules.moveHorizontally(collapsed, direction = 1, extendSelection = true, adjacentUtf16Length = 1)
+
+        assertEquals(EditPanelSelection(anchor = 3, focus = 2), left)
+        assertEquals(EditPanelSelection(anchor = 3, focus = 3), collapsed)
+        assertEquals(EditPanelSelection(anchor = 3, focus = 4), right)
+    }
+
+    /** 選択モードを切ると左右キーは範囲の適切な端へ畳み、コピーと切り取りはパスワードで無効になる。 */
+    @Test
+    fun editPanelRulesCollapseSelectionAndBlockPasswordClipboardActions() {
+        val backwardsSelection = EditPanelSelection(anchor = 5, focus = 2)
+        assertEquals(
+            EditPanelSelection(anchor = 2, focus = 2),
+            EditPanelRules.moveHorizontally(backwardsSelection, -1, extendSelection = false, adjacentUtf16Length = 0),
+        )
+        assertEquals(
+            EditPanelSelection(anchor = 5, focus = 5),
+            EditPanelRules.moveHorizontally(backwardsSelection, 1, extendSelection = false, adjacentUtf16Length = 0),
+        )
+        assertFalse(EditPanelRules.isEnabled(EditPanelAction.COPY, isPassword = true, hasSelection = true, hasClipboardText = true))
+        assertFalse(EditPanelRules.isEnabled(EditPanelAction.CUT, isPassword = true, hasSelection = true, hasClipboardText = true))
+        assertTrue(EditPanelRules.isEnabled(EditPanelAction.COPY, isPassword = false, hasSelection = true, hasClipboardText = false))
+    }
+
+    /** 編集パネルの左右操作もEditorSessionのselection端点を更新する。 */
+    @Test
+    fun editPanelHorizontalMoveUpdatesEditorSelectionAnchorAndFocus() {
+        val connection = ModelEditorConnection(text = "abcdef", selectionStart = 3, selectionEnd = 3)
+        val session = EditorSession(connection, normalPolicy())
+
+        assertTrue(session.moveEditPanelHorizontally(direction = -1, extendSelection = true))
+        assertEquals(3 to 2, connection.currentSelection())
+        assertTrue(session.moveEditPanelHorizontally(direction = 1, extendSelection = true))
+        assertEquals(3 to 3, connection.currentSelection())
+        assertTrue(session.moveEditPanelHorizontally(direction = 1, extendSelection = true))
+        assertEquals(3 to 4, connection.currentSelection())
+    }
+
+    /** 選択範囲を縮めるときは選択中の端から書記素を数え、絵文字のUTF-16途中へ移動しない。 */
+    @Test
+    fun editPanelSelectionShrinksBySelectedGraphemeWidth() {
+        val backward = ModelEditorConnection(text = "あ😀い", selectionStart = 4, selectionEnd = 1)
+        val backwardSession = EditorSession(
+            backward,
+            normalPolicy(),
+            initialSelectionStart = 4,
+            initialSelectionEnd = 1,
+        )
+        val forward = ModelEditorConnection(text = "あ😀い", selectionStart = 1, selectionEnd = 4)
+        val forwardSession = EditorSession(
+            forward,
+            normalPolicy(),
+            initialSelectionStart = 1,
+            initialSelectionEnd = 4,
+        )
+
+        assertTrue(backwardSession.moveEditPanelHorizontally(direction = 1, extendSelection = true))
+        assertEquals(4 to 3, backward.currentSelection())
+        assertTrue(forwardSession.moveEditPanelHorizontally(direction = -1, extendSelection = true))
+        assertEquals(1 to 3, forward.currentSelection())
+    }
+
+    /** 編集パネルの削除は選択範囲を既存の削除Undoへ渡す。 */
+    @Test
+    fun editPanelRangeDeleteKeepsDeletionUndo() {
+        val connection = ModelEditorConnection(text = "abcdef", selectionStart = 1, selectionEnd = 4)
+        val session = EditorSession(connection, normalPolicy(), initialSelectionStart = 1, initialSelectionEnd = 4)
+
+        assertTrue(session.deleteFromEditPanel())
+        assertEquals("aef", connection.text)
+        assertTrue(session.canUndoDeletion)
+        assertTrue(session.undoDeletion())
+        assertEquals("abcdef", connection.text)
+    }
+
+    /** 未確定compositionを編集パネルのHome操作前に既存の確定経路で一度だけ確定する。 */
+    @Test
+    fun editPanelOperationCommitsCompositionOnceBeforeKeyStroke() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy())
+        assertTrue(session.inputText("かな"))
+
+        assertTrue(session.sendEditPanelKeyStroke(KeyEvent.KEYCODE_MOVE_HOME))
+
+        assertEquals(1, connection.commitTextCalls)
+        assertEquals("かな", connection.text)
+        assertFalse(session.hasComposition)
+    }
+
+    /** 評価の記録中は記録条件を変えないよう編集パネルを開かず、表示中の欄でだけ開ける。 */
+    @Test
+    fun editPanelCannotOpenWhileEvaluationIsRecording() {
+        assertTrue(EditPanelRules.canOpen(sessionActive = true, inputViewVisible = true, evaluationRecording = false))
+        assertFalse(EditPanelRules.canOpen(sessionActive = true, inputViewVisible = true, evaluationRecording = true))
+        assertFalse(EditPanelRules.canOpen(sessionActive = false, inputViewVisible = true, evaluationRecording = false))
+        assertFalse(EditPanelRules.canOpen(sessionActive = true, inputViewVisible = false, evaluationRecording = false))
+    }
+
+    /** 選択モードの矢印キーはShiftキーの押下と解放で挟み、入力欄に記録されるShift状態で選択を伸ばさせる。 */
+    @Test
+    fun shiftedEditKeyStrokeWrapsArrowWithShiftKeyPressAndRelease() {
+        val shifted = EditorKeyStrokes.sequence(KeyEvent.KEYCODE_DPAD_UP, KeyEvent.META_SHIFT_ON)
+        val shiftMeta = KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
+
+        assertEquals(
+            listOf(
+                EditorKeyStrokeStep(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT, shiftMeta),
+                EditorKeyStrokeStep(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_UP, shiftMeta),
+                EditorKeyStrokeStep(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_UP, shiftMeta),
+                EditorKeyStrokeStep(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT, 0, releasesShift = true),
+            ),
+            shifted,
+        )
+        assertEquals(
+            listOf(
+                EditorKeyStrokeStep(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT, 0),
+                EditorKeyStrokeStep(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_LEFT, 0),
+            ),
+            EditorKeyStrokes.sequence(KeyEvent.KEYCODE_DPAD_LEFT, 0),
+        )
+    }
+
+    /** 機密欄の選択モードの←→は本文を読まず、Shift付きのキー操作として入力欄へ送る。 */
+    @Test
+    fun sensitiveEditPanelSelectionSendsShiftedArrowKey() {
+        val connection = ModelEditorConnection(text = "secret", selectionStart = 2, selectionEnd = 2)
+        val session = EditorSession(
+            connection,
+            normalPolicy().copy(isPassword = true),
+            initialSelectionStart = 2,
+            initialSelectionEnd = 2,
+        )
+
+        assertTrue(session.moveEditPanelHorizontally(direction = 1, extendSelection = true))
+
+        assertEquals(listOf(KeyEvent.KEYCODE_DPAD_RIGHT to KeyEvent.META_SHIFT_ON), connection.keyStrokes)
+        assertEquals(0, connection.textBeforeCursorCalls)
+    }
+
+    /** 編集パネルの全選択と貼り付けはAndroid標準メニューへ渡し、貼り付け前のcompositionを確定する。 */
+    @Test
+    fun editPanelContextActionsUseStandardEditorCommands() {
+        val connection = ModelEditorConnection(text = "abc", selectionStart = 1, selectionEnd = 1)
+        val session = EditorSession(connection, normalPolicy(), initialSelectionStart = 1, initialSelectionEnd = 1)
+
+        assertTrue(session.performEditPanelContextAction(EditPanelContextAction.SELECT_ALL))
+        assertEquals(0 to 3, connection.currentSelection())
+        assertTrue(session.hasEditPanelSelection)
+        assertTrue(session.performEditPanelContextAction(EditPanelContextAction.COPY))
+        assertTrue(session.inputText("かな"))
+        assertTrue(session.performEditPanelContextAction(EditPanelContextAction.PASTE))
+
+        assertEquals(listOf(android.R.id.selectAll, android.R.id.copy, android.R.id.paste), connection.contextMenuActions)
+        assertEquals(1, connection.commitTextCalls)
+        assertFalse(session.hasComposition)
+    }
+
+    /**
+     * ライブ変換の読みを削除で空にした後、編集パネルで切り取りと貼り付けをすると、削除の記録は無効になる。
+     * 空のcompositionに残ったライブ変換の取り消し履歴でも「元に戻す」を出さず、戻しても消した読みを
+     * 貼り付けの後ろへ入れない。読みを空にした直後の削除の取り消しは従来どおり使える。
+     */
+    @Test
+    fun editPanelCutAndPasteAfterEmptyingLiveCompositionHidesStaleUndo() {
+        val connection = ModelEditorConnection(text = "abc", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val session = EditorSession(
+            connection = connection,
+            policy = normalPolicy(),
+            initialSelectionStart = 0,
+            initialSelectionEnd = 0,
+            sessionEpoch = 5,
+            liveCore = LiveConversionCore(),
+            liveClient = client,
+        )
+        typeLive(session, client, "かき")
+        assertTrue(session.deleteBackward())
+        assertTrue(session.deleteBackward())
+        assertEquals("abc", connection.text)
+        assertTrue(session.canUndoDeletion)
+
+        assertTrue(session.performEditPanelContextAction(EditPanelContextAction.SELECT_ALL))
+        assertTrue(session.performEditPanelContextAction(EditPanelContextAction.CUT))
+        assertTrue(session.performEditPanelContextAction(EditPanelContextAction.PASTE))
+
+        assertFalse(session.canUndoDeletion)
+        assertFalse(session.liveCandidateState()!!.canUndo)
+        assertFalse(session.undoLive())
+        assertEquals("", connection.text)
+        assertFalse(session.hasComposition)
+
+        // 次の入力からは、ライブ変換の取り消しを通常どおり使える。
+        typeLive(session, client, "さ")
+        assertTrue(session.liveCandidateState()!!.canUndo)
+    }
+
+    /** パスワード欄では編集パネルから標準コピーと切り取りを実行しない。 */
+    @Test
+    fun editPanelBlocksCopyAndCutInPasswordField() {
+        val connection = ModelEditorConnection(text = "secret", selectionStart = 0, selectionEnd = 6)
+        val session = EditorSession(connection, normalPolicy().copy(isPassword = true), 0, 6)
+
+        assertFalse(session.performEditPanelContextAction(EditPanelContextAction.COPY))
+        assertFalse(session.performEditPanelContextAction(EditPanelContextAction.CUT))
+        assertTrue(connection.contextMenuActions.isEmpty())
+    }
+
+    /** 予測応答は読みの世代が一致するときだけ表示し、全体候補は未確定全体を確定する。 */
     @Test
     fun typedPredictionReplacesWholeCompositionAndRejectsStaleResponse() {
         val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
@@ -50,7 +267,188 @@ class EditorSessionTest {
 
         assertEquals("ありがとうございます", connection.text)
         assertFalse(session.hasComposition)
-        assertEquals(listOf(request to 2), client.committed)
+        assertEquals(listOf(request to PredictionCandidate(2, "ありがとうございます")), client.committed)
+    }
+
+    /** Mozc応答が部分確定を示したときだけ先頭を確定し、残りと保留中のローマ字をcompositionへ残す。 */
+    @Test
+    fun partialPredictionCommitsPrefixAndKeepsRemainingReadingAndPendingRomaji() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client, romajiInputEnabled = true)
+        typeRomaji(session, "kyouhak")
+        assertEquals("きょうはk", connection.text)
+
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        assertEquals("きょうは", request.reading)
+        val candidate = PredictionCandidate(21, "今日", partialKey = "きょう")
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(candidate))))
+
+        assertTrue(session.selectPrediction(request, candidate))
+        assertEquals("きょうはk", connection.text)
+        assertTrue(session.applyPredictionCommitResult(PredictionCommitResult(
+            request = request,
+            candidate = candidate,
+            succeeded = true,
+            remainingReading = "は",
+            learningReading = "きょう",
+        )))
+
+        assertEquals("今日はk", connection.text)
+        assertTrue(session.hasComposition)
+        assertEquals("はk", session.compositionSnapshot().reading)
+        assertEquals(listOf(request to candidate), client.committed)
+        assertTrue(session.refreshPredictions())
+        assertEquals("は", client.requests.last().reading)
+    }
+
+    /** Mozcの確定失敗や不整合な残り読みでは、元のcompositionを保つ。 */
+    @Test
+    fun unusablePredictionCommitResultKeepsOriginalComposition() {
+        val invalidResults: List<Pair<Boolean, String?>> = listOf(
+            false to "は",
+            true to null,
+            true to "ふ",
+        )
+        for ((succeeded, remainingReading) in invalidResults) {
+            val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+            val client = FakePredictionClient()
+            val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+            assertTrue(session.inputText("きょうは"))
+            assertTrue(session.refreshPredictions())
+            val request = client.requests.single()
+            val candidate = PredictionCandidate(24, "今日", partialKey = "きょう")
+            assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(candidate))))
+            assertTrue(session.selectPrediction(request, candidate))
+
+            assertFalse(session.applyPredictionCommitResult(PredictionCommitResult(
+                request = request,
+                candidate = candidate,
+                succeeded = succeeded,
+                remainingReading = remainingReading,
+                learningReading = "きょう",
+            )))
+            assertEquals("きょうは", connection.text)
+            assertEquals("きょうは", session.compositionSnapshot().reading)
+            assertTrue(session.hasComposition)
+        }
+    }
+
+    /** keyのprefixが候補でも、Mozcが全読みを消費した応答なら入力の残りを重ねず全体候補だけ確定する。 */
+    @Test
+    fun prefixKeyCandidateUsesMozcRemainingReadingInsteadOfKeyLength() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+        assertTrue(session.inputText("りようかいしました", fromTwelveKey = true))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        assertTrue(request.kanaModifierInsensitive)
+        val candidate = PredictionCandidate(22, "了解しました", partialKey = "りょうかいし")
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(candidate))))
+
+        assertTrue(session.selectPrediction(request, candidate))
+        assertTrue(session.applyPredictionCommitResult(PredictionCommitResult(
+            request = request,
+            candidate = candidate,
+            succeeded = true,
+            remainingReading = "",
+            learningReading = "りようかいしました",
+        )))
+
+        assertEquals("了解しました", connection.text)
+        assertFalse(session.hasComposition)
+    }
+
+    /** prefix keyでもMozcが全読みを確定したら、入力途中の子音を次の語へ残さない。 */
+    @Test
+    fun fullPredictionCommitDiscardsPendingRomajiAfterPrefixKey() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client, romajiInputEnabled = true)
+        typeRomaji(session, "ryoukaishimashitak")
+
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        assertEquals("りょうかいしました", request.reading)
+        val candidate = PredictionCandidate(25, "了解しました", partialKey = "りょうかいし")
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(candidate))))
+        assertTrue(session.selectPrediction(request, candidate))
+        assertTrue(session.applyPredictionCommitResult(PredictionCommitResult(
+            request = request,
+            candidate = candidate,
+            succeeded = true,
+            remainingReading = "",
+            learningReading = "りょうかいしました",
+        )))
+
+        assertEquals("了解しました", connection.text)
+        assertFalse(session.hasComposition)
+        assertTrue(session.inputRomajiText("a"))
+        assertEquals("了解しましたあ", connection.text)
+    }
+
+    /** ライブ変換中も実際の部分確定後に残り読みを戻し、次の入力を続ける。 */
+    @Test
+    fun livePartialPredictionRestoresRemainingReadingAndContinuesInput() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val liveClient = FakeLiveClient()
+        val predictionClient = FakePredictionClient()
+        val core = LiveConversionCore()
+        val session = EditorSession(
+            connection = connection,
+            policy = normalPolicy(),
+            liveCore = core,
+            liveClient = liveClient,
+            predictionClient = predictionClient,
+        )
+        typeLive(session, liveClient, "きょうは")
+        assertEquals("きょうは", core.reading)
+
+        assertTrue(session.refreshPredictions())
+        val request = predictionClient.requests.single()
+        val candidate = PredictionCandidate(26, "今日", partialKey = "きょう")
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(candidate))))
+        assertTrue(session.selectPrediction(request, candidate))
+        assertTrue(session.applyPredictionCommitResult(PredictionCommitResult(
+            request = request,
+            candidate = candidate,
+            succeeded = true,
+            remainingReading = "は",
+            learningReading = "きょう",
+        )))
+
+        assertEquals("は", core.reading)
+        assertTrue(session.inputText("て"))
+        assertEquals("はて", core.reading)
+        assertEquals("はて", liveClient.requests.last().second.targetReading)
+    }
+
+    /** 選択応答より先に入力が進んだとき、古いMozc応答で新しいcompositionを上書きしない。 */
+    @Test
+    fun stalePredictionCommitResultDoesNotReplaceNewerInput() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+        assertTrue(session.inputText("きょうは"))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        val candidate = PredictionCandidate(23, "今日", partialKey = "きょう")
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(candidate))))
+        assertTrue(session.selectPrediction(request, candidate))
+        assertTrue(session.inputText("て"))
+
+        assertFalse(session.applyPredictionCommitResult(PredictionCommitResult(
+            request = request,
+            candidate = candidate,
+            succeeded = true,
+            remainingReading = "は",
+            learningReading = "きょう",
+        )))
+
+        assertEquals("きょうはて", connection.text)
+        assertEquals("きょうはて", session.compositionSnapshot().reading)
     }
 
     /** 入力途中のローマ字は予測の読みへ含めず、予測を選ぶと保留ごと未確定全体を置き換える。 */
@@ -75,7 +473,94 @@ class EditorSessionTest {
         assertEquals("ありがとうあ", connection.text)
     }
 
-    /** 入力全体の候補から、本文に表示中のライブ変換の表記と注目segmentの候補と同じ表記を除く。全部重なれば0件にする。 */
+    /** IDを持たない複数の英語候補を表記で区別し、選んだ表記をそのまま確定する。 */
+    @Test
+    fun selectsExactIdlessEnglishPredictionAmongSameNullIds() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+        assertTrue(session.inputText("いーめーる"))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        val candidates = listOf(
+            PredictionCandidate(4, "メール", "いーめーる"),
+            PredictionCandidate(null, "email", "いーめーる", englishVariant = true),
+            PredictionCandidate(null, "Email", "いーめーる", englishVariant = true),
+            PredictionCandidate(null, "E-mail", "いーめーる", englishVariant = true),
+        )
+        assertTrue(session.applyPredictionResult(PredictionResult(request, candidates)))
+
+        assertTrue(session.selectPrediction(request, candidates[2]))
+
+        assertEquals("Email", connection.text)
+        assertEquals(listOf(request to candidates[2]), client.committed)
+    }
+
+    /** 上位に混ぜる予測は打った読みで始まる最大2件にし、先頭だけの変換と表記ゆれの一致は後ろへ回す。 */
+    @Test
+    fun predictionLayoutKeepsPartialCandidatesAfterRegularOnes() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+        assertTrue(session.inputText("きしゃ"))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        val candidates = listOf(
+            PredictionCandidate(1, "騎士", partialKey = "きし"),
+            PredictionCandidate(6, "義者", "ぎしゃ"),
+            PredictionCandidate(2, "記者会見", "きしゃかいけん"),
+            PredictionCandidate(3, "器", partialKey = "き"),
+            PredictionCandidate(4, "記者団", "きしゃだん"),
+            PredictionCandidate(5, "汽車ぽっぽ", "きしゃぽっぽ"),
+        )
+        assertTrue(session.applyPredictionResult(PredictionResult(request, candidates)))
+
+        val layout = session.predictionLayout()!!
+        assertEquals(listOf("記者会見", "記者団"), layout.early.map { it.value })
+        assertEquals(listOf("騎士", "義者", "器", "汽車ぽっぽ"), layout.late.map { it.value })
+    }
+
+    /** Mozc予測が5件以上あっても、最初の英語候補を候補バーの5件目に残す。 */
+    @Test
+    fun keepsFirstEnglishPredictionInBarBehindManyMozcPredictions() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+        assertTrue(session.inputText("あっぷる"))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        val mozc = List(6) { PredictionCandidate(it + 1, "予測${it + 1}", "あっぷる") }
+        val english = listOf(
+            PredictionCandidate(null, "apple", "あっぷる", englishVariant = true),
+            PredictionCandidate(null, "Apple", "あっぷる", englishVariant = true),
+        )
+        assertTrue(session.applyPredictionResult(PredictionResult(request, mozc + english)))
+
+        assertEquals(
+            listOf("予測1", "予測2", "予測3", "予測4", "apple"),
+            session.predictionBarResult()!!.candidates.map { it.value },
+        )
+        assertEquals(8, session.predictionResult()!!.candidates.size)
+    }
+
+    /** Mozc候補が無い、または表示中の値と重なって除外されたとき、英語候補だけを先頭へ出さない。 */
+    @Test
+    fun hidesEnglishPredictionsWithoutVisibleMozcCandidateBeforeThem() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakePredictionClient()
+        val session = EditorSession(connection, normalPolicy(), predictionClient = client)
+        assertTrue(session.inputText("いーめーる"))
+        assertTrue(session.refreshPredictions())
+        val request = client.requests.single()
+        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(
+            PredictionCandidate(1, "いーめーる", "いーめーる"),
+            PredictionCandidate(null, "Email", "いーめーる", englishVariant = true),
+        ))))
+
+        assertTrue(session.predictionResult()!!.candidates.isEmpty())
+    }
+
+    /** 先頭3候補が表示中の表記と通常候補に重なっても後続予測を残し、バー5件・一覧全件を分ける。 */
     @Test
     fun livePredictionsExcludeDisplayedValueAndRegularCandidates() {
         val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
@@ -94,17 +579,19 @@ class EditorSessionTest {
         assertEquals("今日は", connection.text)
         assertTrue(session.refreshPredictions())
         val request = predictionClient.requests.single()
-        assertTrue(session.applyPredictionResult(PredictionResult(request, listOf(
-            PredictionCandidate(1, "今日は"),
-            PredictionCandidate(2, "京は"),
-            PredictionCandidate(3, "今日はいい天気"),
-            PredictionCandidate(4, "キョウハ"),
-        ))))
+        val overlapping = (listOf(connection.text) + session.liveCandidateState()!!.choices.map { it.value })
+            .distinct()
+            .take(3)
+        assertEquals(3, overlapping.size)
+        val remaining = List(6) { "予測${it + 1}" }
+        val candidates = (overlapping + remaining).mapIndexed { index, value -> PredictionCandidate(index + 1, value) }
+        assertTrue(session.applyPredictionResult(PredictionResult(request, candidates)))
 
-        assertEquals(listOf("今日はいい天気", "キョウハ"), session.predictionResult()!!.candidates.map { it.value })
-        // 除いた候補が無くても、残った候補は元の候補IDで選べる。
-        assertTrue(session.selectPrediction(request, candidateId = 3))
-        assertEquals("今日はいい天気", connection.text)
+        assertEquals(remaining, session.predictionResult()!!.candidates.map { it.value })
+        assertEquals(remaining.take(5), session.predictionBarResult()!!.candidates.map { it.value })
+        // 重複を除いても、残った候補は元の候補IDで選べる。
+        assertTrue(session.selectPrediction(request, candidateId = 4))
+        assertEquals("予測1", connection.text)
     }
 
     /** 変換前の入力では、表示中の読みと基本候補（カタカナ）と同じ表記を除き、重複だけなら予測を0件にする。 */
@@ -151,7 +638,7 @@ class EditorSessionTest {
         assertEquals("", core.display)
         assertFalse(session.hasComposition)
         assertTrue(liveClient.learned.isEmpty())
-        assertEquals(listOf(request to 4), predictionClient.committed)
+        assertEquals(listOf(request to PredictionCandidate(4, "ありがとう")), predictionClient.committed)
     }
 
     /** ゼロクエリは直前の確定文脈だけを使い、選択語をカーソル位置へ直接確定する。 */
@@ -169,7 +656,7 @@ class EditorSessionTest {
         assertTrue(session.selectPrediction(request, candidateId = 3))
 
         assertEquals("きょうは天気晴れ", connection.text)
-        assertEquals(listOf(request to 3), client.committed)
+        assertEquals(listOf(request to PredictionCandidate(3, "天気")), client.committed)
     }
 
     /** ゼロクエリは機密・学習禁止・数値・URLやメールの欄、または選択範囲がある状態から本文を読まずに抑止する。 */
@@ -241,6 +728,23 @@ class EditorSessionTest {
         assertTrue(session.pasteText(pasted))
 
         assertEquals(listOf("かな", pasted), connection.committedTexts)
+        assertTrue(session.compositionSnapshot().reading.isEmpty())
+        assertTrue(client.requests.isEmpty())
+        assertTrue(client.committedAll.isEmpty())
+    }
+
+    /** 定型文の本文は未確定入力の後ろへ改行を保って確定し、変換や学習へ送らない。 */
+    @Test
+    fun templateSelectionPastesMultilineBodyWithoutLearning() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        val template = "署名\n\n か\u3099っこう\\n"
+
+        assertTrue(session.inputText("かな"))
+        assertTrue(session.pasteText(template))
+
+        assertEquals("かな署名\n\n か\u3099っこう\\n", connection.text)
         assertTrue(session.compositionSnapshot().reading.isEmpty())
         assertTrue(client.requests.isEmpty())
         assertTrue(client.committedAll.isEmpty())
@@ -820,6 +1324,160 @@ class EditorSessionTest {
         assertEquals(listOf("感じ"), client.committedAllSegments.single().second.map(ConversionSegment::value))
     }
 
+    /** 明示変換で選んだ英語候補の読みと種別を保ち、Mozcへ候補を再学習させない。 */
+    @Test
+    fun chosenEnglishConversionCandidateKeepsLearningMetadata() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        assertTrue(session.inputText("ぐーぐる"))
+        assertTrue(session.convert())
+        val request = client.requests.single()
+        val engine = ConversionCandidate(0, "ぐーぐる", "ぐーぐる")
+        val english = ConversionCandidate(
+            id = Int.MIN_VALUE + 0x20000,
+            value = "Google",
+            reading = "ぐーぐる",
+            learnedReading = "ぐーぐる",
+            englishVariant = true,
+        )
+        val segment = ConversionSegment("ぐーぐる", "ぐーぐる", candidates = listOf(engine, english))
+        assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(ConversionResult(request, listOf(segment), listOf(engine, english)))))
+        assertTrue(session.selectConversionCandidate(session.candidateOptions().last().conversionChoice!!))
+        assertTrue(session.commitComposition())
+
+        val committed = client.committedAllSegments.single().second.single()
+        assertEquals("Google", committed.value)
+        assertEquals("ぐーぐる", committed.learnedReading)
+        assertTrue(committed.englishVariant)
+        assertFalse(committed.engineCandidate)
+    }
+
+    /** 非表示表記は明示変換と予測から除き、表示値は顔文字を飛ばして次候補へ移す。 */
+    @Test
+    fun hiddenCandidatesAreRemovedFromExplicitCandidatesAndPredictions() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val conversionClient = FakeConversionClient()
+        val predictionClient = FakePredictionClient()
+        val session = EditorSession(
+            connection,
+            normalPolicy(),
+            conversionClient = conversionClient,
+            predictionClient = predictionClient,
+        )
+        assertTrue(session.inputText("かんじ"))
+        session.setHiddenCandidateSurfaces(setOf("NG", "予測NG"))
+        assertTrue(session.convert())
+        val request = conversionClient.requests.single()
+        val candidates = listOf(
+            ConversionCandidate(0, "NG", "かんじ"),
+            ConversionCandidate(1, "😂", "かんじ", isEmoticon = true),
+            ConversionCandidate(2, "安全", "かんじ"),
+            ConversionCandidate(3, "学習語", "かんじ", learnedReading = "かんじ"),
+        )
+        val result = ConversionResult(
+            request,
+            listOf(ConversionSegment("かんじ", "NG", candidates = candidates)),
+            candidates,
+        )
+
+        assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(result)))
+        assertEquals("安全", connection.text)
+        assertEquals(listOf("😂", "安全", "学習語"), session.candidateOptions().map { it.value })
+        assertTrue(session.removeLearnedCandidate("かんじ", "学習語"))
+        assertEquals(listOf("😂", "安全"), session.candidateOptions().map { it.value })
+
+        assertTrue(session.refreshPredictions())
+        val predictionRequest = predictionClient.requests.single()
+        assertTrue(session.applyPredictionResult(PredictionResult(predictionRequest, listOf(
+            PredictionCandidate(4, "予測NG"),
+            PredictionCandidate(5, "別候補"),
+        ))))
+        assertFalse(session.selectPrediction(predictionRequest, candidateId = 4))
+        assertEquals(listOf("別候補"), session.predictionCandidates().map { it.value })
+    }
+
+    /** 安全候補が尽きたら読みを保ち、表示差し替え後も変換workerへ送る元要求を維持する。 */
+    @Test
+    fun hiddenExplicitFallbackKeepsReadingAndOriginalCommitRequest() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        assertTrue(session.inputText("かんじ"))
+        assertTrue(session.convert())
+        val request = client.requests.single()
+        val candidates = listOf(
+            ConversionCandidate(0, "NG", "かんじ"),
+            ConversionCandidate(1, "😂", "かんじ", isEmoticon = true),
+        )
+        assertTrue(session.applyConversionOutcome(ConversionOutcome.Converted(
+            ConversionResult(request, listOf(ConversionSegment("かんじ", "NG", candidates = candidates)), candidates),
+        )))
+
+        assertTrue(session.setHiddenCandidateSurfaces(setOf("NG")))
+        assertEquals("かんじ", connection.text)
+        assertTrue(session.commitComposition())
+        assertEquals(listOf(request), client.committedAll)
+        assertEquals(false, client.committedAllSegments.single().second.single().engineCandidate)
+    }
+
+    /** 評価記録中はNG候補を除外せず、記録を止めるとライブ表示と候補へ反映する。 */
+    @Test
+    fun hiddenCandidatesDoNotChangeEvaluationConditions() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val predictionClient = FakePredictionClient()
+        val counter = EvaluationCounter()
+        val session = liveSession(connection, client, evaluation = counter, predictionClient = predictionClient)
+        assertTrue(counter.start("N01"))
+        session.setHiddenCandidateSurfaces(setOf("良い", "評価中の予測"))
+
+        typeLive(session, client, "よい")
+        assertEquals("良い", connection.text)
+        assertTrue(session.liveCandidateState()!!.choices.any { it.value == "良い" })
+        assertFalse(session.refreshPredictions())
+        assertTrue(predictionClient.requests.isEmpty())
+        assertTrue(session.predictionCandidates().isEmpty())
+
+        counter.finish()
+        assertTrue(session.setHiddenCandidateSurfaces(setOf("良い", "評価中の予測")))
+        assertEquals("酔い", connection.text)
+        assertTrue(session.liveCandidateState()!!.choices.none { it.value == "良い" })
+    }
+
+    /** 取り直し候補でNGの次候補が見つかったら、CoreとEditorの表示を同じ値へ更新する。 */
+    @Test
+    fun hiddenLiveCandidateRefreshUpdatesEditorComposition() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeLiveClient()
+        val core = LiveConversionCore()
+        val session = EditorSession(
+            connection = connection,
+            policy = normalPolicy(),
+            sessionEpoch = 19,
+            liveCore = core,
+            liveClient = client,
+        )
+        session.setHiddenCandidateSurfaces(setOf("NG"))
+        assertTrue(session.inputText("かんじ"))
+        val liveRequest = client.requests.single().second
+        assertTrue(session.applyLiveResult(LiveResult(
+            liveRequest.identity,
+            listOf(ResultSegment("かんじ", "NG", listOf("NG"), automaticCandidates = listOf("NG"))),
+        )))
+        assertEquals("かんじ", connection.text)
+        assertTrue(session.requestLiveCandidates())
+        val candidateRequest = client.candidateRequests.single()
+
+        assertTrue(session.applyLiveCandidates(CandidateResult(
+            candidateRequest,
+            listOf("NG", "次"),
+            automaticCandidates = listOf("NG", "次"),
+        )))
+        assertEquals("次", core.display)
+        assertEquals("次", connection.text)
+    }
+
     /** 変換キーを押すたび注目文節の候補を循環し、候補バーの選択表示も追従する。 */
     @Test
     fun explicitConvertCyclesCandidatesAndWrapsWithoutCommitting() {
@@ -840,6 +1498,40 @@ class EditorSessionTest {
         assertTrue(session.candidateOptions().first().selected)
         assertEquals("かんじ", session.compositionSnapshot().reading)
         assertTrue(client.committedAll.isEmpty())
+    }
+
+    /** 明示変換の候補は、Mozcの候補と同じ表記の学習語も長押しメニューで照合できるよう文節の読みを持つ。 */
+    @Test
+    fun explicitCandidateOptionsCarryReadingForLearningLookup() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("かんじ")
+        session.convert()
+        val request = client.requests.single()
+        assertTrue(session.applyConversionOutcome(converted(request, "漢字", "感じ")))
+
+        val options = session.candidateOptions()
+        assertEquals(listOf(null, null), options.map { it.learnedReading })
+        assertEquals(listOf("かんじ", "かんじ"), options.map { it.learningLookupReading })
+    }
+
+    /** 変換キーの候補巡回は非表示の候補を飛ばし、次が非表示でも先へ進める。 */
+    @Test
+    fun explicitConvertCycleSkipsHiddenCandidates() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val client = FakeConversionClient()
+        val session = EditorSession(connection, normalPolicy(), conversionClient = client)
+        session.inputText("かんじ")
+        session.setHiddenCandidateSurfaces(setOf("感じ"))
+        session.convert()
+        val request = client.requests.single()
+        assertTrue(session.applyConversionOutcome(converted(request, "漢字", "感じ", "幹事")))
+
+        assertTrue(session.convert())
+        assertEquals("幹事", session.compositionSnapshot().display)
+        assertTrue(session.convert())
+        assertEquals("漢字", session.compositionSnapshot().display)
     }
 
     /** 候補選択で表示幅が変わった後に旧compositionの遅延通知が届いても、現在の変換を保つ。 */
@@ -2028,6 +2720,20 @@ class EditorSessionTest {
         assertEquals("ああかあ", connection.text)
     }
 
+    /** 設定の「トグルの区切り」を渡すと、その時間までの連続タップだけを同じ文字の切り替えとして扱う。 */
+    @Test
+    fun kanaToggleUsesConfiguredWindow() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy(), kanaToggleWindowMillis = 400)
+
+        session.inputKanaTap(A_ROW, 0)
+        session.inputKanaTap(A_ROW, 400)
+        assertEquals("い", connection.text)
+        // 既定の1秒以内でも、設定の400msを過ぎたタップは新しい文字になる
+        session.inputKanaTap(A_ROW, 900)
+        assertEquals("いあ", connection.text)
+    }
+
     /** →は連続タップの途中だけ区切りとして使われ、フリック・小゛゜・削除の後のタップも新しい文字になる。 */
     @Test
     fun kanaToggleEndsAtArrowFlickTransformAndDelete() {
@@ -2334,6 +3040,7 @@ class EditorSessionTest {
         policy: InputFieldPolicy = normalPolicy(),
         styler: (String, DisplaySpan?) -> CharSequence = { text, _ -> text },
         evaluation: EvaluationCounter? = null,
+        predictionClient: PredictionClient? = null,
     ): EditorSession {
         return EditorSession(
             connection = connection,
@@ -2345,6 +3052,7 @@ class EditorSessionTest {
             liveClient = client,
             compositionStyler = styler,
             evaluation = evaluation,
+            predictionClient = predictionClient,
         )
     }
 
@@ -2409,7 +3117,7 @@ private class FakeConversionClient : ConversionClient {
 /** 予測要求と、選んだ候補の確定を記録する偽の窓口。 */
 private class FakePredictionClient : PredictionClient {
     val requests = mutableListOf<PredictionRequest>()
-    val committed = mutableListOf<Pair<PredictionRequest, Int>>()
+    val committed = mutableListOf<Pair<PredictionRequest, PredictionCandidate>>()
 
     override val isPredictionAvailable: Boolean = true
 
@@ -2419,8 +3127,8 @@ private class FakePredictionClient : PredictionClient {
     }
 
     /** 選択候補の確定通知を記録する。 */
-    override fun commitPrediction(request: PredictionRequest, candidateId: Int) {
-        committed += request to candidateId
+    override fun commitPrediction(request: PredictionRequest, candidate: PredictionCandidate) {
+        committed += request to candidate
     }
 }
 
@@ -2476,9 +3184,12 @@ private class FakeEditorConnection : EditorConnectionPort {
     val deleteCalls = mutableListOf<Pair<Int, Int>>()
     val selectionCalls = mutableListOf<Pair<Int, Int>>()
     val editorActions = mutableListOf<Int>()
+    val keyStrokes = mutableListOf<Pair<Int, Int>>()
+    val contextMenuActions = mutableListOf<Int>()
     var enterKeys = 0
     var deleteKeys = 0
     var selectedTextValue: CharSequence? = null
+    var currentSelectionValue: Pair<Int, Int>? = null
 
     override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
         composingTexts += text.toString()
@@ -2526,11 +3237,28 @@ private class FakeEditorConnection : EditorConnectionPort {
         return true
     }
 
+    /** 修飾状態を含むキー操作を記録する。 */
+    override fun sendKeyStroke(keyCode: Int, metaState: Int): Boolean {
+        if (invalidated) return false
+        keyStrokes += keyCode to metaState
+        return true
+    }
+
     override fun textBeforeCursor(maxChars: Int): CharSequence? = if (invalidated) null else beforeCursor
 
     override fun textAfterCursor(maxChars: Int): CharSequence? = if (invalidated) null else afterCursor
 
     override fun selectedText(): CharSequence? = if (invalidated) null else selectedTextValue
+
+    /** Android標準メニューの操作IDを記録する。 */
+    override fun performContextMenuAction(actionId: Int): Boolean {
+        if (invalidated) return false
+        contextMenuActions += actionId
+        return true
+    }
+
+    /** テストで設定したselection端点を返す。 */
+    override fun currentSelection(): Pair<Int, Int>? = if (invalidated) null else currentSelectionValue
 
     override fun invalidate() {
         invalidated = true
@@ -2547,6 +3275,8 @@ private class ModelEditorConnection(
         private set
     var finishComposingCalls = 0
         private set
+    var commitTextCalls = 0
+        private set
     var textBeforeCursorCalls = 0
         private set
     private var selectionStart = selectionStart
@@ -2558,6 +3288,8 @@ private class ModelEditorConnection(
     var composingAccepted = true
     var commitAccepted = true
     var finishAccepted = true
+    val keyStrokes = mutableListOf<Pair<Int, Int>>()
+    val contextMenuActions = mutableListOf<Int>()
 
     /** host側だけでcomposing spanを終了する。 */
     fun hostFinishComposition() {
@@ -2591,6 +3323,7 @@ private class ModelEditorConnection(
 
     override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
         if (!active || !commitAccepted) return false
+        commitTextCalls += 1
         val start = composingStart ?: minOf(selectionStart, selectionEnd)
         val end = composingEnd ?: maxOf(selectionStart, selectionEnd)
         replace(start, end, text.toString())
@@ -2633,6 +3366,13 @@ private class ModelEditorConnection(
 
     override fun sendDeleteKey(): Boolean = active
 
+    /** 修飾状態を含むキー操作を記録する。 */
+    override fun sendKeyStroke(keyCode: Int, metaState: Int): Boolean {
+        if (!active) return false
+        keyStrokes += keyCode to metaState
+        return true
+    }
+
     override fun textBeforeCursor(maxChars: Int): CharSequence? {
         textBeforeCursorCalls += 1
         if (!active) return null
@@ -2650,6 +3390,30 @@ private class ModelEditorConnection(
         if (!active || !selectedTextSupported) return null
         return text.substring(minOf(selectionStart, selectionEnd), maxOf(selectionStart, selectionEnd))
     }
+
+    /** Android標準メニュー操作を記録し、選択状態を模擬する。 */
+    override fun performContextMenuAction(actionId: Int): Boolean {
+        if (!active) return false
+        contextMenuActions += actionId
+        when (actionId) {
+            android.R.id.selectAll -> {
+                selectionStart = 0
+                selectionEnd = text.length
+            }
+            android.R.id.cut -> {
+                val start = minOf(selectionStart, selectionEnd)
+                val end = maxOf(selectionStart, selectionEnd)
+                if (start == end) return false
+                replace(start, end, "")
+                selectionStart = start
+                selectionEnd = start
+            }
+        }
+        return true
+    }
+
+    /** モデルEditorのselection端点を返す。 */
+    override fun currentSelection(): Pair<Int, Int>? = if (active) selectionStart to selectionEnd else null
 
     override fun invalidate() {
         active = false

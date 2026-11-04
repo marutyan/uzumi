@@ -8,11 +8,14 @@ import android.net.Uri
 import android.os.Bundle
 import android.text.Editable
 import android.text.InputType
+import android.text.TextUtils
 import android.text.TextWatcher
 import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
+import android.widget.AdapterView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -81,6 +84,9 @@ class UserDictionaryActivity : Activity() {
         content.addView(searchField)
         actionButtons = listOf(
             actionButton(R.string.dictionary_add) { showEditDialog(original = null) },
+            actionButton(R.string.dictionary_add_template) {
+                showEditDialog(original = null, initialCategory = UserDictionaryCategory.TEMPLATE)
+            },
             actionButton(R.string.dictionary_import) { openImportFile() },
             actionButton(R.string.dictionary_export) { createExportFile() },
         )
@@ -149,6 +155,8 @@ class UserDictionaryActivity : Activity() {
         addView(TextView(context).apply {
             text = entry.surface
             textSize = 18f
+            maxLines = 3
+            ellipsize = TextUtils.TruncateAt.END
         })
         addView(TextView(context).apply {
             text = getString(R.string.dictionary_row_detail, entry.reading, entry.category.label)
@@ -158,7 +166,10 @@ class UserDictionaryActivity : Activity() {
     }
 
     /** 追加（originalがnull）または編集の入力画面を表示する。検証に失敗した場合は画面を閉じずに理由を示す。 */
-    private fun showEditDialog(original: UserDictionaryEntry?) {
+    private fun showEditDialog(
+        original: UserDictionaryEntry?,
+        initialCategory: UserDictionaryCategory = UserDictionaryCategory.NOUN,
+    ) {
         val categories = UserDictionaryCategory.entries
         val readingField = EditText(this).apply {
             hint = getString(R.string.dictionary_reading_hint)
@@ -168,7 +179,13 @@ class UserDictionaryActivity : Activity() {
             setText(original?.reading.orEmpty())
         }
         val surfaceField = EditText(this).apply {
-            hint = getString(R.string.dictionary_surface_hint)
+            hint = getString(
+                if ((original?.category ?: initialCategory) == UserDictionaryCategory.TEMPLATE) {
+                    R.string.dictionary_template_surface_hint
+                } else {
+                    R.string.dictionary_surface_hint
+                },
+            )
             isSingleLine = true
             inputType = InputType.TYPE_CLASS_TEXT
             imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI
@@ -180,8 +197,21 @@ class UserDictionaryActivity : Activity() {
                 android.R.layout.simple_spinner_item,
                 categories.map(UserDictionaryCategory::label),
             ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
-            setSelection(categories.indexOf(original?.category ?: UserDictionaryCategory.NOUN))
+            setSelection(categories.indexOf(original?.category ?: initialCategory))
         }
+        // 品詞の選択に合わせて題名を変えるため、作成後のダイアログを参照する。
+        var shownDialog: AlertDialog? = null
+        categorySpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            /** 品詞の選択に合わせて、本文欄を単行または複数行へ、題名を単語または定型文へ切り替える。 */
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                configureSurfaceField(surfaceField, categories[position])
+                shownDialog?.setTitle(editDialogTitle(isNew = original == null, categories[position]))
+            }
+
+            /** 選択なしは画面の初期設定で扱う。 */
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        configureSurfaceField(surfaceField, original?.category ?: initialCategory)
         val errorText = TextView(this).apply {
             setTextColor(ERROR_TEXT_COLOR)
             visibility = View.GONE
@@ -195,12 +225,13 @@ class UserDictionaryActivity : Activity() {
             addView(errorText)
         }
         val builder = AlertDialog.Builder(this)
-            .setTitle(if (original == null) R.string.dictionary_add else R.string.dictionary_edit)
+            .setTitle(editDialogTitle(isNew = original == null, original?.category ?: initialCategory))
             .setView(form)
             .setPositiveButton(R.string.dictionary_save, null)
             .setNegativeButton(android.R.string.cancel, null)
         if (original != null) builder.setNeutralButton(R.string.dictionary_delete, null)
         val dialog = builder.create()
+        shownDialog = dialog
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val entry = UserDictionaryEntry(
@@ -228,6 +259,28 @@ class UserDictionaryActivity : Activity() {
             }
         }
         dialog.show()
+    }
+
+    /** 追加・編集の入力画面の題名。定型文は「定型文を追加」「定型文を編集」、それ以外は単語として示す。 */
+    private fun editDialogTitle(isNew: Boolean, category: UserDictionaryCategory): Int {
+        val isTemplate = category == UserDictionaryCategory.TEMPLATE
+        return when {
+            isNew && isTemplate -> R.string.dictionary_add_template
+            isNew -> R.string.dictionary_add
+            isTemplate -> R.string.dictionary_edit_template
+            else -> R.string.dictionary_edit
+        }
+    }
+
+    /** 定型文だけ本文の空白・改行を入力できるよう、複数行の編集欄を使う。 */
+    private fun configureSurfaceField(field: EditText, category: UserDictionaryCategory) {
+        val isTemplate = category == UserDictionaryCategory.TEMPLATE
+        field.hint = getString(if (isTemplate) R.string.dictionary_template_surface_hint else R.string.dictionary_surface_hint)
+        field.isSingleLine = !isTemplate
+        field.inputType = InputType.TYPE_CLASS_TEXT or (if (isTemplate) InputType.TYPE_TEXT_FLAG_MULTI_LINE else 0)
+        field.minLines = if (isTemplate) TEMPLATE_MIN_LINES else 1
+        field.maxLines = if (isTemplate) TEMPLATE_MAX_LINES else 1
+        field.gravity = if (isTemplate) Gravity.TOP or Gravity.START else Gravity.CENTER_VERTICAL
     }
 
     /** 削除前に確認し、削除に成功したらonDeletedを呼んで一覧を更新する。 */
@@ -276,7 +329,7 @@ class UserDictionaryActivity : Activity() {
         }, onFailure = { toast(getString(R.string.dictionary_import_read_failed)) }) { outcome ->
             when (outcome) {
                 ImportOutcome.TooLarge ->
-                    toast(getString(R.string.dictionary_import_too_large, MAX_IMPORT_BYTES / BYTES_PER_MEGABYTE))
+                    toast(getString(R.string.dictionary_import_too_large, UserDictionaryRules.MAX_IMPORT_BYTES / BYTES_PER_MEGABYTE))
                 ImportOutcome.NotUtf8 -> toast(getString(R.string.dictionary_import_not_utf8))
                 is ImportOutcome.Done -> {
                     refreshList()
@@ -309,7 +362,7 @@ class UserDictionaryActivity : Activity() {
                 val read = stream.read(chunk)
                 if (read < 0) break
                 buffer.write(chunk, 0, read)
-                if (buffer.size() > MAX_IMPORT_BYTES) return null
+                if (buffer.size() > UserDictionaryRules.MAX_IMPORT_BYTES) return null
             }
             buffer.toByteArray()
         }
@@ -393,6 +446,8 @@ class UserDictionaryActivity : Activity() {
         UserDictionaryError.EMPTY_SURFACE -> getString(R.string.dictionary_error_empty_surface)
         UserDictionaryError.SURFACE_TOO_LONG ->
             getString(R.string.dictionary_error_surface_too_long, UserDictionaryRules.MAX_SURFACE_LENGTH)
+        UserDictionaryError.TEMPLATE_TOO_LONG ->
+            getString(R.string.dictionary_error_template_too_long, UserDictionaryRules.MAX_TEMPLATE_LENGTH)
         UserDictionaryError.SURFACE_HAS_CONTROL_CHARACTER -> getString(R.string.dictionary_error_surface_control)
         UserDictionaryError.WRONG_COLUMN_COUNT -> getString(R.string.dictionary_error_column_count)
         UserDictionaryError.UNKNOWN_CATEGORY -> getString(R.string.dictionary_error_unknown_category)
@@ -427,9 +482,13 @@ class UserDictionaryActivity : Activity() {
         /** import結果に列挙する失敗行の最大数。 */
         const val MAX_REPORTED_FAILURES = 20
 
-        /** importで読むファイルの最大byte数。登録上限の件数を十分に収め、巨大ファイルでメモリを使い切らないようにする。 */
-        const val MAX_IMPORT_BYTES = 8 * 1024 * 1024
         const val BYTES_PER_MEGABYTE = 1024 * 1024
+
+        /** 定型文編集欄に表示する最小行数。複数行の入力欄だと分かる高さを確保する。 */
+        const val TEMPLATE_MIN_LINES = 3
+
+        /** 定型文編集欄の最大表示行数。本文が長い場合は欄の中でスクロールできるようにする。 */
+        const val TEMPLATE_MAX_LINES = 8
 
         const val EXPORT_MIME_TYPE = "text/tab-separated-values"
         const val EXPORT_FILE_NAME = "uzumi-user-dictionary.tsv"

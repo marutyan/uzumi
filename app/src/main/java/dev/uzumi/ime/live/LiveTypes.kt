@@ -43,6 +43,14 @@ data class LiveSegment(
     val candidatesComplete: Boolean = false,
     /** 区切りをユーザーが伸縮で決めたか。変換器はこの範囲を必ず一segmentとして返し、結果はchosenになる。 */
     val userBounded: Boolean = false,
+    /** 非表示候補を避けている間の表示だけを保存し、評価記録時や解除時に元へ戻す。 */
+    val unfilteredSurface: String? = null,
+    /** 非表示候補を避ける前の自動更新状態。 */
+    val unfilteredState: SegmentState? = null,
+    /** 顔文字・絵文字を含まず、NG時の自動表示置換へ安全に使える候補。 */
+    val automaticCandidates: List<String>? = null,
+    /** この読みのUzumi学習記録から追加した候補表記。 */
+    val learnedCandidates: Set<String> = emptySet(),
 ) {
     /** 未変換の入力中segmentか。新しい読みを隣へ入力したときに結合してよい対象を表す。 */
     val isRaw: Boolean
@@ -131,6 +139,10 @@ data class ResultSegment(
     val candidates: List<String> = listOf(surface),
     /** 候補を明示変換と同じ方法で取ったか。trueならコアは注目時に候補を求め直さない。 */
     val candidatesComplete: Boolean = false,
+    /** 顔文字・絵文字を除いた、自動表示置換へ使える候補。nullなら表記から判定する。 */
+    val automaticCandidates: List<String>? = null,
+    /** この読みのUzumi学習記録から追加した候補表記。 */
+    val learnedCandidates: Set<String> = emptySet(),
 )
 
 /**
@@ -239,6 +251,8 @@ data class CandidateChoice(
     val revision: Long,
     val segmentId: Long,
     val value: String,
+    /** 候補がUzumiの学習記録から追加された場合、その読みを長押し削除へ渡す。 */
+    val learnedReading: String? = null,
 )
 
 /**
@@ -277,6 +291,10 @@ data class CandidateRequest(
 data class CandidateResult(
     val request: CandidateRequest,
     val candidates: List<String>,
+    /** 顔文字・絵文字を除いた、自動表示置換へ使える候補。nullなら表記から判定する。 */
+    val automaticCandidates: List<String>? = null,
+    /** この読みのUzumi学習記録から追加した候補表記。 */
+    val learnedCandidates: Set<String> = emptySet(),
 )
 
 /**

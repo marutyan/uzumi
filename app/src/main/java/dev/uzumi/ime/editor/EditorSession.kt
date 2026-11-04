@@ -1,6 +1,8 @@
 package dev.uzumi.ime.editor
 
+import android.view.KeyEvent
 import dev.uzumi.ime.conversion.ConversionCandidate
+import dev.uzumi.ime.conversion.CandidateVisibility
 import dev.uzumi.ime.conversion.ConversionClient
 import dev.uzumi.ime.conversion.ConversionOutcome
 import dev.uzumi.ime.conversion.ConversionRequest
@@ -8,10 +10,12 @@ import dev.uzumi.ime.conversion.ConversionResult
 import dev.uzumi.ime.conversion.ConversionSegment
 import dev.uzumi.ime.conversion.LiveConversionClient
 import dev.uzumi.ime.conversion.PredictionCandidate
+import dev.uzumi.ime.conversion.PredictionCommitResult
 import dev.uzumi.ime.conversion.PredictionClient
 import dev.uzumi.ime.conversion.PredictionRequest
 import dev.uzumi.ime.conversion.PredictionResult
 import dev.uzumi.ime.conversion.SegmentedLiveConverter
+import dev.uzumi.ime.conversion.EmoticonText
 import dev.uzumi.ime.conversion.liveLearningUnits
 import dev.uzumi.ime.evaluation.ConversionProgress
 import dev.uzumi.ime.evaluation.CorrectnessJudge
@@ -63,6 +67,8 @@ class EditorSession(
     romajiInputEnabled: Boolean = false,
     // 予測要求・結果と候補確定を、変換とは別のMozc sessionへ送る。
     private val predictionClient: PredictionClient? = null,
+    // 12キーの同じキーの連続タップを同じ文字の切り替えとして扱う猶予（ミリ秒）。設定の「トグルの区切り」の値。
+    kanaToggleWindowMillis: Long = KanaKeyToggle.WINDOW_MILLIS,
 ) {
     private val buffer = CompositionBuffer()
     // compositionの内容が変わるたびに増える番号。変換応答が現在の読みに対するものかを照合する。
@@ -71,6 +77,10 @@ class EditorSession(
     // 予測も入力世代とsession epochが一致する場合だけ候補へ表示する。
     private var pendingPrediction: PredictionRequest? = null
     private var appliedPrediction: PredictionResult? = null
+    // 部分key候補はMozcの確定応答で残りの読みを確かめてから本文へ反映する。
+    private var pendingPredictionSelection: PendingPredictionSelection? = null
+    // 設定から読み込んだNG表記。評価中は適用せず、表示と候補の条件を元へ戻す。
+    private var hiddenCandidateSurfaces: Set<String> = emptySet()
     private var appliedConversion: ConversionResult? = null
     // 候補の選択で画面用revisionを更新しても、変換エンジンが保持する要求との一致を保つ。
     private var appliedConversionCommitRequest: ConversionRequest? = null
@@ -89,6 +99,9 @@ class EditorSession(
     } else {
         null
     }
+    // 編集パネルの範囲選択で、固定端と移動端の向きを保つ。
+    private var selectionAnchor: Int? = initialSelectionStart.takeIf { initialSelectionStart >= 0 && initialSelectionEnd >= 0 }
+    private var selectionFocus: Int? = initialSelectionEnd.takeIf { initialSelectionStart >= 0 && initialSelectionEnd >= 0 }
     private var compositionStart: Int? = null
     private var expectedComposition: CompositionGeometry? = null
     private val staleCompositions = mutableListOf<CompositionGeometry>()
@@ -96,7 +109,7 @@ class EditorSession(
     private val pendingCommittedSelections = mutableListOf<SelectionTransition>()
 
     // 12キーの同じキーの連続タップと、英字配列の入力途中のローマ字。どちらもこの編集セッションの間だけ持つ。
-    private val kanaToggle = KanaKeyToggle()
+    private val kanaToggle = KanaKeyToggle(kanaToggleWindowMillis)
     private val romajiComposer = if (romajiInputEnabled) RomajiKanaComposer() else null
 
     // ライブ変換で最後にEditorへ送ったカーソル位置（composition先頭からのUTF-16 offset）。
@@ -155,6 +168,18 @@ class EditorSession(
     val hasComposition: Boolean
         get() = active && (liveCore?.display?.isNotEmpty() ?: !buffer.isEmpty)
 
+    /** 編集パネルの左右移動に使う、向きを保ったselectionを返す。 */
+    val editPanelSelection: EditPanelSelection?
+        get() = if (active && selectionAnchor != null && selectionFocus != null) {
+            EditPanelSelection(selectionAnchor!!, selectionFocus!!)
+        } else {
+            null
+        }
+
+    /** Editor上で文字範囲を選択しているかを返す。 */
+    val hasEditPanelSelection: Boolean
+        get() = editPanelSelection?.hasRange == true
+
     // 直前の削除内容と復元位置。別操作・位置変更・外部編集の後は使わない。
     private var deletionUndo: DeletionUndo? = null
 
@@ -174,25 +199,54 @@ class EditorSession(
     /** 変換結果を表示中なら注目文節の変換候補、そうでなければ現在の読みから基本候補を作る。 */
     fun candidateOptions(): List<CandidateOption> {
         if (liveCore != null) return emptyList()
+        val hidden = effectiveHiddenCandidateSurfaces()
         currentConversion()?.let { conversion ->
             val segmentIndex = focusedConversionSegmentIndex
             val segment = conversion.segments.getOrNull(segmentIndex) ?: return emptyList()
-            return segmentCandidates(conversion, segmentIndex).map { candidate ->
+            return CandidateVisibility.filter(segmentCandidates(conversion, segmentIndex), hidden, isRecording = false) { it.value }
+                .map { candidate ->
                 CandidateOption(
                     value = candidate.value,
                     label = "",
                     conversionChoice = ConversionChoice(conversion.request, candidate.id, segmentIndex),
                     selected = candidate.value == segment.value,
+                    learnedReading = candidate.learnedReading,
+                    learningLookupReading = candidate.learnedReading ?: candidate.reading,
                 )
             }
         }
-        return BasicCandidateProvider.candidates(buffer.reading, policy.suppressSuggestions)
+        return CandidateVisibility.filter(
+            BasicCandidateProvider.candidates(buffer.reading, policy.suppressSuggestions),
+            hidden,
+            isRecording = false,
+        ) { it.value }
+    }
+
+    /** 学習削除後に現在の変換結果からも該当候補を外し、次の再変換まで古い候補を残さない。 */
+    fun removeLearnedCandidate(reading: String, surface: String): Boolean {
+        val conversion = appliedConversion ?: return false
+        var changed = false
+        val filtered = conversion.copy(
+            segments = conversion.segments.map { segment ->
+                val candidates = segment.candidates.filterNot {
+                    it.learnedReading == reading && it.value == surface
+                }
+                if (candidates.size != segment.candidates.size) changed = true
+                segment.copy(candidates = candidates)
+            },
+            headCandidates = conversion.headCandidates.filterNot {
+                it.learnedReading == reading && it.value == surface
+            },
+        )
+        if (!changed && filtered.headCandidates.size == conversion.headCandidates.size) return false
+        appliedConversion = filtered
+        return true
     }
 
     /** 現在の読みまたは直前の確定文字列に対するMozc予測を依頼し、古い候補を直ちに外す。 */
     fun refreshPredictions(): Boolean {
         val client = predictionClient
-        if (!active || client?.isPredictionAvailable != true) {
+        if (!active || evaluation?.isRecording == true || client?.isPredictionAvailable != true) {
             clearPredictions()
             return false
         }
@@ -200,6 +254,10 @@ class EditorSession(
         if (request == null) {
             clearPredictions()
             return false
+        }
+        pendingPredictionSelection?.let { selection ->
+            if (isCurrentPredictionRequest(selection.request)) return false
+            pendingPredictionSelection = null
         }
         if (pendingPrediction == request || appliedPrediction?.request == request) return false
         pendingPrediction = request
@@ -218,10 +276,49 @@ class EditorSession(
      * その右に並ぶ通常の候補（注目文節の候補）と同じ表記は、同じ語が候補バーに二度並ばないよう除く。
      */
     fun predictionResult(): PredictionResult? {
+        if (evaluation?.isRecording == true) return null
         val result = appliedPrediction?.takeIf { isCurrentPredictionRequest(it.request) } ?: return null
         val shown = regularCandidateValues().toMutableSet()
         if (hasComposition) shown += ownedDisplay
-        return result.copy(candidates = result.candidates.filterNot { it.value in shown })
+        val candidates = CandidateVisibility.filter(
+            result.candidates.filterNot { it.value in shown }.distinctBy { it.value },
+            effectiveHiddenCandidateSurfaces(),
+            isRecording = false,
+        ) { it.value }
+        val firstEnglish = candidates.indexOfFirst(PredictionCandidate::englishVariant)
+        val keepEnglish = firstEnglish < 0 || candidates.take(firstEnglish).any { it.id != null }
+        return result.copy(candidates = candidates.filter { !it.englishVariant || keepEnglish })
+    }
+
+    /**
+     * 予測を、通常の候補の上位に混ぜるものと、通常の候補の後ろに置くものに分ける。上位に混ぜるのは、打った読みで
+     * そのまま始まる予測（読み全体の変換か続きを含む語）の最大2件だけにする。読みの先頭だけを変換する候補
+     * （partialKeyあり）、表記ゆれでだけ一致する語（しょうかい→場外）、残りの予測は後ろへ回す。予測を前に並べすぎると、
+     * 入力中の読みの本来の変換が候補バーの外へ押し出されるため。limitがあれば合計をその件数までにし、
+     * 英語表記が入らないときは最初の英語候補を最後に置く（英語候補はMozc予測の後ろに並ぶため）。
+     */
+    fun predictionLayout(limit: Int? = null): PredictionLayout? = predictionResult()?.let { result ->
+        val typed = result.request.reading
+        val early = result.candidates
+            .filter { it.partialKey == null && !it.englishVariant && (it.reading ?: typed).startsWith(typed) }
+            .take(MAX_EARLY_PREDICTIONS)
+        val rest = result.candidates.filterNot { it in early }
+        val late = if (limit == null) {
+            rest
+        } else {
+            val shown = rest.take((limit - early.size).coerceAtLeast(0))
+            val english = rest.firstOrNull(PredictionCandidate::englishVariant)
+            if (english == null || english in shown || shown.isEmpty()) shown else shown.dropLast(1) + english
+        }
+        PredictionLayout(result, early, late)
+    }
+
+    /** 候補バーに出す予測（最大5件）の並び。 */
+    fun predictionBarLayout(): PredictionLayout? = predictionLayout(MAX_PREDICTIONS_IN_BAR)
+
+    /** 候補バーに出す予測（最大5件）を、上位に混ぜるもの、後ろに置くものの順で返す。 */
+    fun predictionBarResult(): PredictionResult? = predictionBarLayout()?.let { layout ->
+        layout.result.copy(candidates = layout.early + layout.late)
     }
 
     /** 予測の右に並ぶ通常の候補の表記。ライブ変換では注目segmentの候補、それ以外は明示変換・基本候補。 */
@@ -240,17 +337,70 @@ class EditorSession(
     fun clearPredictions() {
         pendingPrediction = null
         appliedPrediction = null
+        pendingPredictionSelection = null
     }
 
-    /**
-     * 予測候補を選び、未確定全体（次の語の予測ではカーソル位置）をその語で確定する。
-     * ライブ変換の表示中の文節は確定しないため学習へ送らず、予測語の確定だけを予測の窓口へ伝える。
-     */
+    /** Mozc候補IDから対応する候補を探し、予測語を確定する既存呼び出し口を保つ。 */
     fun selectPrediction(request: PredictionRequest, candidateId: Int): Boolean {
+        val candidate = appliedPrediction?.candidates?.firstOrNull { it.id == candidateId } ?: return false
+        return selectPrediction(request, candidate)
+    }
+
+    /** NG表記を通常候補と表示値へ反映し、評価記録中は空の一覧にして元の条件へ戻す。 */
+    fun setHiddenCandidateSurfaces(surfaces: Set<String>): Boolean {
+        val effective = if (evaluation?.isRecording == true) emptySet() else surfaces.toSet()
+        if (effective == hiddenCandidateSurfaces) return false
+        hiddenCandidateSurfaces = effective
+        val core = liveCore
+        if (core != null) {
+            val before = core.segments
+            val update = core.setHiddenCandidateSurfaces(effective)
+            return update.handled && update.rejection == null && applyLiveUpdate(update, before)
+        }
+        val conversion = currentConversion() ?: return false
+        val filtered = filterConversion(conversion)
+        if (filtered.display == conversion.display) return false
+        val nextRevision = revision + 1
+        val updated = filtered.copy(request = filtered.request.copy(revision = nextRevision))
+        buffer.setDisplay(updated.display)
+        revision = nextRevision
+        pendingConversion = null
+        failedConversionRevision = null
+        if (!synchronizeComposition(updated, focusedConversionSegmentIndex)) {
+            failClosed()
+            return false
+        }
+        appliedConversion = updated
+        return true
+    }
+
+    /** 評価状態を毎回参照し、記録中に隠し一覧が候補へ残らないようにする。 */
+    private fun effectiveHiddenCandidateSurfaces(): Set<String> =
+        if (evaluation?.isRecording == true) emptySet() else hiddenCandidateSurfaces
+
+    /**
+     * 予測候補を選ぶ。Mozcが部分key候補と示した場合は確定応答を待ち、実際の残り読みを確認してから表示へ反映する。
+     * それ以外は未確定全体（次の語の予測ではカーソル位置）を候補表記で確定し、IDのない英語候補も同じ経路で扱う。
+     */
+    fun selectPrediction(request: PredictionRequest, candidate: PredictionCandidate): Boolean {
         val result = appliedPrediction ?: return false
+        if (evaluation?.isRecording == true) return false
         if (result.request != request || !isCurrentPredictionRequest(request)) return false
-        val candidate = result.candidates.firstOrNull { it.id == candidateId } ?: return false
-        // 予測は未確定全体を置き換えるため、入力途中のローマ字と連続タップは確定せずに捨てる。
+        if (result.candidates.none { it == candidate }) return false
+        if (candidate.value in effectiveHiddenCandidateSurfaces()) return false
+        if (isPotentialPartialPrediction(request, candidate)) {
+            val client = predictionClient ?: return false
+            pendingPredictionSelection = PendingPredictionSelection(
+                request = request,
+                candidate = candidate,
+                pendingRomaji = romajiComposer?.pendingText.orEmpty(),
+            )
+            pendingPrediction = null
+            appliedPrediction = null
+            client.commitPrediction(request, candidate)
+            return true
+        }
+        // 全体予測を確定するときは、従来どおり未確定全体と入力途中のローマ字を置き換える。
         abandonPendingInput()
         deletionUndo = null
         if (request.isZeroQuery) {
@@ -265,7 +415,81 @@ class EditorSession(
             liveCursorUtf16 = 0
             if (!commitCompositionAs(candidate.value)) return false
         }
-        predictionClient?.commitPrediction(request, candidate.id)
+        predictionClient?.commitPrediction(request, candidate)
+        clearPredictions()
+        return true
+    }
+
+    /** MozcのSUBMIT_CANDIDATE後に届いた残りの読みを、同じ要求世代でのみ本文へ反映する。 */
+    fun applyPredictionCommitResult(result: PredictionCommitResult): Boolean {
+        val selection = pendingPredictionSelection ?: return false
+        if (selection.request != result.request || selection.candidate != result.candidate) return false
+        pendingPredictionSelection = null
+        if (!active || evaluation?.isRecording == true || !isCurrentPredictionRequest(result.request)) return false
+        if (!result.succeeded) return false
+        val mozRemaining = result.remainingReading ?: return false
+        if (result.request.isZeroQuery && mozRemaining.isNotEmpty()) return false
+        val remaining = if (result.request.isZeroQuery) {
+            ""
+        } else {
+            typedRemainingReading(result.request, mozRemaining)
+                ?.takeIf { it != result.request.reading }
+                ?: return false
+        }
+        val pendingRomaji = if (remaining.isEmpty()) "" else selection.pendingRomaji
+        return commitPredictionText(selection.request, selection.candidate, remaining, pendingRomaji)
+    }
+
+    /** CandidateWindowのkeyが入力より短い場合を選択結果で確かめる候補か返す。 */
+    private fun isPotentialPartialPrediction(request: PredictionRequest, candidate: PredictionCandidate): Boolean {
+        val key = candidate.partialKey ?: return false
+        if (request.isZeroQuery || candidate.id == null || candidate.englishVariant) return false
+        val comparable: (String) -> String = if (request.kanaModifierInsensitive) {
+            { value -> KanaModifier.stripModifiers(value) }
+        } else {
+            { value -> value }
+        }
+        val typed = comparable(request.reading)
+        val candidateKey = comparable(key)
+        return candidateKey.isNotEmpty() && typed.startsWith(candidateKey) && typed.length > candidateKey.length
+    }
+
+    /** Mozcのpreeditに残った読みを、必要なら12キーの入力表記へ対応づけて返す。 */
+    private fun typedRemainingReading(request: PredictionRequest, remaining: String): String? {
+        if (request.reading.endsWith(remaining)) return remaining
+        if (!request.kanaModifierInsensitive) return null
+        val clusters = GraphemeClusters.split(remaining).size
+        if (clusters == 0) return null
+        val typed = GraphemeClusters.split(request.reading).takeLast(clusters).joinToString("")
+        return typed.takeIf { KanaModifier.stripModifiers(it) == KanaModifier.stripModifiers(remaining) }
+    }
+
+    /** 候補を確定し、実際に残った読みがあれば新しい未確定compositionへ戻す。 */
+    private fun commitPredictionText(
+        request: PredictionRequest,
+        candidate: PredictionCandidate,
+        remainingReading: String,
+        pendingRomaji: String,
+    ): Boolean {
+        abandonPendingInput()
+        deletionUndo = null
+        if (request.isZeroQuery) {
+            val start = knownSelectionStart()
+            if (!connection.commitText(candidate.value, 1)) {
+                failClosed()
+                return false
+            }
+            updateExternalSelectionAfterCommit(candidate.value, start)
+        } else {
+            liveCore?.discardComposition()
+            liveCursorUtf16 = 0
+            if (!commitCompositionAs(candidate.value)) return false
+            val resumedReading = remainingReading + pendingRomaji
+            if (resumedReading.isNotEmpty()) {
+                if (!inputTextDirect(resumedReading, fromTwelveKey = request.kanaModifierInsensitive)) return false
+                romajiComposer?.restorePending(pendingRomaji)
+            }
+        }
         clearPredictions()
         return true
     }
@@ -596,8 +820,7 @@ class EditorSession(
         if (!connection.deleteSurroundingText(deleteLength, 0)) return false
         val shiftedStart = compositionStart?.let { (it - deleteLength).coerceAtLeast(0) }
         compositionStart = shiftedStart
-        selectionStart = shiftedStart
-        selectionEnd = shiftedStart
+        setKnownSelection(shiftedStart, shiftedStart)
         recordExpectedComposition(CompositionGeometry(shiftedStart, ownedDisplay.length, cursorOffset = 0))
         return true
     }
@@ -816,8 +1039,7 @@ class EditorSession(
     /** 遅れて届くEditorの選択通知を、削除操作が送った選択遷移として照合する。 */
     private fun recordExpectedExternalSelection(oldStart: Int, oldEnd: Int, cursor: Int) {
         recordCommittedSelection(SelectionTransition(oldStart, oldEnd, cursor, cursor))
-        selectionStart = cursor
-        selectionEnd = cursor
+        setKnownSelection(cursor, cursor)
     }
 
     /** compositionの後ろに削除した確定本文を、削除直後のカーソル位置へ戻す。 */
@@ -948,8 +1170,7 @@ class EditorSession(
             }
             val target = start + buffer.cursorUtf16Offset()
             if (connection.setSelection(target, target)) {
-                selectionStart = target
-                selectionEnd = target
+                setKnownSelection(target, target)
                 recordExpectedComposition(
                     CompositionGeometry(
                         start = start,
@@ -965,6 +1186,119 @@ class EditorSession(
         return moveOutsideComposition(delta)
     }
 
+    /** 編集パネルの左右キーを処理し、選択中は固定端を保ったまま移動端を伸縮する。 */
+    fun moveEditPanelHorizontally(direction: Int, extendSelection: Boolean): Boolean {
+        if (!active || (direction != -1 && direction != 1) || !commitComposition()) return false
+        if (policy.isSensitive) return sendHorizontalEditKey(direction, extendSelection)
+        refreshSelectionFromEditor()
+        val current = editPanelSelection ?: return false
+        val adjacentLength = if (!extendSelection && current.hasRange) {
+            0
+        } else {
+            adjacentGraphemeLength(current, direction, extendSelection)
+                ?: return sendHorizontalEditKey(direction, extendSelection)
+        }
+        val next = EditPanelRules.moveHorizontally(current, direction, extendSelection, adjacentLength)
+        if (next == current) return false
+        if (!connection.setSelection(next.anchor, next.focus)) return false
+        setKnownSelection(next.anchor, next.focus)
+        deletionUndo = null
+        clearPredictions()
+        return true
+    }
+
+    /** ↑↓やHome/Endなどの標準キー操作を、未確定を確定してからEditorへ送る。 */
+    fun sendEditPanelKeyStroke(keyCode: Int, metaState: Int = 0): Boolean {
+        if (!active || !commitComposition()) return false
+        deletionUndo = null
+        clearPredictions()
+        val accepted = connection.sendKeyStroke(keyCode, metaState)
+        if (accepted) refreshSelectionFromEditor()
+        return accepted
+    }
+
+    /** Android標準の全選択・コピー・切り取り・貼り付けを実行し、選択位置を同期する。 */
+    fun performEditPanelContextAction(action: EditPanelContextAction): Boolean {
+        if (!active || (policy.isPassword && action in setOf(EditPanelContextAction.COPY, EditPanelContextAction.CUT))) {
+            return false
+        }
+        if (!commitComposition()) return false
+        if (action == EditPanelContextAction.COPY || action == EditPanelContextAction.CUT) {
+            refreshSelectionFromEditor()
+            if (!hasEditPanelSelection) return false
+        }
+        resetInputSequences()
+        clearPredictions()
+        if (action != EditPanelContextAction.COPY) deletionUndo = null
+        val actionId = when (action) {
+            EditPanelContextAction.SELECT_ALL -> android.R.id.selectAll
+            EditPanelContextAction.COPY -> android.R.id.copy
+            EditPanelContextAction.CUT -> android.R.id.cut
+            EditPanelContextAction.PASTE -> android.R.id.paste
+        }
+        val accepted = connection.performContextMenuAction(actionId)
+        if (accepted) refreshSelectionFromEditor()
+        return accepted
+    }
+
+    /** 編集パネルの削除を既存Backspace経路へ渡し、選択範囲の復元記録を維持する。 */
+    fun deleteFromEditPanel(): Boolean {
+        if (!active || !commitComposition()) return false
+        refreshSelectionFromEditor()
+        return deleteBackward()
+    }
+
+    /** 機密欄では本文を読まず、標準DPADキーへ修飾状態を付けて左右移動する。 */
+    private fun sendHorizontalEditKey(direction: Int, extendSelection: Boolean): Boolean {
+        deletionUndo = null
+        clearPredictions()
+        val keyCode = if (direction < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT
+        val metaState = if (extendSelection) KeyEvent.META_SHIFT_ON else 0
+        return connection.sendKeyStroke(keyCode, metaState)
+    }
+
+    /** 現在のfocusに隣接する一書記素のUTF-16幅をEditorから得る。 */
+    private fun adjacentGraphemeLength(
+        selection: EditPanelSelection,
+        direction: Int,
+        extendSelection: Boolean,
+    ): Int? {
+        if (selection.hasRange && extendSelection) {
+            val movingIntoSelection =
+                (selection.focus > selection.anchor && direction < 0) ||
+                    (selection.focus < selection.anchor && direction > 0)
+            if (movingIntoSelection) {
+                val selected = connection.selectedText()?.toString() ?: return null
+                val clusters = GraphemeClusters.split(selected)
+                return if (selection.focus > selection.anchor) {
+                    clusters.lastOrNull()?.length ?: 0
+                } else {
+                    clusters.firstOrNull()?.length ?: 0
+                }
+            }
+        }
+        val context = if (direction < 0) {
+            connection.textBeforeCursor(64)?.toString()
+        } else {
+            connection.textAfterCursor(64)?.toString()
+        } ?: return null
+        val clusters = GraphemeClusters.split(context)
+        return if (direction < 0) clusters.lastOrNull()?.length ?: 0 else clusters.firstOrNull()?.length ?: 0
+    }
+
+    /** Editorから選択indexだけを取り直し、本文はcomposition・学習・ログへ渡さない。 */
+    fun refreshSelectionFromEditor(): Boolean {
+        if (!active || policy.isSensitive) return false
+        val current = connection.currentSelection() ?: return false
+        if (current.first < 0 || current.second < 0) return false
+        if (editPanelSelection != EditPanelSelection(current.first, current.second)) {
+            deletionUndo = null
+            clearPredictions()
+        }
+        setKnownSelection(current.first, current.second)
+        return true
+    }
+
     /**
      * compositionが無いときのカーソル移動。範囲選択中はAndroid標準（Selection.moveLeft/moveRight）と同じく
      * ←で選択の開始、→で終了へ畳む。選択が無いときだけ、周辺文字列の書記素幅だけ外部selectionを動かす。
@@ -976,8 +1310,7 @@ class EditorSession(
             val collapsed = if (delta < 0) selectedStart else selectedEnd
             val accepted = connection.setSelection(collapsed, collapsed)
             if (accepted) {
-                selectionStart = collapsed
-                selectionEnd = collapsed
+                setKnownSelection(collapsed, collapsed)
             }
             return accepted
         }
@@ -999,8 +1332,7 @@ class EditorSession(
         if (target < 0) return false
         val accepted = connection.setSelection(target, target)
         if (accepted) {
-            selectionStart = target
-            selectionEnd = target
+            setKnownSelection(target, target)
         }
         return accepted
     }
@@ -1054,12 +1386,18 @@ class EditorSession(
         val segment = conversion.segments.getOrNull(choice.segmentIndex) ?: return false
         val candidate = segmentCandidates(conversion, choice.segmentIndex)
             .firstOrNull { it.id == choice.candidateId } ?: return false
+        if (candidate.value in effectiveHiddenCandidateSurfaces()) return false
         deletionUndo = null
         val updated = segment.copy(
             value = candidate.value,
             fromUserDictionary = candidate.fromUserDictionary,
             chosen = true,
             learnedReading = candidate.learnedReading,
+            englishVariant = candidate.englishVariant,
+            unfilteredValue = null,
+            unfilteredChosen = null,
+            unfilteredFromUserDictionary = null,
+            unfilteredLearnedReading = null,
         )
         return updateExplicitConversionSegment(conversion, choice.segmentIndex, updated)
     }
@@ -1074,7 +1412,9 @@ class EditorSession(
         if (!active || outcome.request != pending) return false
         pendingConversion = null
         if (pending.revision != revision || pending.reading != buffer.reading) return false
-        val converted = (outcome as? ConversionOutcome.Converted)?.result?.takeIf(ConversionResult::isConsistent)
+        val converted = (outcome as? ConversionOutcome.Converted)?.result
+            ?.takeIf(ConversionResult::isConsistent)
+            ?.let(::filterConversion)
         if (converted == null) {
             failedConversionRevision = revision
             return false
@@ -1107,6 +1447,51 @@ class EditorSession(
             }
         }
         return result.copy(segments = segments)
+    }
+
+    /** 非表示一覧にある現在値を次の安全候補へ置き換え、設定解除時に元の表示と由来を戻せるよう保持する。 */
+    private fun filterConversion(conversion: ConversionResult): ConversionResult {
+        val hidden = effectiveHiddenCandidateSurfaces()
+        return conversion.copy(segments = conversion.segments.mapIndexed { index, segment ->
+            val original = segment.unfilteredValue ?: segment.value
+            if (original !in hidden) {
+                if (segment.unfilteredValue == null) segment else segment.copy(
+                    value = original,
+                    chosen = segment.unfilteredChosen ?: segment.chosen,
+                    fromUserDictionary = segment.unfilteredFromUserDictionary ?: segment.fromUserDictionary,
+                    learnedReading = segment.unfilteredLearnedReading,
+                    unfilteredValue = null,
+                    unfilteredChosen = null,
+                    unfilteredFromUserDictionary = null,
+                    unfilteredLearnedReading = null,
+                )
+            } else {
+                val candidates = segmentCandidates(conversion, index)
+                val safeCandidates = candidates.filterNot { it.isEmoticon || EmoticonText.isEmoticon(it.value) }
+                val replacement = CandidateVisibility.nextAllowed(
+                    safeCandidates.map { it.value },
+                    original,
+                    segment.reading,
+                    hidden,
+                ) ?: segment.reading
+                val replacementCandidate = safeCandidates.firstOrNull { it.value == replacement }
+                segment.copy(
+                    value = replacement,
+                    chosen = false,
+                    // 自動差し替えはユーザー選択ではないため、Mozcの元の先頭候補を誤って学習させない。
+                    fromUserDictionary = true,
+                    learnedReading = replacementCandidate?.learnedReading,
+                    unfilteredValue = original,
+                    unfilteredChosen = segment.unfilteredChosen ?: segment.chosen,
+                    unfilteredFromUserDictionary = segment.unfilteredFromUserDictionary ?: segment.fromUserDictionary,
+                    unfilteredLearnedReading = if (segment.unfilteredValue != null) {
+                        segment.unfilteredLearnedReading
+                    } else {
+                        segment.learnedReading
+                    },
+                )
+            }
+        })
     }
 
     /** 時間超過した要求を取り下げ、遅れて届いた応答を適用しないようにする。 */
@@ -1176,7 +1561,9 @@ class EditorSession(
      * 候補行から選択した表記をcompositionへ反映する。機密欄では拒否する。
      */
     fun applyCandidate(value: String): Boolean {
-        if (!active || liveCore != null || policy.suppressSuggestions || value.isEmpty() || buffer.isEmpty) return false
+        if (!active || liveCore != null || policy.suppressSuggestions || value.isEmpty() ||
+            value in effectiveHiddenCandidateSurfaces() || buffer.isEmpty
+        ) return false
         abandonPendingInput()
         markCompositionChanged()
         buffer.setDisplay(value)
@@ -1416,7 +1803,7 @@ class EditorSession(
         return LiveCandidateState(
             choices = core.candidateBar()?.choices.orEmpty(),
             currentValue = focused?.surface,
-            canUndo = core.canUndo,
+            canUndo = canUndoLive(core),
             canFocusPrevious = segments.take(focusedIndex.coerceAtLeast(0)).any(::isFocusTarget),
             focusAtInput = core.isFocusAtInput,
             focusedReading = focused?.reading,
@@ -1470,8 +1857,10 @@ class EditorSession(
         val core = liveCore ?: return false
         if (!active) return false
         candidatesOutstanding = false
+        val before = core.segments
         val update = core.onCandidateResult(result)
-        return update.handled && update.rejection == null
+        if (!update.handled || update.rejection != null) return false
+        return update.commands.isEmpty() || applyLiveUpdate(update, before)
     }
 
     /**
@@ -1503,8 +1892,18 @@ class EditorSession(
     /** ライブ変換の直前の操作（候補の誤選択など）を取り消す。取り消せる操作が無ければfalse。 */
     fun undoLive(): Boolean {
         abandonPendingInput()
+        val core = liveCore ?: return false
+        if (!canUndoLive(core)) return false
         return performLive { it.undo() } ?: false
     }
+
+    /**
+     * ライブ変換の取り消しを機能バーと機能一覧の「元に戻す」から使えるか。読みを削除で空にした後も、コアの取り消し履歴は
+     * 次の確定まで残る。空のcompositionで戻すと、その後の切り取り・貼り付け・カーソル移動の後でも消した読みを
+     * 今のカーソル位置へ入れてしまうため、表示が空の間は使わせない。空にした直後の削除の取り消しは、
+     * 位置を照合する削除の記録（undoDeletion）が受け持つ。
+     */
+    private fun canUndoLive(core: LiveConversionCore): Boolean = core.canUndo && core.display.isNotEmpty()
 
     /** workerから届いたライブ変換の結果を、コアが現在の状態と照合できた場合だけ表示へ反映する。 */
     fun applyLiveResult(result: LiveResult): Boolean {
@@ -1684,7 +2083,12 @@ class EditorSession(
         val conversion = currentConversion() ?: return false
         val index = focusedConversionSegmentIndex
         val segment = conversion.segments.getOrNull(index) ?: return false
-        val candidates = segmentCandidates(conversion, index)
+        // 非表示の候補は選択時に拒否されるため、除いた候補の中だけで巡回する。
+        val candidates = CandidateVisibility.filter(
+            segmentCandidates(conversion, index),
+            effectiveHiddenCandidateSurfaces(),
+            isRecording = false,
+        ) { it.value }
         if (candidates.isEmpty()) return false
         val current = candidates.indexOfFirst { it.value == segment.value }
         val next = candidates[(current + 1) % candidates.size]
@@ -1717,8 +2121,7 @@ class EditorSession(
     private fun acceptLiveSelection(core: LiveConversionCore, start: Int, cursor: Int): Boolean {
         val offset = cursor - start
         compositionStart = start
-        selectionStart = cursor
-        selectionEnd = cursor
+        setKnownSelection(cursor, cursor)
         if (offset == liveCursorUtf16) return true
         val index = core.clusterIndexForDisplayOffset(offset)
         if (index != null) {
@@ -1751,6 +2154,7 @@ class EditorSession(
     /** compositionの変更を記録し、待機中の要求と表示中の変換結果を無効にする。 */
     private fun markCompositionChanged() {
         revision += 1
+        pendingPredictionSelection = null
         pendingConversion = null
         appliedConversion = null
         appliedConversionCommitRequest = null
@@ -1803,8 +2207,7 @@ class EditorSession(
             val oldGeometry = expectedComposition
             clearCompositionExpectations()
             oldGeometry?.let(::rememberStaleComposition)
-            selectionStart = start
-            selectionEnd = start
+            setKnownSelection(start, start)
             refreshDeletionLocation()
             return true
         }
@@ -1817,8 +2220,7 @@ class EditorSession(
             ),
         )
         if (start == null) {
-            selectionStart = null
-            selectionEnd = null
+            setKnownSelection(null, null)
             refreshDeletionLocation()
             return true
         }
@@ -1831,8 +2233,7 @@ class EditorSession(
             connection.setSelection(target, target)
         }
         if (selectionAccepted) {
-            selectionStart = target
-            selectionEnd = target
+            setKnownSelection(target, target)
             if (target != end) {
                 recordExpectedComposition(
                     CompositionGeometry(
@@ -1854,8 +2255,7 @@ class EditorSession(
         val previousStart = selectionStart
         val previousEnd = selectionEnd
         if (start == null) {
-            selectionStart = null
-            selectionEnd = null
+            setKnownSelection(null, null)
             return
         }
         val destination = start + text.length
@@ -1869,8 +2269,7 @@ class EditorSession(
                 ),
             )
         }
-        selectionStart = destination
-        selectionEnd = destination
+        setKnownSelection(destination, destination)
     }
 
     /** 現在のselectionが既知なら、正規化済みの開始位置を返す。 */
@@ -1882,13 +2281,22 @@ class EditorSession(
 
     /** 不明値を0へ変換せず、既知のselectionだけを正規化して保存する。 */
     private fun updateKnownSelection(start: Int, end: Int) {
-        if (start < 0 || end < 0) {
+        setKnownSelection(start, end)
+    }
+
+    /** selectionの向きと正規化範囲を同時に保存し、不明値は不明のまま保つ。 */
+    private fun setKnownSelection(anchor: Int?, focus: Int?) {
+        if (anchor == null || focus == null || anchor < 0 || focus < 0) {
+            selectionAnchor = null
+            selectionFocus = null
             selectionStart = null
             selectionEnd = null
             return
         }
-        selectionStart = minOf(start, end)
-        selectionEnd = maxOf(start, end)
+        selectionAnchor = anchor
+        selectionFocus = focus
+        selectionStart = minOf(anchor, focus)
+        selectionEnd = maxOf(anchor, focus)
     }
 
     /** 現在送信したcompositionを保持し、一つ前までの通知を遅延判定へ残す。 */
@@ -1921,8 +2329,7 @@ class EditorSession(
 
         if (buffer.setCursor(clusterIndex)) markCompositionChanged()
         compositionStart = start
-        selectionStart = cursor
-        selectionEnd = cursor
+        setKnownSelection(cursor, cursor)
         return true
     }
 
@@ -2000,7 +2407,32 @@ class EditorSession(
         connection.invalidate()
     }
 
+    /** Mozc応答を待つ部分候補の要求と入力途中ローマ字を保存する。 */
+    private data class PendingPredictionSelection(
+        val request: PredictionRequest,
+        val candidate: PredictionCandidate,
+        val pendingRomaji: String,
+    )
+
+    /** 予測の表示順。earlyは通常の候補の上位（MAX_REGULAR_BEFORE_PREDICTIONS件）の直後、lateは通常の候補の後ろに並べる。 */
+    data class PredictionLayout(
+        val result: PredictionResult,
+        val early: List<PredictionCandidate>,
+        val late: List<PredictionCandidate>,
+    ) {
+        companion object {
+            /** 予測より前に置く通常の候補の数。入力中の読みの本来の変換を左端に保つ。 */
+            const val MAX_REGULAR_BEFORE_PREDICTIONS = 3
+        }
+    }
+
     private companion object {
+        /** 候補バーに並べる予測候補数。∨で開く一覧はこの上限を使わない。 */
+        const val MAX_PREDICTIONS_IN_BAR = 5
+
+        /** 通常の候補の上位に混ぜる予測の数。 */
+        private const val MAX_EARLY_PREDICTIONS = 2
+
         /** 左ドラッグで行頭を探すときに読む、カーソル前の最大文字数。これより長い行はこの長さだけ消す。 */
         const val LINE_DELETE_MAX_CHARS = 1_000
 

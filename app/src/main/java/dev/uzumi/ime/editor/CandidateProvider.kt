@@ -12,6 +12,11 @@ data class CandidateOption(
     val conversionChoice: ConversionChoice? = null,
     // 注目文節で今表示している候補か。候補バーで選択中として示す。
     val selected: Boolean = false,
+    // 候補そのものがUzumi側の学習記録から追加された場合だけ削除項目へ渡す。
+    val learnedReading: String? = null,
+    // 明示変換の候補で、学習記録の有無を照合する読み。Mozcの候補と同じ表記の学習語にはlearnedReadingを付けないため、
+    // 長押しメニューはこの読みで学習の有無を確かめて削除項目を出す。
+    val learningLookupReading: String? = learnedReading,
 )
 
 /**

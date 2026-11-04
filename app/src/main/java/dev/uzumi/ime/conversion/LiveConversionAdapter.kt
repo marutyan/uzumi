@@ -27,6 +27,8 @@ class SegmentedLiveConverter(
     private val convertRange: (reading: String, leftContext: String) -> List<ResultSegment>?,
     // 登録語を候補の先頭へ加えるためのユーザー辞書。nullなら加えない。
     private val userDictionary: UserDictionaryLookup? = null,
+    // 完全一致した読みへ英語表記を追加する辞書。評価中・学習禁止欄ではnullを渡す。
+    private val englishWords: EnglishWordLookup? = null,
     // 読みに完全一致する学習語の表記を、優先する順に返す。nullなら学習語を加えない（学習禁止欄・学習OFF）。
     private val learnedSurfaces: ((String) -> List<String>)? = null,
     // 読みに完全一致する学習した句の表記を、優先する順に返す。nullなら句で区切りを合わせない。
@@ -95,8 +97,9 @@ class SegmentedLiveConverter(
     private fun convertMerged(reading: String, leftContext: String): List<ResultSegment>? {
         val converted = convertRange(reading, leftContext) ?: return null
         val learned = exactSurfaces?.let { mergeExactSurfaces(reading, converted, it) } ?: converted
-        return UserDictionaryCandidates.mergeLive(reading, learned, userDictionary)
-            .map { EmoticonCandidates.arrangeLive(it, emoticons) }
+        return UserDictionaryCandidates.mergeLive(reading, learned, userDictionary).map { segment ->
+            appendEnglishCandidates(EmoticonCandidates.arrangeLive(segment, emoticons))
+        }
     }
 
     /**
@@ -109,7 +112,19 @@ class SegmentedLiveConverter(
             ?: return null
         val learned = exactSurfaces?.let { mergeExactSurfaces(reading, listOf(single), it) } ?: listOf(single)
         val merged = UserDictionaryCandidates.mergeLive(reading, learned, userDictionary).single()
-        return EmoticonCandidates.arrangeLive(merged, emoticons).copy(candidatesComplete = single.candidatesComplete)
+        return appendEnglishCandidates(EmoticonCandidates.arrangeLive(merged, emoticons))
+            .copy(candidatesComplete = single.candidatesComplete)
+    }
+
+    /** 読みが一致する英語表記を既存のライブ候補の後ろへ加え、表示表記と候補順を保つ。 */
+    private fun appendEnglishCandidates(segment: ResultSegment): ResultSegment {
+        val english = englishWords?.exactMatches(segment.reading).orEmpty()
+        if (english.isEmpty()) return segment
+        val current = if (segment.surface in segment.candidates) segment.candidates else listOf(segment.surface) + segment.candidates
+        val existing = current.toHashSet()
+        val additions = english.map(EnglishWordEntry::surface).filterNot(existing::contains)
+        if (additions.isEmpty()) return segment
+        return segment.copy(candidates = current + additions)
     }
 
     /**
@@ -174,12 +189,16 @@ fun mergeSegmentCandidates(
     userDictionary: UserDictionaryLookup?,
     exactSurfaces: ((String) -> List<String>)?,
     emoticons: EmoticonJudge = EmoticonJudge(userDictionary, learningStore = null),
+    englishWords: EnglishWordLookup? = null,
 ): List<String> {
     if (engineCandidates.isEmpty()) return emptyList()
     val base = listOf(ResultSegment(reading, engineCandidates.first(), engineCandidates))
     val learned = exactSurfaces?.let { mergeExactSurfaces(reading, base, it) } ?: base
     val merged = UserDictionaryCandidates.mergeLive(reading, learned, userDictionary).single()
-    return EmoticonCandidates.arrangeLive(merged, emoticons).candidates
+    val existing = EmoticonCandidates.arrangeLive(merged, emoticons).candidates
+    val additions = englishWords?.exactMatches(reading).orEmpty().map(EnglishWordEntry::surface)
+        .filterNot(existing.toHashSet()::contains)
+    return existing + additions
 }
 
 /**

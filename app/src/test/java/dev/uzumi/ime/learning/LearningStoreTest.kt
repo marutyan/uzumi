@@ -155,6 +155,19 @@ class LearningStoreTest {
         assertEquals(listOf("(^_^)", "^^;"), store.allWords().map { it.surface }.sorted())
     }
 
+    /** 辞書から選んだ英語表記だけを記録し、保存後の再読込でも候補として保持する。 */
+    @Test
+    fun englishVariantIsRecordedAndRestoredWithoutAllowingGeneralAsciiLearning() {
+        val store = store()
+        assertTrue(store.recordEnglishVariant("いーめーる", "E-mail"))
+        assertFalse(store.record("うずみ", "Uzumi"))
+        store.flush()
+
+        val reopened = store()
+        assertEquals(listOf("E-mail"), reopened.exactMatches("いーめーる").map { it.surface })
+        assertTrue(reopened.exactMatches("うずみ").isEmpty())
+    }
+
     /** OFFの間は記録も参照もせず、ONに戻せば保存済みの語を再び返す。ON/OFFは保存される。 */
     @Test
     fun disabledStoreNeitherRecordsNorReturnsWords() {
@@ -192,10 +205,26 @@ class LearningStoreTest {
         store.record("かんじ", "幹事")
         store.record("かんじ", "漢字")
 
+        assertTrue(store.contains("かんじ", "幹事"))
         assertTrue(store.remove("かんじ", "幹事"))
         assertFalse(store.remove("かんじ", "幹事"))
 
+        assertFalse(store.contains("かんじ", "幹事"))
         assertEquals(listOf("漢字"), store().allWords().map { it.surface })
+    }
+
+    /** 非表示表記はno_backup用のStoreへ保存し、タブ・改行・絵文字を含む表記もそのまま読み戻す。 */
+    @Test
+    fun hiddenCandidatesAreSavedAndRestored() {
+        val hiddenFile = File(directory, "hidden-candidates.txt")
+        val store = HiddenCandidateStore(hiddenFile)
+        val surface = "NG\t候補\n😀"
+
+        assertTrue(store.hide(surface))
+        assertFalse(store.hide(surface))
+        assertEquals(setOf(surface), HiddenCandidateStore(hiddenFile).all())
+        assertTrue(HiddenCandidateStore(hiddenFile).unhide(surface))
+        assertTrue(HiddenCandidateStore(hiddenFile).all().isEmpty())
     }
 
     /** 全消去は保存ファイルを空にし、エンジンが動いていればエンジンへ、動いていなければファイルの消去を依頼する。 */

@@ -1,5 +1,7 @@
 package dev.uzumi.ime.live
 
+import dev.uzumi.ime.conversion.CandidateVisibility
+import dev.uzumi.ime.conversion.EmoticonText
 import dev.uzumi.ime.editor.GraphemeClusters
 
 /**
@@ -15,6 +17,9 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
     /** 読み、候補選択、カーソル、Undo/Redo、境界、設定の変更で進める。 */
     var revision: Long = 0L
         private set
+
+    // 設定で除外した表記。評価中は呼び出し元が空集合を渡して元の表示へ戻す。
+    private var hiddenCandidateSurfaces: Set<String> = emptySet()
 
     /** 辞書とモデルの世代。変わると古い世代の結果を捨てる。 */
     var converterGeneration: Long = initialConverterGeneration
@@ -320,9 +325,20 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
         }
         val merged = (result.candidates.filter { it.isNotEmpty() } + segment.candidates).distinct()
         val candidates = if (segment.surface in merged) merged else listOf(segment.surface) + merged
-        val updated = segment.copy(candidates = candidates, candidatesComplete = true)
+        val automaticCandidates = (
+            result.automaticCandidates ?: candidates.filterNot(EmoticonText::isEmoticon)
+            ) + segment.automaticCandidates.orEmpty()
+        val learnedCandidates = result.learnedCandidates + segment.learnedCandidates
+        val updated = segment.copy(
+            candidates = candidates,
+            candidatesComplete = true,
+            automaticCandidates = automaticCandidates.distinct(),
+            learnedCandidates = learnedCandidates,
+        )
         state = state.copy(segments = state.segments.map { if (it.id == segment.id) updated else it })
-        return LiveUpdate.NO_CHANGE
+        val before = display
+        state = state.copy(segments = applyHiddenSurfaces(state.segments))
+        return if (before != display) compositionUpdate(request = null) else LiveUpdate.NO_CHANGE
     }
 
     /**
@@ -342,8 +358,27 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
         val segment = focusedSegment ?: return null
         return CandidateBar(
             segmentId = segment.id,
-            choices = segment.candidates.map { CandidateChoice(sessionEpoch, revision, segment.id, it) },
+            choices = segment.candidates.filterNot { it in hiddenCandidateSurfaces }
+                .map { value ->
+                    CandidateChoice(
+                        sessionEpoch,
+                        revision,
+                        segment.id,
+                        value,
+                        segment.reading.takeIf { value in segment.learnedCandidates },
+                    )
+                },
         )
+    }
+
+    /** 設定の非表示一覧を反映し、現在の表記を次の候補へ切り替える。評価中は呼び出し元から空集合を受け取る。 */
+    fun setHiddenCandidateSurfaces(surfaces: Set<String>): LiveUpdate {
+        if (hiddenCandidateSurfaces == surfaces) return LiveUpdate.NO_CHANGE
+        hiddenCandidateSurfaces = surfaces.toSet()
+        val before = display
+        state = state.copy(segments = applyHiddenSurfaces(state.segments))
+        revision += 1
+        return if (before != display) compositionUpdate(request = null) else LiveUpdate(handled = true)
     }
 
     /**
@@ -356,12 +391,18 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
         if (choice.sessionEpoch != sessionEpoch ||
             choice.revision != revision ||
             segment == null ||
-            choice.value !in segment.candidates
+            choice.value !in segment.candidates || choice.value in hiddenCandidateSurfaces
         ) {
             return LiveUpdate(handled = true, rejection = RejectReason.STALE_CANDIDATE)
         }
         pushUndo(OperationKind.CANDIDATE)
-        val chosen = segment.copy(surface = choice.value, state = SegmentState.CHOSEN, converted = true)
+        val chosen = segment.copy(
+            surface = choice.value,
+            state = SegmentState.CHOSEN,
+            converted = true,
+            unfilteredSurface = null,
+            unfilteredState = null,
+        )
         // カーソルが変換済み表示の内部に残らないよう、内部にあった場合はsegment末尾へ移す。
         val cursor = if (segment.readingStart < state.inputCursor && state.inputCursor < segment.readingEnd) {
             segment.readingEnd
@@ -481,7 +522,7 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
             return rejected(RejectReason.CROSSES_FIXED)
         }
 
-        state = state.copy(segments = promoteSegments(mergeResult(pieces, current, protectedInTarget)))
+        state = state.copy(segments = applyHiddenSurfaces(promoteSegments(mergeResult(pieces, current, protectedInTarget))))
         // 明示的に注目しているsegmentが変換し直された場合は、その候補を取り直す。
         val focused = state.focusedSegmentId?.let { id -> state.segments.firstOrNull { it.id == id } }
         return compositionUpdate(request = null).copy(candidateRequest = focused?.let(::candidateRequestFor))
@@ -557,6 +598,29 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
         )
     }
 
+    /** segmentごとにNG表記を除き、設定解除時に戻せるよう元の表記を保持する。 */
+    private fun applyHiddenSurfaces(segments: List<LiveSegment>): List<LiveSegment> = segments.map { segment ->
+        val original = segment.unfilteredSurface ?: segment.surface
+        if (original !in hiddenCandidateSurfaces) {
+            segment.copy(
+                surface = original,
+                state = segment.unfilteredState ?: segment.state,
+                unfilteredSurface = null,
+                unfilteredState = null,
+            )
+        } else {
+            val safeCandidates = segment.automaticCandidates ?: segment.candidates.filterNot(EmoticonText::isEmoticon)
+            val visible = CandidateVisibility.nextAllowed(safeCandidates, original, segment.reading, hiddenCandidateSurfaces)
+                ?: segment.reading
+            segment.copy(
+                surface = visible,
+                state = if (visible != original && segment.state == SegmentState.CHOSEN) SegmentState.PROVISIONAL else segment.state,
+                unfilteredSurface = original,
+                unfilteredState = segment.unfilteredState ?: segment.state,
+            )
+        }
+    }
+
     /** compositionとUndo範囲を終える。revisionとepochは呼び出し側が進める。 */
     private fun resetComposition() {
         state = CompositionState.EMPTY
@@ -573,7 +637,7 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
 
     /** Undo/Redoで状態を戻し、実行中の要求と表示済み候補を無効にする。 */
     private fun restore(restored: CompositionState) {
-        state = restored
+        state = restored.copy(segments = applyHiddenSurfaces(restored.segments))
         revision += 1
         guardedSegmentIds.clear()
         guardedSegmentIds += restored.segments.filter { it.state == SegmentState.PROVISIONAL }.map { it.id }
@@ -740,6 +804,8 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
                 result.surface,
                 candidates.distinct(),
                 result.candidatesComplete,
+                result.automaticCandidates,
+                result.learnedCandidates,
             )
             position += clusters.size
         }
@@ -788,6 +854,8 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
                     surface = piece.surface,
                     state = if (userBounded) SegmentState.CHOSEN else SegmentState.PROVISIONAL,
                     candidates = kept?.let { (piece.candidates + it.candidates).distinct() } ?: piece.candidates,
+                    automaticCandidates = piece.automaticCandidates ?: kept?.automaticCandidates,
+                    learnedCandidates = piece.learnedCandidates + kept?.learnedCandidates.orEmpty(),
                     converted = true,
                     observations = observations,
                     lastObservedReadingVersion = readingVersion,
@@ -902,5 +970,7 @@ class LiveConversionCore(initialConverterGeneration: Long = 0L) {
         val surface: String,
         val candidates: List<String>,
         val candidatesComplete: Boolean,
+        val automaticCandidates: List<String>?,
+        val learnedCandidates: Set<String>,
     )
 }

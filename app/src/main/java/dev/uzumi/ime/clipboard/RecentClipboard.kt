@@ -93,6 +93,32 @@ class RecentClipboard(
         )
     }
 
+    /** 本文を読まずに現在clipの識別情報だけを返し、既処理判定や機密欄の拒否記録に使う。 */
+    internal fun currentHistoryIdentity(): ClipboardHistoryIdentity? {
+        if (!observing) return null
+        val metadata = snapshot(readDescription() ?: return null) ?: return null
+        if (!RecentClipboardRules.hasTextMimeType(metadata.mimeTypes)) return null
+        return historyIdentity(metadata)
+    }
+
+    /** 履歴へ保存する直前だけ本文を読み、機密clip・機密欄・期限切れ・変更競合を拒否する。 */
+    internal fun readForHistory(identity: ClipboardHistoryIdentity, sensitiveField: Boolean): String? {
+        if (!observing || !RecentClipboardRules.shouldReadTextBody(identity.clipboardSensitive, sensitiveField)) return null
+        val version = changeVersion.get()
+        val metadata = snapshot(readDescription() ?: return null) ?: return null
+        if (historyIdentity(metadata) != identity ||
+            !ClipboardHistoryRules.isFreshClip(metadata.timestamp, clockMillis())
+        ) {
+            return null
+        }
+        return readCurrentText(
+            version,
+            metadata,
+            requireFresh = true,
+            freshnessLifetimeMillis = ClipboardHistoryRules.LIFETIME_MILLIS,
+        )
+    }
+
     /** 候補タップ時だけ本文を取得する。候補作成後にclipが変わった場合はnullを返す。 */
     fun readForPaste(suggestion: Suggestion): String? {
         if (!observing) return null
@@ -141,19 +167,31 @@ class RecentClipboard(
         }
     }
 
-    private fun readCurrentText(version: Long, metadata: Metadata, requireFresh: Boolean): String? {
+    /** 表示中の同一clipだけを本文取得し、貼り付け・履歴の期限と世代を確認する。 */
+    private fun readCurrentText(
+        version: Long,
+        metadata: Metadata,
+        requireFresh: Boolean,
+        freshnessLifetimeMillis: Long = lifetimeMillis,
+    ): String? {
         if (!RecentClipboardRules.hasTextMimeType(metadata.mimeTypes)) return null
-        if (!isCurrent(version, metadata, requireFresh)) return null
+        if (!isCurrent(version, metadata, requireFresh, freshnessLifetimeMillis)) return null
         val clip = readPrimaryClip() ?: return null
         if (!sameMetadata(clipMetadata(clip), metadata)) return null
         val text = readTextItem(clip)?.takeIf(String::isNotEmpty) ?: return null
-        if (!isCurrent(version, metadata, requireFresh)) return null
+        if (!isCurrent(version, metadata, requireFresh, freshnessLifetimeMillis)) return null
         return text
     }
 
-    private fun isCurrent(version: Long, metadata: Metadata, requireFresh: Boolean): Boolean {
+    /** 本文を読む前後でclipの世代・メタデータが変わっていないことを確かめる。 */
+    private fun isCurrent(
+        version: Long,
+        metadata: Metadata,
+        requireFresh: Boolean,
+        freshnessLifetimeMillis: Long = lifetimeMillis,
+    ): Boolean {
         if (!observing || changeVersion.get() != version) return false
-        if (requireFresh && !RecentClipboardRules.isFresh(metadata.timestamp, clockMillis(), lifetimeMillis)) return false
+        if (requireFresh && !RecentClipboardRules.isFresh(metadata.timestamp, clockMillis(), freshnessLifetimeMillis)) return false
         val current = snapshot(readDescription() ?: return false) ?: return false
         return changeVersion.get() == version && sameMetadata(current, metadata)
     }
@@ -200,6 +238,13 @@ class RecentClipboard(
     private fun matches(metadata: Metadata, identity: ClipboardIdentity): Boolean =
         metadata.timestamp == identity.timestamp && metadata.mimeTypes == identity.mimeTypes &&
             metadata.clipboardSensitive == identity.clipboardSensitive
+
+    /** 履歴の再取込判定に必要な本文なしのOS clip情報を作る。 */
+    private fun historyIdentity(metadata: Metadata): ClipboardHistoryIdentity = ClipboardHistoryIdentity(
+        timestamp = metadata.timestamp,
+        mimeTypes = metadata.mimeTypes,
+        clipboardSensitive = metadata.clipboardSensitive,
+    )
 
     private data class Metadata(
         val timestamp: Long,

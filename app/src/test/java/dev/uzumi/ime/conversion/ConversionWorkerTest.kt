@@ -12,7 +12,9 @@ import dev.uzumi.ime.live.FixedRange
 import dev.uzumi.ime.live.ProtectedRange
 import dev.uzumi.ime.live.RequestIdentity
 import dev.uzumi.ime.live.ResultSegment
+import java.io.BufferedReader
 import java.io.File
+import java.io.StringReader
 import java.nio.file.Files
 import java.util.concurrent.Executor
 import org.junit.Assert.assertEquals
@@ -130,14 +132,173 @@ class ConversionWorkerTest {
 
         assertEquals(listOf("createSession", "setIncognito(false)", "suggest(2,ありがと)"), fixture.engine.calls)
         assertEquals(prediction, fixture.predictionResults.single().request)
-        assertEquals(listOf("ありがとう", "ありがとうございます", "助かります"),
+        // 表示件数は EditorSession が重複を除いた後に決めるため、ワーカーはエンジンの予測を切らずに渡す。
+        assertEquals(listOf("ありがとう", "ありがとうございます", "助かります", "助かった"),
             fixture.predictionResults.single().candidates.map { it.value })
 
         fixture.engine.calls.clear()
-        fixture.worker.commitPrediction(prediction, candidateId = 14)
+        fixture.worker.commitPrediction(prediction, candidate = PredictionCandidate(14, "助かります", "たすかります"))
         fixture.executor.runAll()
         assertEquals(listOf("setIncognito(false)", "commitPrediction(2,14)"), fixture.engine.calls)
         assertEquals(listOf("助かります"), learning.exactMatches("たすかります").map { it.surface })
+    }
+
+    /** Mozc予測を3件で切らず英語候補の前へすべて並べ、選んだ英語表記だけをLearningStoreへ記録する。 */
+    @Test
+    fun englishPredictionFollowsMozcAndCommitsWithoutEngineCandidateId() {
+        val learning = learningStore()
+        val english = englishDictionary("いーめーる\temail\nいーめーる\tEmail\nいーめーる\tE-mail\n")
+        val fixture = Fixture(learning = learning, englishWords = english)
+        fixture.startReady()
+        fixture.engine.predictions = listOf(
+            PredictionCandidate(7, "Mozc候補1", "いーめーる"),
+            PredictionCandidate(8, "Mozc候補2", "いーめーる"),
+            PredictionCandidate(9, "Mozc候補3", "いーめーる"),
+            PredictionCandidate(10, "Mozc候補4", "いーめーる"),
+        )
+        val request = PredictionRequest(sessionEpoch = 1, revision = 2, reading = "いーめーる")
+
+        fixture.worker.requestPrediction(request)
+        fixture.executor.runAll()
+        val candidates = fixture.predictionResults.single().candidates
+
+        assertEquals(listOf("Mozc候補1", "Mozc候補2", "Mozc候補3", "Mozc候補4", "email", "Email", "E-mail"), candidates.map { it.value })
+        val selected = candidates.first { it.value == "Email" }
+        assertNull(selected.id)
+        assertTrue(selected.englishVariant)
+        fixture.engine.calls.clear()
+        fixture.worker.commitPrediction(request, selected)
+        fixture.executor.runAll()
+
+        assertFalse(fixture.engine.calls.any { it.startsWith("commitPrediction") })
+        assertEquals(listOf("Email"), learning.exactMatches("いーめーる").map { it.surface })
+
+        fixture.engine.predictions = emptyList()
+        fixture.worker.requestPrediction(request.copy(revision = 3))
+        fixture.executor.runAll()
+        assertTrue(fixture.predictionResults.last().candidates.none { it.englishVariant })
+    }
+
+    /** 部分予測は確定範囲の読みをLearningStoreへ記録し、Mozcにも同じ候補IDをSUBMITする。 */
+    @Test
+    fun partialPredictionLearnsOnlyConsumedReadingAndSubmitsMozcCandidate() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        val candidate = PredictionCandidate(12, "今日", partialKey = "きょう")
+        fixture.engine.predictionCommitResult = EnginePredictionCommit(
+            remainingReading = "は",
+            resultReading = "きょう",
+        )
+        fixture.engine.predictions = listOf(candidate)
+        val request = PredictionRequest(sessionEpoch = 1, revision = 2, reading = "きょうは")
+
+        fixture.worker.requestPrediction(request)
+        fixture.executor.runAll()
+        fixture.engine.calls.clear()
+        fixture.worker.commitPrediction(request, candidate)
+        fixture.executor.runAll()
+
+        assertEquals(listOf("今日"), learning.exactMatches("きょう").map { it.surface })
+        assertTrue(learning.exactMatches("きょうは").isEmpty())
+        assertEquals(listOf("setIncognito(false)", "commitPrediction(1,12)"), fixture.engine.calls)
+        assertEquals("は", fixture.predictionCommitResults.single().remainingReading)
+        assertEquals("きょう", fixture.predictionCommitResults.single().learningReading)
+    }
+
+    /** 明示変換は表示値を保ち、英語候補をMozc候補の後ろへ置き、選択語だけをエンジン外で学習する。 */
+    @Test
+    fun englishExplicitCandidatePreservesDisplayAndLearnsOutsideEngine() {
+        val learning = learningStore()
+        val english = englishDictionary("ぐーぐる\tGoogle\nぐーぐる\tgoogle\n")
+        val fixture = Fixture(learning = learning, englishWords = english)
+        fixture.startReady()
+        fixture.engine.convertValuesFor = { listOf("ぐーぐる", "Google検索") }
+        val request = request(reading = "ぐーぐる")
+
+        fixture.worker.requestConversion(request)
+        fixture.executor.runAll()
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        val englishCandidate = result.headCandidates.first { it.value == "Google" }
+        val selectedSegment = result.segments.single().copy(
+            value = englishCandidate.value,
+            chosen = true,
+            learnedReading = englishCandidate.learnedReading,
+            englishVariant = englishCandidate.englishVariant,
+        )
+        assertEquals("ぐーぐる", result.segments.single().value)
+        assertEquals(listOf("ぐーぐる", "Google検索", "Google", "google"), result.headCandidates.map { it.value })
+        assertTrue(englishCandidate.englishVariant)
+        assertFalse(selectedSegment.engineCandidate)
+
+        fixture.worker.commitAll(request, listOf(selectedSegment))
+        fixture.executor.runAll()
+
+        assertEquals(listOf("Google"), learning.exactMatches("ぐーぐる").map { it.surface })
+        assertFalse(fixture.engine.calls.any { it.startsWith("learnSegments") || it.startsWith("commitAll") })
+    }
+
+    /** 候補再取得では、英語語形の追加があるときだけ現表示を先頭に残す。 */
+    @Test
+    fun englishCandidateRefetchAnchorsCurrentValueOnlyWhenVariantAddsChoice() {
+        val english = englishDictionary("めーる\tmail\n")
+        val fixture = Fixture(englishWords = english)
+        fixture.startReady()
+        fixture.engine.segmentFor = { _, reading, _ -> EngineSegment(reading, "メール表示", emptyList()) }
+
+        fixture.worker.requestSegmentCandidates(1, candidateRequest("めーる"))
+        fixture.executor.runAll()
+        assertEquals(listOf("メール表示", "mail"), fixture.candidateResults.last().second.candidates)
+
+        fixture.engine.segmentFor = { _, reading, _ -> EngineSegment(reading, "mail", emptyList()) }
+        fixture.worker.requestSegmentCandidates(1, candidateRequest("めーる"))
+        fixture.executor.runAll()
+        assertTrue(fixture.candidateResults.last().second.candidates.isEmpty())
+    }
+
+    /** 評価中と機密要求では明示・ライブ・再取得・予測の全経路へ英語候補を追加しない。 */
+    @Test
+    fun evaluationAndIncognitoSuppressEnglishCandidatesAcrossWorkerPaths() {
+        val english = englishDictionary("えっくす\tX\n")
+        val fixture = Fixture(englishWords = english)
+        fixture.startReady()
+        fixture.engine.convertValuesFor = { listOf("えっくす") }
+        fixture.evaluating = true
+
+        fixture.worker.requestConversion(request(reading = "えっくす"))
+        fixture.executor.runAll()
+        val explicit = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        assertTrue(explicit.headCandidates.none { it.englishVariant })
+
+        fixture.engine.segmentsFor = { reading -> listOf(EngineSegment(reading, "エックス", listOf("エックス"))) }
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "えっくす"))
+        fixture.executor.runAll()
+        assertTrue(fixture.liveResults.single().second.segments.single().candidates.none { it == "X" })
+        fixture.worker.requestSegmentCandidates(1, candidateRequest("えっくす"))
+        fixture.executor.runAll()
+        assertTrue(fixture.candidateResults.single().second.candidates.none { it == "X" })
+
+        fixture.engine.predictions = listOf(PredictionCandidate(9, "エックス", "えっくす"))
+        val evaluationPrediction = PredictionRequest(sessionEpoch = 1, revision = 4, reading = "えっくす")
+        fixture.worker.requestPrediction(evaluationPrediction)
+        fixture.executor.runAll()
+        assertTrue(fixture.predictionResults.last().candidates.none { it.englishVariant })
+
+        fixture.evaluating = false
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 2, reading = "えっくす", learningAllowed = false))
+        fixture.executor.runAll()
+        assertTrue(fixture.liveResults.last().second.segments.single().candidates.none { it == "X" })
+        fixture.worker.requestSegmentCandidates(1, candidateRequest("えっくす", learningAllowed = false))
+        fixture.executor.runAll()
+        assertTrue(fixture.candidateResults.last().second.candidates.none { it == "X" })
+        fixture.worker.requestPrediction(PredictionRequest(sessionEpoch = 1, revision = 5, reading = "えっくす", incognito = true))
+        fixture.executor.runAll()
+        assertTrue(fixture.predictionResults.last().candidates.none { it.englishVariant })
+
+        fixture.worker.requestConversion(request(revision = 2, reading = "えっくす", incognito = true))
+        fixture.executor.runAll()
+        val privateConversion = (fixture.outcomes.last() as ConversionOutcome.Converted).result
+        assertTrue(privateConversion.headCandidates.none { it.englishVariant })
     }
 
     /**
@@ -165,21 +326,23 @@ class ConversionWorkerTest {
         assertEquals(1, fixture.liveResults.size)
     }
 
-    /** 学習禁止の入力途中予測はincognitoを先に指定し、選択しても確定学習を送らない。 */
+    /** 学習禁止の入力途中予測もMozcへ確定を送り、IME側のLearningStoreには記録しない。 */
     @Test
-    fun incognitoPredictionDoesNotLearn() {
-        val fixture = Fixture()
+    fun incognitoPredictionSubmitsWithoutLearning() {
+        val learning = learningStore()
+        val fixture = Fixture(learning = learning)
         fixture.startReady()
         fixture.engine.calls.clear()
         val prediction = PredictionRequest(sessionEpoch = 1, revision = 2, reading = "ひみつ", incognito = true)
 
         fixture.worker.requestPrediction(prediction)
         fixture.executor.runAll()
-        fixture.worker.commitPrediction(prediction, candidateId = 11)
+        fixture.worker.commitPrediction(prediction, candidate = PredictionCandidate(11, "ありがとう", "ありがとう"))
         fixture.executor.runAll()
 
         assertTrue(fixture.engine.calls.indexOf("setIncognito(true)") < fixture.engine.calls.indexOf("suggest(1,ひみつ)"))
-        assertFalse(fixture.engine.calls.any { it.startsWith("commitPrediction") })
+        assertTrue(fixture.engine.calls.contains("commitPrediction(1,11)"))
+        assertTrue(learning.exactMatches("ありがとう").isEmpty())
     }
 
     /** incognitoの指定に失敗した予測要求は、本文を送らず空候補として返す。 */
@@ -607,6 +770,35 @@ class ConversionWorkerTest {
         assertEquals(listOf("缶", "かん"), segment.candidates)
     }
 
+    /** 評価中は新しい定型文だけを候補から外し、以前からの短縮よみは従来どおり表示する。 */
+    @Test
+    fun evaluationHidesTemplatesButKeepsExistingShortcuts() {
+        val templateBody = "定型文\n本文"
+        val fixture = Fixture(dictionary = FakeLookup(listOf(
+            UserDictionaryEntry("かん", templateBody, UserDictionaryCategory.TEMPLATE),
+            UserDictionaryEntry("かん", "旧短縮", UserDictionaryCategory.SHORTCUT),
+        )))
+        fixture.startReady()
+
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 1, reading = "かん"))
+        fixture.executor.runAll()
+        assertEquals(templateBody, fixture.liveResults.last().second.segments.single().surface)
+        assertTrue(fixture.liveResults.last().second.segments.single().candidates.contains(templateBody))
+
+        fixture.evaluating = true
+        fixture.worker.requestLiveConversion(7, liveRequest(revision = 2, reading = "かん"))
+        fixture.executor.runAll()
+
+        assertEquals("旧短縮", fixture.liveResults.last().second.segments.single().surface)
+        assertFalse(fixture.liveResults.last().second.segments.single().candidates.contains(templateBody))
+
+        fixture.worker.requestConversion(request(revision = 3, reading = "かん"))
+        fixture.executor.runAll()
+        val explicit = (fixture.outcomes.last() as ConversionOutcome.Converted).result
+        assertTrue(explicit.headCandidates.any { it.value == "旧短縮" })
+        assertFalse(explicit.headCandidates.any { it.value == templateBody })
+    }
+
     /** 明示変換の先頭文節の候補にも、登録語を先頭に加える。 */
     @Test
     fun explicitConversionAddsUserDictionaryWords() {
@@ -900,7 +1092,12 @@ class ConversionWorkerTest {
 
         assertEquals(
             listOf(
-                ResultSegment("こうえんにいく", "校園に行く", listOf("校園に行く", "公園に行く", "こうえんにいく")),
+                ResultSegment(
+                    "こうえんにいく",
+                    "校園に行く",
+                    listOf("校園に行く", "公園に行く", "こうえんにいく"),
+                    learnedCandidates = setOf("校園に行く"),
+                ),
                 ResultSegment("よ", "よ", listOf("よ")),
             ),
             fixture.liveResults[0].second.segments,
@@ -957,6 +1154,76 @@ class ConversionWorkerTest {
         assertEquals(listOf("clearLearning"), fixture.engine.calls)
     }
 
+    /** 「この学習を削除」は、IME側の学習行とエンジンの履歴の両方を消し、直前の明示変換への確定通知を照合させない。 */
+    @Test
+    fun deleteLearningRemovesStoreRowAndEngineHistory() {
+        val learning = learningStore()
+        learning.record("かき", "柿")
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        val converted = request(reading = "かんじ")
+        fixture.worker.requestConversion(converted)
+        fixture.executor.runAll()
+        fixture.engine.calls.clear()
+        val removed = mutableListOf<Boolean>()
+
+        fixture.worker.deleteLearning(1, "かき", "柿", learningAllowed = true) { removed += it }
+        fixture.executor.runAll()
+        val result = (fixture.outcomes.single() as ConversionOutcome.Converted).result
+        fixture.worker.commitAll(converted, result.segments)
+        fixture.executor.runAll()
+
+        assertEquals(listOf(true), removed)
+        assertTrue(learning.exactMatches("かき").isEmpty())
+        assertEquals(listOf("setIncognito(false)", "deleteFromHistory(1,かき=柿)"), fixture.engine.calls)
+    }
+
+    /** 削除を押した直後に入力欄が閉じても、一時のsessionでエンジンの履歴を消し、そのsessionを片付ける。 */
+    @Test
+    fun deleteLearningAfterSessionEndUsesTemporarySession() {
+        val learning = learningStore()
+        learning.record("かき", "柿")
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.worker.requestConversion(request(reading = "かんじ"))
+        fixture.executor.runAll()
+        val removed = mutableListOf<Boolean>()
+
+        fixture.worker.deleteLearning(1, "かき", "柿", learningAllowed = true) { removed += it }
+        fixture.worker.endSession(1)
+        fixture.engine.calls.clear()
+        fixture.executor.runAll()
+
+        assertEquals(listOf(true), removed)
+        assertTrue(learning.exactMatches("かき").isEmpty())
+        val temporary = fixture.engine.calls.first { it == "createSession" }.let { fixture.engine.calls.indexOf(it) }
+        assertTrue(temporary >= 0)
+        val deleted = fixture.engine.calls.single { it.startsWith("deleteFromHistory(") }
+        val sessionId = deleted.removePrefix("deleteFromHistory(").substringBefore(",")
+        assertTrue(fixture.engine.calls.contains("deleteSession($sessionId)"))
+        assertEquals("かき=柿)", deleted.substringAfter(","))
+    }
+
+    /** 学習禁止欄と評価の記録中は、IME側の学習もエンジンの履歴も消さない。 */
+    @Test
+    fun deleteLearningDoesNothingWhenLearningIsSuppressedOrEvaluating() {
+        val learning = learningStore()
+        learning.record("かき", "柿")
+        val fixture = Fixture(learning = learning)
+        fixture.startReady()
+        fixture.engine.calls.clear()
+        val removed = mutableListOf<Boolean>()
+
+        fixture.worker.deleteLearning(1, "かき", "柿", learningAllowed = false) { removed += it }
+        fixture.evaluating = true
+        fixture.worker.deleteLearning(1, "かき", "柿", learningAllowed = true) { removed += it }
+        fixture.executor.runAll()
+
+        assertTrue(removed.isEmpty())
+        assertEquals(listOf("柿"), learning.exactMatches("かき").map { it.surface })
+        assertTrue(fixture.engine.calls.isEmpty())
+    }
+
     /** ニューラル変換を選ぶと、ライブ変換のかなの連なりをモデルで変換し、辞書（Mozc）の文節へ切り分ける。 */
     @Test
     fun liveConversionUsesNeuralBackendWhenSelected() {
@@ -972,6 +1239,115 @@ class ConversionWorkerTest {
         assertEquals(listOf("かんじ" to ""), backend.calls)
         // 評価モードでなければ報告を作らない
         assertTrue(fixture.reports.isEmpty())
+    }
+
+    /** 結合文節の一文節Mozc候補は、モデルの表示値を保ったまま通常の候補へ加える。 */
+    @Test
+    fun joinedNeuralSegmentAddsSingleSegmentMozcCandidates() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.calls.clear()
+        fixture.engine.segmentsFor = { reading ->
+            if (reading == "あい") {
+                listOf(EngineSegment("あ", "亜", listOf("亜")), EngineSegment("い", "胃", listOf("胃")))
+            } else {
+                listOf(EngineSegment(reading, reading, listOf(reading)))
+            }
+        }
+        fixture.engine.segmentFor = { _, reading, _ -> EngineSegment(reading, "藍", listOf("藍", "合い")) }
+        fixture.worker.setNeuralBackend(FakeNeuralBackend { reading, _ ->
+            NeuralModelOutput.Completed(if (reading == "あい") "愛" else reading)
+        })
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "あい"))
+        fixture.executor.runAll()
+
+        val segment = fixture.liveResults.single().second.segments.single()
+        assertEquals("愛", segment.surface)
+        assertEquals(listOf("愛", "亜胃", "藍", "合い"), segment.candidates)
+        assertFalse(segment.candidatesComplete)
+        assertEquals(1, fixture.engine.calls.count { it == "convertSegment(1,|あい|)" })
+    }
+
+    /** 評価中は結合文節の候補補充を行わず、従来の第一候補と候補列を保つ。 */
+    @Test
+    fun joinedNeuralSegmentKeepsEvaluationCandidatesUnchanged() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.calls.clear()
+        fixture.evaluating = true
+        fixture.engine.segmentsFor = { reading ->
+            if (reading == "あい") {
+                listOf(EngineSegment("あ", "亜", listOf("亜")), EngineSegment("い", "胃", listOf("胃")))
+            } else {
+                listOf(EngineSegment(reading, reading, listOf(reading)))
+            }
+        }
+        fixture.engine.segmentFor = { _, reading, _ -> EngineSegment(reading, "藍", listOf("藍", "合い")) }
+        fixture.worker.setNeuralBackend(FakeNeuralBackend { reading, _ ->
+            NeuralModelOutput.Completed(if (reading == "あい") "愛" else reading)
+        })
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "あい"))
+        fixture.executor.runAll()
+
+        val segment = fixture.liveResults.single().second.segments.single()
+        assertEquals("愛", segment.surface)
+        assertEquals(listOf("愛", "亜胃"), segment.candidates)
+        assertFalse(segment.candidatesComplete)
+        assertFalse(fixture.engine.calls.any { it == "convertSegment(1,|あい|)" })
+        assertEquals(1, fixture.reports.size)
+    }
+
+    /** 300 msのニューラル期限に達した後は結合文節の候補照会を始めない。 */
+    @Test
+    fun joinedNeuralCandidateLookupStopsAtInferenceDeadline() {
+        var nowNanos = 0L
+        val fixture = Fixture(nanoTime = { nowNanos })
+        fixture.startReady()
+        fixture.engine.calls.clear()
+        fixture.engine.segmentsFor = { reading ->
+            if (reading == "あい") {
+                listOf(EngineSegment("あ", "亜", listOf("亜")), EngineSegment("い", "胃", listOf("胃")))
+            } else {
+                listOf(EngineSegment(reading, reading, listOf(reading)))
+            }
+        }
+        fixture.worker.setNeuralBackend(FakeNeuralBackend { reading, _ ->
+            nowNanos = NeuralInferenceSettings.TIMEOUT_MILLIS * 1_000_000L
+            NeuralModelOutput.Completed(if (reading == "あい") "愛" else reading)
+        })
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "あい"))
+        fixture.executor.runAll()
+
+        assertEquals("愛", fixture.liveResults.single().second.segments.single().surface)
+        assertFalse(fixture.engine.calls.any { it.startsWith("convertSegment(1,|") })
+    }
+
+    /** 一文節候補のMozc照会が失敗したら、既存のモデル表記と連結表記を残す。 */
+    @Test
+    fun failedJoinedNeuralCandidateLookupKeepsExistingCandidates() {
+        val fixture = Fixture()
+        fixture.startReady()
+        fixture.engine.segmentsFor = { reading ->
+            if (reading == "あい") {
+                listOf(EngineSegment("あ", "亜", listOf("亜")), EngineSegment("い", "胃", listOf("胃")))
+            } else {
+                listOf(EngineSegment(reading, reading, listOf(reading)))
+            }
+        }
+        fixture.engine.segmentFor = { _, _, _ -> null }
+        fixture.worker.setNeuralBackend(FakeNeuralBackend { reading, _ ->
+            NeuralModelOutput.Completed(if (reading == "あい") "愛" else reading)
+        })
+
+        fixture.worker.requestLiveConversion(1, liveRequest(revision = 1, reading = "あい"))
+        fixture.executor.runAll()
+
+        val segment = fixture.liveResults.single().second.segments.single()
+        assertEquals("愛", segment.surface)
+        assertEquals(listOf("愛", "亜胃"), segment.candidates)
     }
 
     /** 学習禁止欄では、保護範囲の表記を含む左文脈をモデルへ渡さない。通常の欄では渡す。 */
@@ -1135,6 +1511,7 @@ class ConversionWorkerTest {
         assertEquals("藁", result.display)
         assertFalse(result.segments.single().fromUserDictionary)
         assertEquals(listOf("藁", "わら", "（笑）"), result.headCandidates.map { it.value })
+        assertTrue(result.headCandidates.last().isEmoticon)
     }
 
     /** ライブ変換では、Mozcの第一候補が絵文字でも表示値にせず、候補の取り直しでも先頭に置かない。 */
@@ -1150,7 +1527,7 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
 
         assertEquals(
-            listOf(ResultSegment("わらい", "笑い", listOf("笑い", "わらい", "😂"))),
+            listOf(ResultSegment("わらい", "笑い", listOf("笑い", "わらい", "😂"), automaticCandidates = listOf("笑い", "わらい"))),
             fixture.liveResults.single().second.segments,
         )
         assertEquals(listOf("笑い", "😂"), fixture.candidateResults.single().second.candidates)
@@ -1186,7 +1563,7 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
 
         assertEquals(
-            listOf(ResultSegment("にこ", "にこ", listOf("にこ", "😊", "☺️"))),
+            listOf(ResultSegment("にこ", "にこ", listOf("にこ", "😊", "☺️"), automaticCandidates = listOf("にこ"))),
             fixture.liveResults.single().second.segments,
         )
     }
@@ -1203,7 +1580,7 @@ class ConversionWorkerTest {
         fixture.executor.runAll()
 
         assertEquals(
-            listOf(ResultSegment("わら", "藁", listOf("藁", "わら", "（笑）"))),
+            listOf(ResultSegment("わら", "藁", listOf("藁", "わら", "（笑）"), automaticCandidates = listOf("藁", "わら"))),
             fixture.liveResults.single().second.segments,
         )
     }
@@ -1294,6 +1671,10 @@ class ConversionWorkerTest {
 
     private fun learningStore() = LearningStore(learningFile, clock = { now })
 
+    /** テスト用の小さなTSVから、不変の英語読み辞書を作る。 */
+    private fun englishDictionary(tsv: String): EnglishWordDictionary =
+        EnglishWordDictionary.parse(BufferedReader(StringReader(tsv)))
+
     private fun candidateRequest(
         reading: String,
         preceding: String = "",
@@ -1333,11 +1714,17 @@ class ConversionWorkerTest {
                 fromUserDictionary = candidate.fromUserDictionary,
                 chosen = true,
                 learnedReading = candidate.learnedReading,
+                englishVariant = candidate.englishVariant,
             ),
         )
 
     /** テストごとのworker、偽エンジン、手動executorの組。 */
-    private class Fixture(dictionary: FakeLookup? = null, learning: LearningStore? = null) {
+    private class Fixture(
+        dictionary: FakeLookup? = null,
+        learning: LearningStore? = null,
+        englishWords: EnglishWordLookup? = null,
+        nanoTime: () -> Long = System::nanoTime,
+    ) {
         val engine = FakeConversionEngine()
         val executor = ManualExecutor()
         val outcomes = mutableListOf<ConversionOutcome>()
@@ -1345,6 +1732,7 @@ class ConversionWorkerTest {
         val liveResults = mutableListOf<Pair<Long, LiveResult>>()
         val candidateResults = mutableListOf<Pair<Long, CandidateResult>>()
         val predictionResults = mutableListOf<PredictionResult>()
+        val predictionCommitResults = mutableListOf<PredictionCommitResult>()
         val reports = mutableListOf<Pair<Long, LiveRequestReport>>()
         var evaluating = false
         val worker = ConversionWorker(
@@ -1355,10 +1743,13 @@ class ConversionWorkerTest {
             onLiveResult = { epoch, result -> liveResults += epoch to result },
             onCandidateResult = { epoch, result -> candidateResults += epoch to result },
             onPredictionResult = predictionResults::add,
+            onPredictionCommitResult = predictionCommitResults::add,
             userDictionary = { dictionary },
+            englishWords = { englishWords },
             learningStore = { learning },
             onLiveReport = { epoch, report -> reports += epoch to report },
             evaluationActive = { evaluating },
+            nanoTime = nanoTime,
         )
 
         /** 初期化と既知変換例の確認を済ませ、以後のエンジンsession番号を1から始める。 */
@@ -1427,6 +1818,7 @@ private class FakeConversionEngine : ConversionEngine {
         PredictionCandidate(15, "助かった", "たすかった"),
     )
     var nextWordPredictions = listOf(PredictionCandidate(21, "天気", "てんき"))
+    var predictionCommitResult = EnginePredictionCommit(remainingReading = "")
 
     // 明示変換で返す先頭文節の候補の表記。既定では「かんじ」だけknownConversionValuesを返し、他は読みをそのまま返す。
     var convertValuesFor: (String) -> List<String> = { reading -> if (reading == "かんじ") knownConversionValues else listOf(reading) }
@@ -1484,6 +1876,9 @@ private class FakeConversionEngine : ConversionEngine {
         return true
     }
 
+    override fun submitPrediction(sessionId: Long, candidateId: Int): EnginePredictionCommit? =
+        if (commitPrediction(sessionId, candidateId)) predictionCommitResult else null
+
     override fun commitAll(sessionId: Long): Boolean {
         calls += "commitAll($sessionId)"
         return true
@@ -1510,6 +1905,11 @@ private class FakeConversionEngine : ConversionEngine {
 
     override fun clearLearning(): Boolean {
         calls += "clearLearning"
+        return true
+    }
+
+    override fun deleteFromHistory(sessionId: Long, reading: String, surface: String): Boolean {
+        calls += "deleteFromHistory($sessionId,$reading=$surface)"
         return true
     }
 

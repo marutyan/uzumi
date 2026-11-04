@@ -7,7 +7,7 @@ Uzumi に同梱する Mozc 由来資産の第三者著作権表示
 - libmozc.so（arm64-v8a / armeabi-v7a / x86 / x86_64）
   google/mozc commit 13c98988247aa711d99db9e348ec2a597d14b5cd を
   Android NDK r29 でビルドしたもの
-- mozc.data（同commitの //data_manager/oss:mozc.data）
+- mozc.data（同commitの //data_manager/oss:mozc.data に、Mozc UT の追加辞書3つを加えたもの。第11節〜第13節）
 - Mozc の protocol/*.proto から生成した Java lite コード
 - com.google.protobuf:protobuf-javalite 4.34.1
 
@@ -1025,3 +1025,205 @@ AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 SUCH DAMAGE.
+
+==============================================================================
+追加辞書の由来
+==============================================================================
+対象: mozc.data（google/mozc commit 13c98988247aa711d99db9e348ec2a597d14b5cd の
+//data_manager/oss:mozc.data に、次の3つの辞書を変換して加えたもの）
+
+- mozcdic-ut-sudachidict  https://github.com/utuhiro78/mozcdic-ut-sudachidict
+  commit 13129ddebe1cb8eabb63feccbe157adec4e1de01
+  mozcdic-ut-sudachidict.txt.bz2 SHA-256 1b9555338cc36606a5f497a2f57a0f9b948fa02d8c13d18ee9cfb5c99fb9d86e
+- mozcdic-ut-personal-names  https://github.com/utuhiro78/mozcdic-ut-personal-names
+  commit 3da38e0187c5db754c420a5733ae95640652323c
+  mozcdic-ut-personal-names.txt.bz2 SHA-256 fa542ba4a2105af1f86608fa08721c4d1af298a1330e90c7e3046a4a1239f6c1
+- mozcdic-ut-place-names  https://github.com/utuhiro78/mozcdic-ut-place-names
+  commit 7e2b4422837846ea2e78d1a34856d95001d5941a
+  mozcdic-ut-place-names.txt.bz2 SHA-256 addad60898216af8a1736fdef7508ec7e60e709979044ad2f40609959401c688
+
+変更: 公開データの品詞ID（0000）を Mozc の id.def の品詞へ付け直し、コストを付け直し、
+Mozc の既存語と重複する語と英数字だけの表記を除いた。mozcdic-ut-sudachidict の語は
+他の2辞書より高いコスト（出にくい側）にした。変換規則は docs の引き継ぎ文書に記録する。
+Wikipedia（jawiki）由来のデータとコストは使っていない。
+
+==============================================================================
+11. Mozc UT Dictionaries（mozcdic-ut-sudachidict、mozcdic-ut-personal-names）
+==============================================================================
+対象: mozc.data（追加辞書）
+作成者: UTUMI Hirosi (utuhiro78)
+ライセンス: Apache License, Version 2.0（各リポジトリの LICENSE と README による）
+Apache License 2.0 の本文は第6節（Abseil）に収録したものと同じである。
+
+mozcdic-ut-personal-names は README に元データの出典を記載していない。
+
+==============================================================================
+12. SudachiDict（mozcdic-ut-sudachidict の元データ）
+==============================================================================
+対象: mozc.data（追加辞書のうち mozcdic-ut-sudachidict 由来の語）
+出典: https://github.com/WorksApplications/SudachiDict/blob/develop/LEGAL
+      https://github.com/WorksApplications/SudachiDict/blob/develop/README.md
+
+SudachiDict by Works Applications Co., Ltd. is licensed under the Apache License, Version 2.0
+
+   Copyright (c) 2017-2023 Works Applications Co., Ltd.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+This project includes UniDic and a part of NEologd.
+
+以下は SudachiDict の LEGAL の原文。
+
+LEGAL NOTICE INFORMATION
+========================
+
+- All the files in this distribution are covered under the Apache License
+version 2.0. (see the file LICENSE-2.0.txt)
+
+
+- src/main/text/small_lex.csv contains a part
+  of UniDic (https://unidic.ninjal.ac.jp/).
+- src/main/text/matrix.def.zip is a part of UniDic.
+
+Copyright (c) 2011-2013, The UniDic Consortium
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+ * Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the
+   distribution.
+
+ * Neither the name of the UniDic Consortium nor the names of its
+   contributors may be used to endorse or promote products derived
+   from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+- src/main/text/core_lex.csv and src/main/text/notcore_lex.csv contain
+a part of NEologd (https://github.com/neologd/mecab-unidic-neologd).
+
+Copyright (C) 2015-2019 Toshinori Sato (@overlast)
+
+      https://github.com/neologd/mecab-unidic-neologd
+
+    i. 本データは、株式会社はてなが提供するはてなキーワード一覧ファイル
+       中の表記、及び、読み仮名の大半を使用している。
+
+       はてなキーワード一覧ファイルの著作権は、株式会社はてなにある。
+
+       はてなキーワード一覧ファイルの使用条件に基づき、また、
+       データ使用の許可を頂いたことに対する感謝の意を込めて、
+       以下に株式会社はてなおよびはてなキーワードへの参照をURLで示す。
+
+       株式会社はてな : http://hatenacorp.jp/information/outline
+
+       はてなキーワード :
+       http://developer.hatena.ne.jp/ja/documents/keyword/misc/catalog
+
+   ii. 本データは、日本郵便株式会社が提供する郵便番号データ中の表記、
+       及び、読み仮名を使用している。
+
+       日本郵便株式会社は、郵便番号データに限っては著作権を主張しないと
+       述べている。
+
+       日本郵便株式会社の郵便番号データに対する感謝の意を込めて、
+       以下に日本郵便株式会社および郵便番号データへの参照をURLで示す。
+
+       日本郵便株式会社 :
+         http://www.post.japanpost.jp/about/profile.html
+
+       郵便番号データ :
+         http://www.post.japanpost.jp/zipcode/dl/readme.html
+
+  iii. 本データは、スナフキん氏が提供する日本全国駅名一覧中の表記、及び
+       読み仮名を使用している。
+
+       日本全国駅名一覧の著作権は、スナフキん氏にある。
+
+       スナフキん氏は 「このデータを利用されるのは自由ですが、その際に
+       不利益を被ったりした場合でも、スナフキんは一切責任は負えません
+       ことをご承知おき下さい」と述べている。
+
+       スナフキん氏に対する感謝の意を込めて、
+       以下に日本全国駅名一覧のコーナーへの参照をURLで示す。
+
+       日本全国駅名一覧のコーナー :
+         http://www5a.biglobe.ne.jp/~harako/data/station.htm
+
+   iv. 本データは、工藤拓氏が提供する人名(姓/名)エントリデータ中の、
+       漢字表記の姓・名とそれに対応する読み仮名を使用している。
+
+       人名(姓/名)エントリデータは被災者・安否不明者の人名の
+       表記揺れ対策として、Mozcの人名辞書を活用できるという
+       工藤氏の考えによって提供されている。
+
+       工藤氏に対する感謝の意を込めて、
+       以下にデータ本体と経緯が分かる情報への参照をURLで示す。
+
+       人名(姓/名)エントリデータ :
+         http://chasen.org/~taku/software/misc/personal_name.zip
+
+       上記データが提供されることになった経緯
+         http://togetter.com/li/111529
+
+    v. 本データは、Web上からクロールした大量の文書データから抽出した
+       表記とそれに対応する読み仮名のデータを含んでいる。
+
+       抽出した表記とそれに対応する読み仮名の組は、上記の i. から iv.
+       の言語資源の組み合わせによって得られる組のみを採録した。
+
+       Web 上に文書データを公開して下さっている皆様に感謝いたします。
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+==============================================================================
+13. 日本郵便 郵便番号データ（mozcdic-ut-place-names の元データ）
+==============================================================================
+対象: mozc.data（追加辞書のうち mozcdic-ut-place-names 由来の地名）
+出典: https://www.post.japanpost.jp/zipcode/dl/readme.html
+変換: mozcdic-ut-place-names（UTUMI Hirosi、変換スクリプトは Apache License 2.0）
+mozcdic-ut-place-names の LICENSE の記載は次のとおり。
+
+[Public Domain](https://www.post.japanpost.jp/zipcode/dl/readme.html)
+
+> 郵便番号データに限っては日本郵便株式会社は著作権を主張しません。
+
+条件の原文は第3節に収録したものと同じである。

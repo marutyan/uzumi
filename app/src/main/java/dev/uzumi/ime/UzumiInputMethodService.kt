@@ -14,6 +14,7 @@ import android.text.TextUtils
 import android.text.style.BackgroundColorSpan
 import android.util.Size
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -22,6 +23,9 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InlineSuggestionsRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InlineSuggestionsResponse
+import android.view.inputmethod.InputMethodInfo
+import android.view.inputmethod.InputMethodManager
+import android.view.inputmethod.InputMethodSubtype
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -33,17 +37,29 @@ import androidx.autofill.inline.common.ViewStyle
 import androidx.autofill.inline.v1.InlineSuggestionUi
 import dev.uzumi.ime.conversion.ConversionOutcome
 import dev.uzumi.ime.conversion.ConversionWorker
+import dev.uzumi.ime.conversion.EnglishWordDictionary
 import dev.uzumi.ime.conversion.EngineHealth
 import dev.uzumi.ime.conversion.JniMozcNativeBridge
 import dev.uzumi.ime.conversion.MozcConversionEngine
 import dev.uzumi.ime.conversion.MozcDataInstaller
 import dev.uzumi.ime.conversion.NeuralModelSpec
 import dev.uzumi.ime.conversion.PredictionCandidate
+import dev.uzumi.ime.conversion.PredictionCommitResult
 import dev.uzumi.ime.conversion.PredictionResult
+import dev.uzumi.ime.clipboard.ClipboardHistoryCapturePolicy
+import dev.uzumi.ime.clipboard.ClipboardHistoryIdentity
+import dev.uzumi.ime.clipboard.ClipboardHistoryItem
+import dev.uzumi.ime.clipboard.ClipboardHistoryRules
+import dev.uzumi.ime.clipboard.ClipboardHistoryStore
+import dev.uzumi.ime.clipboard.ClipboardHistoryStores
 import dev.uzumi.ime.dictionary.UserDictionaries
+import dev.uzumi.ime.dictionary.UserDictionaryCategory
 import dev.uzumi.ime.clipboard.RecentClipboard
 import dev.uzumi.ime.editor.AndroidInputConnectionPort
 import dev.uzumi.ime.editor.EditorSession
+import dev.uzumi.ime.editor.EditPanelAction
+import dev.uzumi.ime.editor.EditPanelContextAction
+import dev.uzumi.ime.editor.EditPanelRules
 import dev.uzumi.ime.editor.InlineAutofillPolicy
 import dev.uzumi.ime.editor.InputFieldPolicy
 import dev.uzumi.ime.evaluation.ConversionProgress
@@ -58,9 +74,14 @@ import dev.uzumi.ime.evaluation.OperationKind
 import dev.uzumi.ime.evaluation.TimingKind
 import dev.uzumi.ime.evaluation.TimingSample
 import dev.uzumi.ime.keyboard.CandidateBarViews
+import dev.uzumi.ime.keyboard.CandidateActionPanel
 import dev.uzumi.ime.keyboard.CandidateGridView
+import dev.uzumi.ime.keyboard.ClipboardHistoryPanel
+import dev.uzumi.ime.keyboard.EditPanelView
 import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardAction
+import dev.uzumi.ime.keyboard.KeyboardBackgroundDrawable
+import dev.uzumi.ime.keyboard.KeyboardBackgroundImage
 import dev.uzumi.ime.keyboard.KeyboardColors
 import dev.uzumi.ime.keyboard.KeyboardDimens
 import dev.uzumi.ime.keyboard.KeyboardLayoutData
@@ -70,7 +91,10 @@ import dev.uzumi.ime.keyboard.ToolbarAction
 import dev.uzumi.ime.keyboard.ToolbarBarViews
 import dev.uzumi.ime.keyboard.ToolbarPreferences
 import dev.uzumi.ime.keyboard.ToolbarTilePanel
+import dev.uzumi.ime.keyboard.TemplatePickerPanel
+import dev.uzumi.ime.keyboard.ThemeColorMath
 import dev.uzumi.ime.learning.LearningStores
+import dev.uzumi.ime.learning.HiddenCandidateStores
 import dev.uzumi.ime.live.CandidateResult
 import dev.uzumi.ime.live.ConversionResult as LiveResult
 import dev.uzumi.ime.live.DisplaySpan
@@ -89,6 +113,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * Androidの入力接続、編集セッション、キーボード表示を一つの寿命へ結び付ける。
  */
 class UzumiInputMethodService : InputMethodService() {
+    /** 同梱の英語読み辞書を初回参照時に読み、不変indexをプロセス内で再利用する。 */
+    private val englishWordDictionary by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        EnglishWordDictionary.load(assets.open("english-words.tsv"))
+    }
+
     private var session: EditorSession? = null
     private var keyboardPanel: KeyboardPanel? = null
     // 最近履歴は一覧を開いたときに読み、入力成功後かつ機密欄以外でのみ書く。
@@ -107,7 +136,15 @@ class UzumiInputMethodService : InputMethodService() {
     private var barViews: CandidateBarViews? = null
     // ∨で開く候補一覧。キーボードの面を覆って表示する。
     private var candidateGrid: CandidateGridView? = null
+    private var candidateActionPanel: CandidateActionPanel? = null
     private var toolbarPanel: ToolbarTilePanel? = null
+    private var templatePanel: TemplatePickerPanel? = null
+    private var clipboardHistoryPanel: ClipboardHistoryPanel? = null
+    // 編集パネルはキーボード面へ重ね、選択モードをIME表示中だけ保持する。
+    private var editPanel: EditPanelView? = null
+    private var editPanelSelectionMode = false
+    // 有効な音声入力の切り替え先。タイルの表示判定でIMEの一覧を毎回問い合わせないよう、表示開始とsubtype変更時だけ調べる。
+    private var voiceInputMethod: Pair<InputMethodInfo, InputMethodSubtype>? = null
     // 入力Viewを作ったときのキーボード設定。設定画面で変わっていれば、次に表示するときに作り直す。
     private var builtPreferences: KeyboardPreferences? = null
     private var builtToolbarPreferences: ToolbarPreferences? = null
@@ -119,8 +156,13 @@ class UzumiInputMethodService : InputMethodService() {
     private var toolbarViews: ToolbarBarViews? = null
     // クリップボード本文はRecentClipboardの一時候補にだけ保持し、ログや設定へ保存しない。
     private var recentClipboard: RecentClipboard? = null
+    // 本文をIME表示中だけ取得し、他の設定・履歴とは分けたnoBackupFilesDirへ保存する。
+    private val clipboardHistoryStore: ClipboardHistoryStore
+        get() = ClipboardHistoryStores.get(this)
     private var clipboardSuggestion: RecentClipboard.Suggestion? = null
     private var clipboardExpiry: Runnable? = null
+    private var clipboardHistoryExpiry: Runnable? = null
+    private var clipboardHistorySessionEpoch: Long? = null
     private var clipboardSuggestionSessionEpoch: Long? = null
     private var inputViewVisible = false
     // Inline Autofill候補の表示部品。中身はOSが描画し、IMEは読まない（ログ・計数・学習・設定へ送らない）。
@@ -193,23 +235,29 @@ class UzumiInputMethodService : InputMethodService() {
             evaluationActive = { evaluation.isRecording },
             onCandidateResult = { sessionEpoch, result -> mainHandler.post { deliverCandidateResult(sessionEpoch, result) } },
             onPredictionResult = { result -> mainHandler.post { deliverPredictionResult(result) } },
+            onPredictionCommitResult = { result -> mainHandler.post { deliverPredictionCommitResult(result) } },
             userDictionary = { UserDictionaries.get(this) },
+            englishWords = { englishWordDictionary },
             learningStore = { LearningStores.get(this) },
         )
         conversionExecutor = executor
         conversionWorker = worker
         // 学習の保存ファイルを別threadで先に読む。変換threadはMozcの読込みで塞がるため、そこへは積まない
         Thread({ LearningStores.get(applicationContext) }, "uzumi-learning-preload").start()
+        Thread({ HiddenCandidateStores.get(applicationContext) }, "uzumi-hidden-candidates-preload").start()
         worker.start()
         EvaluationStatusSource.provider = ::evaluationStatus
         EvaluationStatusSource.neuralMemoryRequester = { neuralConnection?.requestMemory() }
+        scheduleClipboardHistoryExpiry()
     }
 
-    /** 保留中のUI更新を捨て、エンジン側sessionを破棄してからworkerを止める。 */
+    /** 保留中のUI更新と履歴期限timerを捨て、エンジン側sessionを破棄してworkerを止める。 */
     override fun onDestroy() {
         EvaluationStatusSource.provider = null
         EvaluationStatusSource.neuralMemoryRequester = null
         stopClipboardObservation()
+        clipboardHistoryExpiry?.let(mainHandler::removeCallbacks)
+        clipboardHistoryExpiry = null
         closeSession()
         applyNeuralSelection(null, restarting = false)
         mainHandler.removeCallbacksAndMessages(null)
@@ -224,15 +272,27 @@ class UzumiInputMethodService : InputMethodService() {
         val density = resources.displayMetrics.density
         val views = CandidateBarViews(this)
         barViews = views
-        candidateGrid?.hide()
-        toolbarPanel?.hide()
+        hideKeyboardOverlays()
+        val preferences = UzumiSettings.keyboardPreferences(this)
+        val appearance = preferences.appearance
+        // きせかえの背景画像。あれば入力View全体に敷き、候補バーとキーを設定の不透明度で重ねる。
+        val backgroundImage = KeyboardBackgroundImage.load(this, appearance.backgroundStamp, appearance.backgroundBlur)
+        val barColor = if (backgroundImage != null) {
+            ThemeColorMath.withAlpha(views.colors.bar, maxOf(MIN_BAR_ALPHA_WITH_IMAGE, appearance.keyOpacity / 100f))
+        } else {
+            views.colors.bar
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(views.colors.keyboardBackground)
+            if (backgroundImage != null) {
+                background = KeyboardBackgroundDrawable(backgroundImage, appearance.backgroundBrightness, views.colors.keyboardBackground)
+            } else {
+                setBackgroundColor(views.colors.keyboardBackground)
+            }
         }
         val toolbar = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(views.colors.bar)
+            setBackgroundColor(barColor)
         }
         toolbarRow = toolbar
         toolbarViews = ToolbarBarViews(this)
@@ -242,9 +302,9 @@ class UzumiInputMethodService : InputMethodService() {
             LinearLayout.LayoutParams.MATCH_PARENT,
             0,
         ))
+        // 候補の列は候補バーの地の上に重ねるため、地を塗らない（背景画像の透け方を候補バー全体でそろえる）。
         val candidates = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(views.colors.bar)
         }
         candidateRow = candidates
         val leading = LinearLayout(this).apply {
@@ -260,7 +320,7 @@ class UzumiInputMethodService : InputMethodService() {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(views.colors.bar)
+            setBackgroundColor(barColor)
         }
         candidateBar = bar
         val match = LinearLayout.LayoutParams.MATCH_PARENT
@@ -278,7 +338,6 @@ class UzumiInputMethodService : InputMethodService() {
 
         // 候補一覧はキーボードの面と同じ場所に重ね、開いている間はキーを覆う
         val keyboardArea = FrameLayout(this)
-        val preferences = UzumiSettings.keyboardPreferences(this)
         builtPreferences = preferences
         val rowBudget = maximumBarRows()
         val reservedBarRows = minOf(toolbarPreferences.toolbarRows + toolbarPreferences.candidateRows, rowBudget)
@@ -302,11 +361,40 @@ class UzumiInputMethodService : InputMethodService() {
         toolbarPanel = ToolbarTilePanel(this).also { panel ->
             keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
         }
+        templatePanel = TemplatePickerPanel(this).also { panel ->
+            keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
+        }
+        clipboardHistoryPanel = ClipboardHistoryPanel(this).also { panel ->
+            keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
+        }
+        clipboardHistorySessionEpoch = null
+        candidateActionPanel = CandidateActionPanel(this).also { actionPanel ->
+            keyboardArea.addView(actionPanel, FrameLayout.LayoutParams(match, match))
+        }
+        editPanel = EditPanelView(this, ::handleEditPanelAction).also { panel ->
+            keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
+        }
         root.addView(keyboardArea, LinearLayout.LayoutParams(match, wrap))
+        // パネルの開閉は表示の切り替え（GONE/VISIBLE）で配置をやり直させるため、開く・閉じる経路をここで一度に拾う。
+        keyboardArea.viewTreeObserver.addOnGlobalLayoutListener { syncCoveredKeyboardAccessibility(keyboardArea) }
         applyPolicyToKeyboard()
         refreshCandidates()
         applyNavigationInsets(root)
         return root
+    }
+
+    /**
+     * キーボード面に重ねたパネル（候補一覧、機能一覧、定型文、クリップボード一覧、編集パネル、長押しメニュー）が
+     * 一つでも開いている間は、裏のキーボード面をアクセシビリティの木から外し、TalkBackで覆われたキーを押せないようにする。
+     * すべて閉じたら元に戻す。
+     */
+    private fun syncCoveredKeyboardAccessibility(keyboardArea: ViewGroup) {
+        val panel = keyboardPanel?.takeIf { it.parent === keyboardArea } ?: return
+        val covered = (0 until keyboardArea.childCount)
+            .map(keyboardArea::getChildAt)
+            .any { it !== panel && it.visibility == View.VISIBLE }
+        val mode = if (covered) View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        if (panel.importantForAccessibility != mode) panel.importantForAccessibility = mode
     }
 
     /** システムバー（captionBar含む）とカットアウトのInsetsを反映し、システム操作領域との重なりを防ぐ。 */
@@ -359,8 +447,7 @@ class UzumiInputMethodService : InputMethodService() {
         // 再開始後に有効な接続（currentInputConnection）で先に確定する。
         closeSession(restartedConnection = if (restarting) currentInputConnection else null)
         clearInlineSuggestions()
-        candidateGrid?.hide()
-        toolbarPanel?.hide()
+        hideKeyboardOverlays()
         currentPolicy = null
         autoCapsMode = 0
         refreshCandidates()
@@ -397,6 +484,7 @@ class UzumiInputMethodService : InputMethodService() {
             evaluation = evaluation,
             correctness = CorrectnessJudge.shared,
             romajiInputEnabled = romaji,
+            kanaToggleWindowMillis = UzumiSettings.inputTuning(this).toggleWindowMillis.toLong(),
         )
         if (inputViewVisible) refreshClipboardSuggestion()
         applyPolicyToKeyboard()
@@ -414,7 +502,15 @@ class UzumiInputMethodService : InputMethodService() {
             setInputView(onCreateInputView())
         }
         startClipboardObservation()
+        voiceInputMethod = findEnabledVoiceInputMethod()
         applyPolicyToKeyboard()
+        refreshCandidates()
+    }
+
+    /** 入力方法のsubtypeが変わったとき、音声入力の切り替え先を調べ直して機能タイルへ反映する。 */
+    override fun onCurrentInputMethodSubtypeChanged(newSubtype: InputMethodSubtype?) {
+        super.onCurrentInputMethodSubtypeChanged(newSubtype)
+        voiceInputMethod = findEnabledVoiceInputMethod()
         refreshCandidates()
     }
 
@@ -445,6 +541,7 @@ class UzumiInputMethodService : InputMethodService() {
         )
         updateAutoCaps()
         refreshCandidates()
+        refreshEditPanelState()
     }
 
     /**
@@ -461,8 +558,7 @@ class UzumiInputMethodService : InputMethodService() {
     override fun onFinishInputView(finishingInput: Boolean) {
         inputViewVisible = false
         keyboardPanel?.cancelPendingInput()
-        candidateGrid?.hide()
-        toolbarPanel?.hide()
+        hideKeyboardOverlays()
         stopClipboardObservation()
         clearInlineSuggestions()
         super.onFinishInputView(finishingInput)
@@ -472,14 +568,19 @@ class UzumiInputMethodService : InputMethodService() {
     override fun onFinishInput() {
         inputViewVisible = false
         keyboardPanel?.cancelPendingInput()
-        candidateGrid?.hide()
-        toolbarPanel?.hide()
+        hideKeyboardOverlays()
         stopClipboardObservation()
         closeSession()
         clearInlineSuggestions()
         currentPolicy = null
         refreshCandidates()
         super.onFinishInput()
+    }
+
+    /** IME windowが隠れたとき、キーボード面に重ねた一覧・パネルと編集パネルの選択モードを解放する。 */
+    override fun onWindowHidden() {
+        hideKeyboardOverlays()
+        super.onWindowHidden()
     }
 
     /**
@@ -573,6 +674,7 @@ class UzumiInputMethodService : InputMethodService() {
     /** キーボード操作を現在の編集セッションへ一度だけ送る。 */
     private fun handleKeyboardAction(action: KeyboardAction) {
         val current = session ?: return
+        current.setHiddenCandidateSurfaces(HiddenCandidateStores.get(this).all())
         OperationClassifier.keyboardAction(action, current.isLiveMode)?.let(evaluation::record)
         // Backspaceは連続削除をまとめ、絵文字一覧の開閉中は削除Undoを保ち、ほかの編集操作で記録を終える。
         if (action != KeyboardAction.Delete && action != KeyboardAction.DeleteToLineStart &&
@@ -641,6 +743,7 @@ class UzumiInputMethodService : InputMethodService() {
     private fun deliverLiveResult(sessionEpoch: Long, result: LiveResult) {
         val current = session ?: return
         if (current.sessionEpoch != sessionEpoch) return
+        current.setHiddenCandidateSurfaces(HiddenCandidateStores.get(this).all())
         if (current.applyLiveResult(result)) {
             lastAppliedLive = result.identity to System.nanoTime()
             refreshCandidates()
@@ -681,6 +784,7 @@ class UzumiInputMethodService : InputMethodService() {
     private fun deliverCandidateResult(sessionEpoch: Long, result: CandidateResult) {
         val current = session ?: return
         if (current.sessionEpoch != sessionEpoch) return
+        current.setHiddenCandidateSurfaces(HiddenCandidateStores.get(this).all())
         if (current.applyLiveCandidates(result)) refreshCandidates()
     }
 
@@ -689,6 +793,13 @@ class UzumiInputMethodService : InputMethodService() {
         val current = session ?: return
         if (current.sessionEpoch != result.request.sessionEpoch) return
         if (current.applyPredictionResult(result)) refreshCandidates()
+    }
+
+    /** Mozcが部分確定した読みだけを同じ編集世代へ反映する。 */
+    private fun deliverPredictionCommitResult(result: PredictionCommitResult) {
+        val current = session ?: return
+        if (current.sessionEpoch != result.request.sessionEpoch) return
+        if (current.applyPredictionCommitResult(result)) refreshCandidates()
     }
 
     /** 訂正中のsegmentの表示範囲へ背景色を付け、どのsegmentを直しているかをEditor上で示す。 */
@@ -720,20 +831,31 @@ class UzumiInputMethodService : InputMethodService() {
         keyboardPanel?.setAutoCapsMode(autoCapsMode)
     }
 
-    /** IME表示中だけクリップボード変更を監視し、期限付きの一時候補を更新する。 */
+    /** IME表示中だけクリップボード変更を監視し、貼り付け提案と履歴を更新する。 */
     private fun startClipboardObservation() {
         val manager = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager ?: return
         val observer = recentClipboard ?: RecentClipboard(manager, onClipboardChanged = {
+            val identity = recentClipboard?.currentHistoryIdentity()
+            val capturePolicy = clipboardHistoryCapturePolicy()
+            val historyEnabled = UzumiSettings.isClipboardHistoryEnabled(this)
+            val visibleAtChange = inputViewVisible
             mainHandler.post {
+                // OFFの間も本文を読まずに処理済みとして記録し、ONへ戻した後に保存しないようにする。
+                if (identity != null && visibleAtChange) {
+                    captureClipboardHistory(identity, capturePolicy, historyEnabled)
+                }
                 if (inputViewVisible) refreshClipboardSuggestion()
             }
         }).also { recentClipboard = it }
         if (observer.startObserving()) {
+            captureClipboardHistory()
+            scheduleClipboardHistoryExpiry()
             refreshClipboardSuggestion()
         } else {
             clipboardSuggestion = null
             clipboardSuggestionSessionEpoch = null
             refreshCandidates()
+            refreshEditPanelState()
         }
     }
 
@@ -755,18 +877,164 @@ class UzumiInputMethodService : InputMethodService() {
                     clipboardSuggestionSessionEpoch = null
                     clipboardExpiry = null
                     refreshCandidates()
+                    refreshEditPanelState()
                 }
             }
             clipboardExpiry = expiry
             mainHandler.postDelayed(expiry, (suggestion.expiresAtMillis - System.currentTimeMillis()).coerceAtLeast(0L))
         }
         refreshCandidates()
+        refreshEditPanelState()
     }
 
-    /** キーボード非表示時に監視・期限処理・本文を参照できる候補を破棄する。 */
+    /** キーボード非表示時にclipboard監視と提案を止め、履歴期限timerは継続する。 */
     private fun stopClipboardObservation() {
         recentClipboard?.close()
         clearClipboardSuggestion()
+        clipboardHistorySessionEpoch = null
+        clipboardHistoryPanel?.hide()
+        refreshEditPanelState()
+    }
+
+    /** clip通知時に観測したpolicyと識別情報を使い、機密本文や遅れて変わった欄の条件を持ち込まない。 */
+    private fun captureClipboardHistory(
+        observedIdentity: ClipboardHistoryIdentity? = null,
+        capturePolicy: ClipboardHistoryCapturePolicy = clipboardHistoryCapturePolicy(),
+        historyEnabledAtChange: Boolean = UzumiSettings.isClipboardHistoryEnabled(this),
+    ) {
+        val observer = recentClipboard
+        val identity = observedIdentity ?: observer?.currentHistoryIdentity() ?: return
+        val store = clipboardHistoryStore
+        if (store.wasHandled(identity)) return
+        if (!historyEnabledAtChange || ClipboardHistoryRules.copiedBeforeEnabled(
+                identity.timestamp,
+                UzumiSettings.clipboardHistoryEnabledSinceMillis(this),
+            )
+        ) {
+            store.markHandled(identity)
+            return
+        }
+
+        val mayStoreText = ClipboardHistoryRules.mayStoreText(
+            clipboardSensitive = identity.clipboardSensitive,
+            capturePolicy = capturePolicy,
+        )
+        if (!mayStoreText || evaluation.isRecording || !UzumiSettings.isClipboardHistoryEnabled(this) ||
+            !inputViewVisible || session?.isActive != true || observer == null
+        ) {
+            store.markHandled(identity)
+        } else {
+            val text = observer.readForHistory(identity, sensitiveField = capturePolicy.sensitiveField)
+            if (text == null) store.markHandled(identity) else store.add(identity, text)
+        }
+        scheduleClipboardHistoryExpiry()
+        if (clipboardHistoryPanel?.isShowing == true) refreshClipboardHistoryPanel()
+    }
+
+    /** clipboard listenerが届いた時点の欄・学習・評価状態を本文なしで記録する。 */
+    private fun clipboardHistoryCapturePolicy(): ClipboardHistoryCapturePolicy {
+        return ClipboardHistoryRules.capturePolicy(currentPolicy, evaluation.isRecording)
+    }
+
+    /** 履歴パネルを開ける表示状態、設定、入力欄、評価状態かを一か所で確認する。 */
+    private fun canShowClipboardHistory(): Boolean {
+        val current = session
+        return inputViewVisible && current?.isActive == true &&
+            ClipboardHistoryRules.mayShowHistory(
+                current.policy,
+                historyEnabled = UzumiSettings.isClipboardHistoryEnabled(this),
+                evaluationRecording = evaluation.isRecording,
+            )
+    }
+
+    /** キーボード面へ履歴を重ね、候補一覧や機能一覧とは同時に表示しない。 */
+    private fun showClipboardHistory() {
+        if (!canShowClipboardHistory()) return
+        hideKeyboardOverlays(except = KeyboardOverlay.CLIPBOARD_HISTORY)
+        clipboardHistorySessionEpoch = session?.sessionEpoch
+        refreshClipboardHistoryPanel()
+    }
+
+    /** 現在の履歴をパネルへ反映し、各ボタンを同じ編集セッションへ結び付ける。 */
+    private fun refreshClipboardHistoryPanel() {
+        val panel = clipboardHistoryPanel ?: return
+        val current = session
+        val epoch = clipboardHistorySessionEpoch
+        if (!panel.isShowing && epoch == null) return
+        if (!canShowClipboardHistory() || current == null || epoch != current.sessionEpoch) {
+            panel.hide()
+            clipboardHistorySessionEpoch = null
+            return
+        }
+        panel.show(
+            items = clipboardHistoryStore.readItems(),
+            onPaste = { item -> pasteClipboardHistoryItem(item, current.sessionEpoch) },
+            onPin = { item, pinned -> setClipboardHistoryPinned(item, pinned, current.sessionEpoch) },
+            onDelete = { item -> deleteClipboardHistoryItem(item, current.sessionEpoch) },
+            onClearAll = { confirmClearClipboardHistory(current.sessionEpoch) },
+            onClose = {
+                panel.hide()
+                clipboardHistorySessionEpoch = null
+            },
+        )
+        scheduleClipboardHistoryExpiry()
+    }
+
+    /** 期限切れでない同一履歴項目を、変換や学習を通さない既存の貼り付け経路へ渡す。 */
+    private fun pasteClipboardHistoryItem(item: ClipboardHistoryItem, sessionEpoch: Long) {
+        val current = session ?: return
+        if (!canShowClipboardHistory() || current.sessionEpoch != sessionEpoch) return
+        val stored = clipboardHistoryStore.readItems().firstOrNull {
+            it.text == item.text && it.copiedAtMillis == item.copiedAtMillis
+        } ?: return
+        if (!current.pasteText(stored.text)) return
+        clipboardHistoryPanel?.hide()
+        clipboardHistorySessionEpoch = null
+        scheduleConversionTimeout(current)
+        refreshCandidates()
+    }
+
+    /** 選んだ履歴の固定状態を更新し、期限切れを含む最新一覧を再描画する。 */
+    private fun setClipboardHistoryPinned(item: ClipboardHistoryItem, pinned: Boolean, sessionEpoch: Long) {
+        if (!canShowClipboardHistory() || session?.sessionEpoch != sessionEpoch) return
+        clipboardHistoryStore.setPinned(item.text, pinned)
+        refreshClipboardHistoryPanel()
+    }
+
+    /** 選んだ履歴を削除し、現在clipの処理済み識別情報を維持する。 */
+    private fun deleteClipboardHistoryItem(item: ClipboardHistoryItem, sessionEpoch: Long) {
+        if (!canShowClipboardHistory() || session?.sessionEpoch != sessionEpoch) return
+        clipboardHistoryStore.delete(item.text)
+        refreshClipboardHistoryPanel()
+    }
+
+    /** 全削除前に確認し、同じ現在clipが次回表示時に再追加されないよう識別情報を残す。 */
+    private fun confirmClearClipboardHistory(sessionEpoch: Long) {
+        if (!canShowClipboardHistory() || session?.sessionEpoch != sessionEpoch) return
+        clipboardHistoryPanel?.showClearConfirmation {
+            if (canShowClipboardHistory() && session?.sessionEpoch == sessionEpoch) {
+                clipboardHistoryStore.clearAll(recentClipboard?.currentHistoryIdentity())
+                refreshClipboardHistoryPanel()
+                scheduleClipboardHistoryExpiry()
+            }
+        }
+    }
+
+    /** 未固定履歴の最古期限に合わせ、IME非表示や設定OFFでもサービス中は自動削除を続ける。 */
+    private fun scheduleClipboardHistoryExpiry() {
+        clipboardHistoryExpiry?.let(mainHandler::removeCallbacks)
+        clipboardHistoryExpiry = null
+        val nextExpiry = clipboardHistoryStore.nextExpiryMillis() ?: return
+        val expiry = Runnable {
+            clipboardHistoryExpiry = null
+            clipboardHistoryStore.readItems()
+            if (clipboardHistoryPanel?.isShowing == true) {
+                refreshClipboardHistoryPanel()
+            }
+            scheduleClipboardHistoryExpiry()
+        }
+        clipboardHistoryExpiry = expiry
+        mainHandler.postDelayed(expiry, (nextExpiry - System.currentTimeMillis()).coerceAtLeast(0L))
     }
 
     /** 設定値を変えず、キーボード最小高を残した画面内のバー段数上限を返す。 */
@@ -801,16 +1069,23 @@ class UzumiInputMethodService : InputMethodService() {
      * 入力していない間は、設定への入口と案内、キーボードを閉じるボタンを出す。
      */
     private fun refreshCandidates() {
+        if (evaluation.isRecording) {
+            clipboardHistoryPanel?.hide()
+            clipboardHistorySessionEpoch = null
+            hideEditPanel()
+        }
         keyboardPanel?.setComposing(session?.hasComposition == true)
         keyboardPanel?.setSegmentResizable(session?.canResizeSegment == true)
         val row = candidateRow ?: return
         val views = barViews ?: return
         val leading = barLeading ?: return
         val trailing = barTrailing ?: return
+        if (evaluation.isRecording) candidateActionPanel?.hide()
         row.removeAllViews()
         leading.removeAllViews()
         trailing.removeAllViews()
         val current = session
+        current?.setHiddenCandidateSurfaces(HiddenCandidateStores.get(this).all())
         // 評価の記録中は予測を出さず、操作数を予測導入前と同じ条件で数える。
         val predictionsShown = !evaluation.isRecording
         if (predictionsShown) current?.refreshPredictions()
@@ -822,18 +1097,24 @@ class UzumiInputMethodService : InputMethodService() {
                 refreshCandidates()
             })
         }
-        val predictions = current?.predictionResult()?.takeIf { predictionsShown }?.let { result ->
-            result.candidates.map { candidate -> predictionEntry(current, result, candidate) }
-        }.orEmpty()
+        val barLayout = current?.takeIf { predictionsShown }?.predictionBarLayout()
+        val listLayout = current?.takeIf { predictionsShown }?.predictionLayout()
         val regularEntries = if (current?.isLiveMode == true) liveEntries(current, leading, trailing) else explicitEntries(current)
-        val entries = predictions + regularEntries.mapIndexed { index, entry ->
-            CandidateEntry(
-                label = entry.label,
-                selected = entry.selected,
-                sectionBreakBefore = predictions.isNotEmpty() && index == 0,
-                onPick = entry.onPick,
-            )
+        // 通常の候補の上位3件の直後に予測を最大2件混ぜ、残りの予測は通常の候補の後ろに置く。通常の候補が無いとき
+        // （次の語の予測）は予測だけが並ぶ。区切りは、予測と通常の候補が切り替わる位置に入れる。
+        val entriesFor = { layout: EditorSession.PredictionLayout? ->
+            val toEntry = { candidate: PredictionCandidate -> predictionEntry(current!!, layout!!.result, candidate) }
+            val top = regularEntries.take(EditorSession.PredictionLayout.MAX_REGULAR_BEFORE_PREDICTIONS)
+            val early = layout?.early.orEmpty().map(toEntry)
+            val rest = regularEntries.drop(top.size)
+            val late = layout?.late.orEmpty().map(toEntry)
+            val ordered = top + early + rest + late
+            ordered.mapIndexed { index, entry ->
+                entry.withSectionBreak(index > 0 && entry.isPrediction != ordered[index - 1].isPrediction)
+            }
         }
+        val entries = entriesFor(barLayout)
+        val listEntries = entriesFor(listLayout)
         // 次の語の予測はInline候補の右に並べるため、Inline候補の表示条件には通常候補だけを使う。
         updateInlineHost(regularEntries.isEmpty() && current != null && InlineAutofillPolicy.shouldShow(
             hasComposition = current.hasComposition,
@@ -876,7 +1157,12 @@ class UzumiInputMethodService : InputMethodService() {
             indexes.forEach { index ->
                 val entry = entries[index]
                 if (entry.sectionBreakBefore && index != indexes.first()) candidateLine.addView(views.divider())
-                candidateLine.addView(views.item(entry.label, entry.selected, entry.isPrediction) { pickCandidate(current, entry, index) }.apply {
+                candidateLine.addView(views.item(
+                    entry.label,
+                    entry.selected,
+                    entry.isPrediction,
+                    onLongClick = { openCandidateActionMenu(current, entry) },
+                ) { pickCandidate(current, entry, index) }.apply {
                     maxLines = 1
                 })
             }
@@ -900,8 +1186,18 @@ class UzumiInputMethodService : InputMethodService() {
         // 縦線は右端の固定ボタン（末尾・∨）すべての手前に置き、候補の列がそこで終わることを示す
         trailing.addView(views.divider(), 0)
         if (regularEntries.isEmpty() && current?.hasComposition != true) {
-            // 確定後の次の語の予測だけを並べている間は、待機中と同じくキーボードを閉じる操作を残す。
-            grid?.hide()
+            // 次の語の予測がバーの上限を超えた場合は一覧を開けるようにし、キーボードを閉じる操作も残す。
+            if (listEntries.size > entries.size) {
+                trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
+                    evaluation.record(OperationKind.OTHER)
+                    hideKeyboardOverlays(except = KeyboardOverlay.CANDIDATE_GRID)
+                    if (grid?.isShowing == true) grid.hide() else showCandidateGrid(current, listEntries)
+                    refreshCandidates()
+                })
+                if (grid?.isShowing == true) showCandidateGrid(current, listEntries)
+            } else {
+                grid?.hide()
+            }
             trailing.addView(views.symbolButton("⌄", getString(R.string.close_keyboard)) {
                 evaluation.record(OperationKind.OTHER)
                 requestHideSelf(0)
@@ -912,11 +1208,11 @@ class UzumiInputMethodService : InputMethodService() {
         }
         trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
             evaluation.record(OperationKind.OTHER)
-            toolbarPanel?.hide()
+            hideKeyboardOverlays(except = KeyboardOverlay.CANDIDATE_GRID)
             if (grid?.isShowing == true) {
                 grid.hide()
             } else {
-                showCandidateGrid(current, entries)
+                showCandidateGrid(current, listEntries)
                 // ライブ変換では、一覧を開いた文節の候補を明示変換と同じだけ取り直す。届いたら一覧を描き直す。
                 if (current?.isLiveMode == true && session === current) current.requestLiveCandidates()
             }
@@ -925,7 +1221,7 @@ class UzumiInputMethodService : InputMethodService() {
         addToolbarEntry(trailing, current)
         resizeCandidateBar(effectiveRows.second)
         // 一覧を開いたまま候補が変わった場合は、一覧も新しい候補で描き直す
-        if (grid?.isShowing == true) showCandidateGrid(current, entries)
+        if (grid?.isShowing == true) showCandidateGrid(current, listEntries)
     }
 
     /** 候補バーを設定に応じた段数の高さで表示する。候補が少なくても高さを変えず、キーボードの上下動を防ぐ。 */
@@ -976,7 +1272,7 @@ class UzumiInputMethodService : InputMethodService() {
         val views = barViews ?: return
         trailing.addView(views.symbolButton("▦", getString(R.string.toolbar_open)) {
             val panel = toolbarPanel ?: return@symbolButton
-            candidateGrid?.hide()
+            hideKeyboardOverlays(except = KeyboardOverlay.TOOLBAR)
             if (panel.isShowing) {
                 panel.hide()
             } else {
@@ -995,9 +1291,12 @@ class UzumiInputMethodService : InputMethodService() {
                 // 明示的な貼り付けは60秒の自動提案期限に縛らず、テキストclipがある間は出す。
                 ToolbarAction.PASTE -> current?.isActive == true && inputViewVisible &&
                     (hasCurrentClipboardSuggestion(current) || recentClipboard?.hasCurrentText() == true)
+                ToolbarAction.CLIPBOARD_HISTORY -> canShowClipboardHistory()
                 ToolbarAction.UNDO -> current?.let {
                     it.canUndoDeletion || it.liveCandidateState()?.canUndo == true
                 } == true
+                ToolbarAction.EDIT -> canOpenEditPanel()
+                ToolbarAction.MICROPHONE -> voiceInputMethod != null
                 else -> true
             }
         }
@@ -1007,6 +1306,9 @@ class UzumiInputMethodService : InputMethodService() {
         val current = session
         when (action) {
             ToolbarAction.PASTE -> pasteFromClipboard()
+            ToolbarAction.CLIPBOARD_HISTORY -> showClipboardHistory()
+            ToolbarAction.EDIT -> showEditPanel()
+            ToolbarAction.MICROPHONE -> switchToEnabledVoiceInputMethod()
             ToolbarAction.UNDO -> {
                 evaluation.record(OperationKind.CORRECTION)
                 if (current == null || session !== current) return
@@ -1019,19 +1321,160 @@ class UzumiInputMethodService : InputMethodService() {
             ToolbarAction.USER_DICTIONARY -> startActivity(
                 Intent(this, UserDictionaryActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             )
+            ToolbarAction.TEMPLATES -> showTemplatePicker()
             ToolbarAction.SETTINGS -> openSettings()
             ToolbarAction.CLOSE_KEYBOARD -> requestHideSelf(0)
         }
         refreshCandidates()
     }
 
+    /** 各タイルの識別名を、候補バーと設定画面で共通の文言へ変換する。 */
     private fun toolbarActionLabel(action: ToolbarAction): String = when (action) {
         // 本文の冒頭は候補バーの提案だけに出し、機能バーでは同じ本文を重ねて見せない。
         ToolbarAction.PASTE -> getString(R.string.toolbar_paste)
+        ToolbarAction.CLIPBOARD_HISTORY -> getString(R.string.toolbar_clipboard_history)
+        ToolbarAction.EDIT -> getString(R.string.toolbar_edit)
+        ToolbarAction.MICROPHONE -> getString(R.string.toolbar_microphone)
         ToolbarAction.UNDO -> getString(R.string.toolbar_undo)
         ToolbarAction.USER_DICTIONARY -> getString(R.string.open_user_dictionary)
+        ToolbarAction.TEMPLATES -> getString(R.string.toolbar_templates)
         ToolbarAction.SETTINGS -> getString(R.string.open_settings)
         ToolbarAction.CLOSE_KEYBOARD -> getString(R.string.close_keyboard)
+    }
+
+    /** 定型文を別threadで読み込み、タップされた本文を貼り付け経路で入力する。 */
+    private fun showTemplatePicker() {
+        val current = session ?: return
+        val panel = templatePanel ?: return
+        hideKeyboardOverlays(except = KeyboardOverlay.TEMPLATES)
+        panel.showLoading()
+        val executor = conversionExecutor ?: run {
+            panel.hide()
+            return
+        }
+        val expectedSession = current.sessionEpoch
+        try {
+            executor.execute {
+                val templates = runCatching {
+                    UserDictionaries.get(applicationContext).allEntries()
+                        .filter { it.category == UserDictionaryCategory.TEMPLATE }
+                }.getOrDefault(emptyList())
+                mainHandler.post {
+                    if (session !== current || current.sessionEpoch != expectedSession || !inputViewVisible ||
+                        templatePanel !== panel || !panel.isShowing
+                    ) return@post
+                    panel.show(templates) { entry ->
+                        panel.hide()
+                        if (session === current && current.sessionEpoch == expectedSession && !evaluation.isRecording) {
+                            current.pasteText(entry.surface)
+                            refreshCandidates()
+                        }
+                    }
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            panel.hide()
+        }
+    }
+
+    /** 有効な入力方法から、voice modeの有効サブタイプを一つ見つける。 */
+    private fun findEnabledVoiceInputMethod(): Pair<InputMethodInfo, InputMethodSubtype>? {
+        val manager = getSystemService(InputMethodManager::class.java) ?: return null
+        return manager.enabledInputMethodList.asSequence().flatMap { info ->
+            manager.getEnabledInputMethodSubtypeList(info, true).asSequence()
+                .filter { subtype -> subtype.mode.equals("voice", ignoreCase = true) }
+                .map { subtype -> info to subtype }
+        }.firstOrNull()
+    }
+
+    /** 有効な音声入力サブタイプへ切り替え、Uzumi側では録音を行わない。 */
+    private fun switchToEnabledVoiceInputMethod() {
+        val target = voiceInputMethod ?: return
+        hideKeyboardOverlays()
+        switchInputMethod(target.first.id, target.second)
+    }
+
+    /** 現在の欄・表示・評価の状態で編集パネルを開けるかを返す。 */
+    private fun canOpenEditPanel(): Boolean =
+        EditPanelRules.canOpen(session?.isActive == true, inputViewVisible, evaluation.isRecording)
+
+    /** 編集パネルを開き、他のキーボード面overlayを閉じる。 */
+    private fun showEditPanel() {
+        val panel = editPanel ?: return
+        if (panel.isShowing) {
+            hideEditPanel()
+            return
+        }
+        if (!canOpenEditPanel()) return
+        hideKeyboardOverlays(except = KeyboardOverlay.EDIT)
+        session?.refreshSelectionFromEditor()
+        editPanelSelectionMode = false
+        panel.show(
+            isPassword = session?.policy?.isPassword == true,
+            hasSelection = session?.hasEditPanelSelection == true,
+            hasClipboardText = inputViewVisible && recentClipboard?.hasCurrentText() == true,
+            selectionMode = editPanelSelectionMode,
+        )
+    }
+
+    /** 編集パネルを閉じ、選択モードを次回へ持ち越さない。 */
+    private fun hideEditPanel() {
+        editPanelSelectionMode = false
+        editPanel?.hide()
+    }
+
+    /** 表示中の編集パネルへEditor selectionとclipboardの可否を反映する。 */
+    private fun refreshEditPanelState() {
+        val panel = editPanel?.takeIf { it.isShowing } ?: return
+        val current = session?.takeIf { it.isActive }
+        panel.update(
+            isPassword = current?.policy?.isPassword == true,
+            hasSelection = current?.hasEditPanelSelection == true,
+            hasClipboardText = inputViewVisible && recentClipboard?.hasCurrentText() == true,
+            selectionMode = editPanelSelectionMode,
+        )
+    }
+
+    /** 編集パネルのタイル操作を、現在の編集セッションと標準Editor APIへ渡す。 */
+    private fun handleEditPanelAction(action: EditPanelAction) {
+        if (action == EditPanelAction.CLOSE) {
+            hideEditPanel()
+            return
+        }
+        if (action == EditPanelAction.TOGGLE_SELECTION) {
+            editPanelSelectionMode = !editPanelSelectionMode
+            refreshEditPanelState()
+            return
+        }
+        if (evaluation.isRecording) {
+            hideEditPanel()
+            return
+        }
+        val current = session?.takeIf { it.isActive } ?: return
+        when (action) {
+            EditPanelAction.LEFT -> current.moveEditPanelHorizontally(-1, editPanelSelectionMode)
+            EditPanelAction.RIGHT -> current.moveEditPanelHorizontally(1, editPanelSelectionMode)
+            EditPanelAction.UP -> current.sendEditPanelKeyStroke(
+                KeyEvent.KEYCODE_DPAD_UP,
+                if (editPanelSelectionMode) KeyEvent.META_SHIFT_ON else 0,
+            )
+            EditPanelAction.DOWN -> current.sendEditPanelKeyStroke(
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                if (editPanelSelectionMode) KeyEvent.META_SHIFT_ON else 0,
+            )
+            EditPanelAction.SELECT_ALL -> current.performEditPanelContextAction(EditPanelContextAction.SELECT_ALL)
+            EditPanelAction.COPY -> current.performEditPanelContextAction(EditPanelContextAction.COPY)
+            EditPanelAction.CUT -> current.performEditPanelContextAction(EditPanelContextAction.CUT)
+            EditPanelAction.PASTE -> current.performEditPanelContextAction(EditPanelContextAction.PASTE)
+            EditPanelAction.HOME -> current.sendEditPanelKeyStroke(KeyEvent.KEYCODE_MOVE_HOME)
+            EditPanelAction.END -> current.sendEditPanelKeyStroke(KeyEvent.KEYCODE_MOVE_END)
+            EditPanelAction.DELETE -> current.deleteFromEditPanel()
+            EditPanelAction.TOGGLE_SELECTION, EditPanelAction.CLOSE -> return
+        }
+        scheduleConversionTimeout(current)
+        updateAutoCaps()
+        refreshCandidates()
+        refreshEditPanelState()
     }
 
     /** ✕で閉じた提案は同じclipでは再表示せず、通常の候補バーへ戻す。 */
@@ -1062,6 +1505,7 @@ class UzumiInputMethodService : InputMethodService() {
         if (!inputViewVisible || !current.isActive) return
         val observer = recentClipboard ?: return
         val suggestion = clipboardSuggestion?.takeIf { hasCurrentClipboardSuggestion(current) }
+        captureClipboardHistory()
         val text = if (suggestion != null) observer.readForPaste(suggestion) else observer.readCurrentForPaste()
         if (text == null) {
             refreshClipboardSuggestion()
@@ -1081,8 +1525,9 @@ class UzumiInputMethodService : InputMethodService() {
         grid.show(
             values = entries.map { it.label },
             selected = entries.indexOfFirst { it.selected },
-            dividerIndex = entries.indexOfFirst { it.sectionBreakBefore }.takeIf { it >= 0 },
+            dividerIndexes = entries.indices.filter { entries[it].sectionBreakBefore }.toSet(),
             predictionIndexes = entries.indices.filter { entries[it].isPrediction }.toSet(),
+            onLongClick = { index -> openCandidateActionMenu(current, entries[index]) },
         ) { index ->
             grid.hide()
             pickCandidate(current, entries[index], index)
@@ -1097,23 +1542,63 @@ class UzumiInputMethodService : InputMethodService() {
         val height: Int,
     )
 
+    /** キーボード面に重ねる一覧・パネル。同時には一つだけ開き、IME非表示や欄の切り替えではすべて閉じる。 */
+    private enum class KeyboardOverlay { CANDIDATE_GRID, TOOLBAR, TEMPLATES, CLIPBOARD_HISTORY, EDIT, CANDIDATE_ACTION }
+
+    /** 重ねる一覧・パネルをexcept以外すべて閉じる。開く操作の直前と、表示・欄の終了時にこの一か所から呼ぶ。 */
+    private fun hideKeyboardOverlays(except: KeyboardOverlay? = null) {
+        if (except != KeyboardOverlay.CANDIDATE_GRID) candidateGrid?.hide()
+        if (except != KeyboardOverlay.TOOLBAR) toolbarPanel?.hide()
+        if (except != KeyboardOverlay.TEMPLATES) templatePanel?.hide()
+        if (except != KeyboardOverlay.CLIPBOARD_HISTORY) {
+            clipboardHistoryPanel?.hide()
+            clipboardHistorySessionEpoch = null
+        }
+        if (except != KeyboardOverlay.EDIT) hideEditPanel()
+        if (except != KeyboardOverlay.CANDIDATE_ACTION) candidateActionPanel?.hide()
+    }
+
     /** 候補バーの一項目。押したときの操作を持つ。 */
     private class CandidateEntry(
         val label: String,
         val selected: Boolean,
+        val surface: String = label,
+        val learnedReading: String? = null,
         val sectionBreakBefore: Boolean = false,
         // 選ぶとすぐ確定する予測の候補か。選ぶだけの通常候補と見分けられるよう、色を変えて表示する。
         val isPrediction: Boolean = false,
         val onPick: () -> Unit,
-    )
+    ) {
+        /** 区切りの有無だけを変えた項目を返す。 */
+        fun withSectionBreak(sectionBreak: Boolean): CandidateEntry = CandidateEntry(
+            label = label,
+            selected = selected,
+            surface = surface,
+            learnedReading = learnedReading,
+            sectionBreakBefore = sectionBreak,
+            isPrediction = isPrediction,
+            onPick = onPick,
+        )
+    }
 
-    /** 予測候補を、選ぶと未確定全体（待機中はカーソル位置）をその語で確定する候補バーの項目にする。 */
+    /**
+     * 予測候補を候補バーの項目にする。Mozcの部分key候補は、選択結果を待って残りの読みを反映する。
+     * 選んだときに学習する読み（英語表記を含む）と同じ読みを持たせ、長押しで学習を削除できるようにする。読みの先頭だけを変換する候補は
+     * 確定するまで学習の読みが決まらないため持たせない（その学習は、先頭の読みだけを入力した通常の候補から消せる）。
+     */
     private fun predictionEntry(
         current: EditorSession,
         result: PredictionResult,
         candidate: PredictionCandidate,
-    ): CandidateEntry = CandidateEntry(candidate.value, selected = false, isPrediction = true) {
-        current.selectPrediction(result.request, candidate.id)
+    ): CandidateEntry = CandidateEntry(
+        label = candidate.value,
+        selected = false,
+        surface = candidate.value,
+        learnedReading = (candidate.reading ?: result.request.reading)
+            .takeIf { candidate.partialKey == null && !result.request.isZeroQuery },
+        isPrediction = true,
+    ) {
+        current.selectPrediction(result.request, candidate)
     }
 
     /** 待機中のクリップボード提案を予測候補より左へ置き、本文貼付と提案解除を別々に押せるようにする。 */
@@ -1144,6 +1629,72 @@ class UzumiInputMethodService : InputMethodService() {
         refreshCandidates()
     }
 
+    /** 長押しされた候補の学習行だけを消すか、表記を非表示一覧へ保存する小さな重ねメニューを開く。 */
+    private fun openCandidateActionMenu(shown: EditorSession?, entry: CandidateEntry): Boolean {
+        val current = shown ?: return false
+        if (evaluation.isRecording || current.policy.suppressLearning || session !== current || !inputViewVisible) return false
+        val panel = candidateActionPanel ?: return false
+        val learningStore = LearningStores.peek()
+        val reading = entry.learnedReading
+        val canDeleteLearning = reading != null && learningStore?.contains(reading, entry.surface) == true
+        hideKeyboardOverlays(except = KeyboardOverlay.CANDIDATE_ACTION)
+        panel.show(
+            canDeleteLearning = canDeleteLearning,
+            onDeleteLearning = {
+                if (session === current && reading != null && !evaluation.isRecording && !current.policy.suppressLearning) {
+                    removeLearnedCandidate(current, reading, entry.surface)
+                } else {
+                    refreshCandidates()
+                }
+            },
+            onHideCandidate = {
+                if (session === current && !evaluation.isRecording && !current.policy.suppressLearning) {
+                    hideCandidateSurface(current, entry.surface)
+                } else {
+                    refreshCandidates()
+                }
+            },
+        )
+        return true
+    }
+
+    /**
+     * 学習行とMozcの履歴の削除を変換worker threadで行い、現セッションに残る同じ由来の候補も取り除く。
+     * 学習禁止欄と評価の記録中はworkerが何もしない。
+     */
+    private fun removeLearnedCandidate(current: EditorSession, reading: String, surface: String) {
+        val worker = conversionWorker ?: return refreshCandidates()
+        worker.deleteLearning(
+            sessionEpoch = current.sessionEpoch,
+            reading = reading,
+            surface = surface,
+            learningAllowed = !evaluation.isRecording && !current.policy.suppressLearning,
+        ) { removed ->
+            mainHandler.post {
+                if (session === current) {
+                    if (removed) current.removeLearnedCandidate(reading, surface)
+                    refreshCandidates()
+                }
+            }
+        }
+    }
+
+    /** 非表示表記をworker threadで保存し、同じ欄の候補と表示値へすぐ反映する。 */
+    private fun hideCandidateSurface(current: EditorSession, surface: String) {
+        Thread({
+            if (!evaluation.isRecording && !current.policy.suppressLearning) {
+                val store = HiddenCandidateStores.get(applicationContext)
+                store.hide(surface)
+                mainHandler.post {
+                    if (session === current) {
+                        current.setHiddenCandidateSurfaces(store.all())
+                        refreshCandidates()
+                    }
+                }
+            }
+        }, "uzumi-candidate-hide").start()
+    }
+
     /** 明示変換の候補（変換結果、または読みのかな・カナ）を並べる。 */
     private fun explicitEntries(current: EditorSession?): List<CandidateEntry> {
         if (current == null) return emptyList()
@@ -1151,7 +1702,13 @@ class UzumiInputMethodService : InputMethodService() {
         return current.candidateOptions().map { option ->
             val choice = option.conversionChoice
             val label = if (choice != null) option.value else getString(R.string.candidate_button_label, option.value, option.label)
-            CandidateEntry(label, selected = choice != null && option.selected) {
+            CandidateEntry(
+                label = label,
+                selected = choice != null && option.selected,
+                surface = option.value,
+                // 長押しメニューは学習記録の有無で削除項目を出すため、Mozcの候補と同じ表記の学習語も照合できる読みを渡す。
+                learnedReading = option.learningLookupReading,
+            ) {
                 if (choice != null) {
                     current.selectConversionCandidate(choice)
                     scheduleConversionTimeout(current)
@@ -1164,18 +1721,12 @@ class UzumiInputMethodService : InputMethodService() {
 
     /**
      * ライブ変換の候補を並べ、対象segmentの現在の表記を選択中として示す。過去segmentを訂正中は、左端に読みの札、
-     * 右端に「末尾」を出す。直前の操作を取り消せるときは左端に「元に戻す」を出す。
+     * 右端に「末尾」を出す。ライブ変換の取り消し（候補の選び直し・文節の伸縮など）は候補の幅を削らないよう
+     * 候補バーにチップを出さず、機能バーと機能一覧の「元に戻す」タイルで行う。
      */
     private fun liveEntries(current: EditorSession, leading: LinearLayout, trailing: LinearLayout): List<CandidateEntry> {
         val views = barViews ?: return emptyList()
         val state = current.liveCandidateState() ?: return emptyList()
-        if (state.canUndo && !current.canUndoDeletion) {
-            leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.live_undo), true) {
-                evaluation.record(OperationKind.CORRECTION)
-                if (session === current) current.undoLive()
-                refreshCandidates()
-            })
-        }
         if (!state.focusAtInput) {
             state.focusedReading?.let { reading ->
                 leading.addView(views.chip(reading, getString(R.string.live_focused_reading, reading), false, null))
@@ -1187,7 +1738,12 @@ class UzumiInputMethodService : InputMethodService() {
             })
         }
         return state.choices.map { choice ->
-            CandidateEntry(choice.value, selected = choice.value == state.currentValue) { current.selectLiveCandidate(choice) }
+            CandidateEntry(
+                label = choice.value,
+                selected = choice.value == state.currentValue,
+                surface = choice.value,
+                learnedReading = choice.learnedReading,
+            ) { current.selectLiveCandidate(choice) }
         }
     }
 
@@ -1346,6 +1902,9 @@ class UzumiInputMethodService : InputMethodService() {
 
         /** キーボードパネル外周（dp）。 */
         const val KEYBOARD_PANEL_PADDING_DP = 4
+
+        /** 背景画像があるとき、候補バーの地に残す最小の不透明度。キーを透かしても候補の文字を読めるようにする（試作と同じ55%）。 */
+        const val MIN_BAR_ALPHA_WITH_IMAGE = 0.55f
 
         /** 設定時は両バー最大6段。表示時は画面高に応じて制限する。 */
         const val MAX_VISIBLE_BAR_ROWS = 6

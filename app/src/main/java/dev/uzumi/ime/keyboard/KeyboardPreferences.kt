@@ -14,6 +14,10 @@ data class KeyboardPreferences(
     val keySound: Boolean = false,
     /** 削除キーの左ドラッグで行頭まで消す操作を使うか。 */
     val deleteDrag: Boolean = true,
+    /** きせかえ（配色、背景画像、キーの形、フリックの表示）。 */
+    val appearance: KeyboardAppearance = KeyboardAppearance(),
+    /** フリックの判定幅、長押しの時間、トグルの区切り。 */
+    val input: InputTuning = InputTuning(),
 ) {
     /** QWERTYの1行の高さ（dp）。既定の比（53:66）を保ち、5行で他の面の4行とほぼ同じ高さにする。 */
     val qwertyRowHeightDp: Float

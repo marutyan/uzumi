@@ -33,17 +33,24 @@ object LearningRules {
     const val MAX_SURFACE_LENGTH = 50
 
     /**
-     * 読みと表記が学習の対象か。表記がひらがなだけのもの、ASCIIだけのもの、読みと同じもの、
-     * 長すぎるもの、保存形式の区切り（タブ・改行）を含むものは覚えない。
-     * ただしASCIIだけの顔文字（「(^_^)」など）は、選んだ回数で候補の順位を上げるために覚える。
+     * 読みと表記が学習の対象か。表記がひらがなだけのもの、読みと同じもの、長すぎるもの、
+     * 保存形式の区切り（タブ・改行）を含むものは覚えない。ASCII語は通常の記録では除外し、辞書候補に限り許可する。
+     * ASCIIだけの顔文字（「(^_^)」など）は、選んだ回数で候補の順位を上げるために覚える。
      */
-    fun isLearnable(reading: String, surface: String): Boolean {
+    fun isLearnable(reading: String, surface: String, allowEnglishWord: Boolean = false): Boolean {
         if (reading.isEmpty() || surface.isEmpty() || surface == reading) return false
         if (surface.length > MAX_SURFACE_LENGTH) return false
         if (listOf(reading, surface).any { text -> text.any { it == '\t' || it == '\n' || it == '\r' } }) return false
-        if (surface.all { it.code < 0x80 } && !EmoticonText.isEmoticon(surface)) return false
+        if (surface.all { it.code < 0x80 } && !EmoticonText.isEmoticon(surface) &&
+            !(allowEnglishWord && isEnglishWord(surface))
+        ) return false
         return !surface.all { it in '\u3041'..'\u309F' || it == 'ー' }
     }
+
+    /** 英字を含み、辞書候補として保存できるASCII英単語かを判定する。 */
+    fun isEnglishWord(surface: String): Boolean =
+        surface.any { it in 'A'..'Z' || it in 'a'..'z' } &&
+            surface.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it in " -.+#&'" }
 }
 
 /**
@@ -99,6 +106,11 @@ class LearningStore(
         recordLocked(reading, surface, isPhrase = false, createIfMissing = true)
     }
 
+    /** 同梱英語辞書から選ばれた英単語だけ、通常のASCII拒否を保ったまま学習へ記録する。 */
+    fun recordEnglishVariant(reading: String, surface: String): Boolean = synchronized(lock) {
+        recordLocked(reading, surface, isPhrase = false, createIfMissing = true, allowEnglishWord = true)
+    }
+
     /**
      * 確定単位の中で続いたsegmentを連結した句を記録する。createIfMissingがfalseなら、既に覚えている句の
      * 時刻と回数だけを更新し、新しい句は作らない。記録しなければfalseを返す。
@@ -111,8 +123,14 @@ class LearningStore(
      * 読みと表記を記録する共通の処理。lockを持った状態で呼ぶ。既にある語は、句かどうかを作ったときのまま保ち、
      * 時刻と回数だけを更新する。句かどうかは上限の数え方にだけ使うためである。
      */
-    private fun recordLocked(reading: String, surface: String, isPhrase: Boolean, createIfMissing: Boolean): Boolean {
-        if (!enabled || !LearningRules.isLearnable(reading, surface)) return false
+    private fun recordLocked(
+        reading: String,
+        surface: String,
+        isPhrase: Boolean,
+        createIfMissing: Boolean,
+        allowEnglishWord: Boolean = false,
+    ): Boolean {
+        if (!enabled || !LearningRules.isLearnable(reading, surface, allowEnglishWord)) return false
         val existing = byReading[reading]
         val index = existing?.indexOfFirst { it.surface == surface } ?: -1
         val now = clock()
@@ -157,6 +175,11 @@ class LearningStore(
     /** 保存している全語を、scoreの高い順に返す。設定画面で一覧を表示するために使う。 */
     fun allWords(): List<LearnedWord> = synchronized(lock) {
         byReading.values.flatten().sortedByDescending { it.score }
+    }
+
+    /** 読みと表記の組を学習済みか調べ、候補の長押しメニューに削除項目を出すか決める。 */
+    fun contains(reading: String, surface: String): Boolean = synchronized(lock) {
+        byReading[reading]?.any { it.surface == surface } == true
     }
 
     /** 一語を削除してすぐに保存する。無ければfalseを返す。 */
@@ -253,7 +276,10 @@ class LearningStore(
             }
             val lastUsed = columns[2].toLongOrNull() ?: continue
             val count = columns[3].toIntOrNull()?.takeIf { it > 0 } ?: continue
-            if (!LearningRules.isLearnable(columns[0], columns[1])) continue
+            if (!LearningRules.isLearnable(
+                    columns[0], columns[1], allowEnglishWord = LearningRules.isEnglishWord(columns[1]),
+                )
+            ) continue
             val words = byReading.getOrPut(columns[0]) { mutableListOf() }
             if (words.any { it.surface == columns[1] }) continue
             words += LearnedWord(columns[0], columns[1], lastUsed, count, isPhrase)
