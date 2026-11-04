@@ -27,7 +27,7 @@ ROW_COLUMNS = [
     "condition", "task_id", "category", "reading_chars", "correct", "no_intervention", "keys", "commits",
     "corrections", "terminators", "display_changes", "flicker", "stable_overwrites", "chosen_overwrites",
     "stale_results_discarded", "to_stable", "to_chosen", "to_provisional", "elapsed_ms", "sent_presses",
-    "input_mismatch", "aligned_elapsed_ms", "fix_steps", "status",
+    "input_mismatch", "aligned_elapsed_ms", "fix_steps", "status", "commit_enters",
 ]
 
 CATEGORY_ORDER = ["通常文", "同音異義語", "名前", "数値", "URL", "長文", "過去訂正", "句点なし", "英語混在"]
@@ -68,6 +68,13 @@ def load_results(path: Path, readings: Dict[str, str]) -> List[dict]:
                 row[name] = counts[name]
         # 送った押下の数とIMEが数えた押下（キー操作数と終端操作）の差。0でなければ入力の欠落・二重入力の疑い。
         row["input_mismatch"] = record["sent_presses"] - counts["keys"] - counts["terminators"]
+        # 道具の版4：過去訂正の条件Oで確定だけのために送った改行キーは、IMEの計数では終端操作だが、評価条件では
+        # 確定操作である。その回数だけ終端操作から確定操作へ移す（確定操作はキー操作数にも入る）。版3以前の行は0。
+        commit_enters = record.get("commit_enters", 0)
+        row["commit_enters"] = commit_enters
+        row["keys"] += commit_enters
+        row["commits"] += commit_enters
+        row["terminators"] -= commit_enters
         rows.append(row)
     # 計数を始める前の中断から同じ課題を続けた場合は、完了した行だけを残す。
     done = {r["task_id"] for r in rows if r["status"] == "ok"}

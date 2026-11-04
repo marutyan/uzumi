@@ -605,6 +605,9 @@ class TaskResult:
     tool_version: int = TOOL_VERSION
     # 道具の側で測った、課題の準備から最終文の照合までの実時間（ms）。道具の速さの確認用で、評価の指標ではない。
     wall_ms: int = -1
+    # 過去訂正の条件Oで、未確定の表示を確定するためだけに送った改行キーの回数（版4）。IMEの計数は改行キーを終端操作と
+    # 数えるが、評価条件では確定だけを目的とした追加の押下は確定操作であるため、集計で終端操作から確定操作へ移す。
+    commit_enters: int = 0
 
 
 # 開発時の確認用。設定すると表示と候補を標準エラーへ出す（本番の測定では設定しない）。
@@ -712,8 +715,8 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all:
 
     注目文節の候補のうち目標の残りの接頭辞になる最長の候補を、その文節の正しい表記とみなす（版3と同じ）。
     版4では、アプリの明示変換の操作（commit `8c4c989`以降）に合わせる。候補を選んでも注目文節の表記が変わるだけで、
-    文節は確定せず、注目も動かない。そこで、注目文節に正しい表記が出ていれば「→」で次の文節へ移り、出ていなければ
-    その候補を選ぶ（第一候補なら確定操作、他は訂正操作）。「→」は計数では訂正操作になる。
+    文節は確定せず、注目も動かない。そこで、注目文節に出ている表記が目標の残りの接頭辞なら「→」で次の文節へ移り、
+    そうでなければその候補を選ぶ（第一候補なら確定操作、他は訂正操作）。「→」は計数では訂正操作になる。
     表示全体が目標と一致したら終える。[commit_all]がtrueなら（句点を読みに含めて入力した過去訂正の課題）、
     未確定の表示を確定するために改行キーを1回押す（計数では終端操作になる）。
     候補の全範囲に目標が無ければ、注目文節の区切りを伸縮する規則（plan_explicit_resize）を試す。[reading]は
@@ -754,10 +757,9 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all:
             current = chosen
         else:
             current = next((v for v in sorted(values, key=len, reverse=True) if display.startswith(v)), None)
-        choice = pick_prefix(values, rest)
-        source = snap.candidates
-        seen = set(values)
-        if choice is not None and choice[1] == current:
+        # 注目文節に出ている表記が目標の残りの接頭辞なら、その文節は正しいとみなして次の文節へ移る。候補バーに
+        # 出ているかでは決めない（候補一覧から選んだ表記は候補バーに無いことがあり、選び直しを繰り返すため）。
+        if current is not None and any(r.startswith(current) for r in rest):
             if len(committed) + len(current) >= len(snap.field_text):
                 # 最後の文節が正しい表記なのに、表示全体が目標と一致しない。目標の残りを直せる文節が無い。
                 steps.append("no-candidate")
@@ -768,6 +770,9 @@ def fix_explicit(kb: Keyboard, targets: List[str], steps: List[str], commit_all:
             chosen = None
             snap = settle_snapshot(kb)
             continue
+        choice = pick_prefix(values, rest)
+        source = snap.candidates
+        seen = set(values)
         if choice is None and GRID_BUTTON in snap.buttons:
             snap, source, choice = search_grid(kb, snap, lambda values: pick_prefix(values, rest), steps, seen)
         if choice is None:
@@ -1359,7 +1364,8 @@ def run_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
     counts = {name: int(v) if re.fullmatch(r"-?\d+", v) else v for name, v in zip(COUNT_COLUMNS, values)}
     correct = matches(final.field_text, task.accepted)
     result = TaskResult(condition, task.task_id, task.category, correct, counts, steps,
-                        sent_presses=kb.sent, reading_length=len(reading))
+                        sent_presses=kb.sent, reading_length=len(reading),
+                        commit_enters=steps.count("commit-enter"))
     log(f"{condition} {task.task_id} correct={correct} keys={counts.get('keys')} commits={counts.get('commits')} "
         f"corr={counts.get('corrections')} steps={','.join(steps) or '-'} sent={kb.sent}")
     return result
@@ -1386,7 +1392,8 @@ def run_past_task(kb: Keyboard, task: Task, condition: str) -> TaskResult:
     counts = {name: int(v) if re.fullmatch(r"-?\d+", v) else v for name, v in zip(COUNT_COLUMNS, values)}
     correct = matches(final.field_text, task.accepted)
     result = TaskResult(condition, task.task_id, task.category, correct, counts, steps,
-                        sent_presses=kb.sent, reading_length=len(task.reading), aligned_elapsed_ms=aligned)
+                        sent_presses=kb.sent, reading_length=len(task.reading), aligned_elapsed_ms=aligned,
+                        commit_enters=steps.count("commit-enter"))
     log(f"{condition} {task.task_id} correct={correct} keys={counts.get('keys')} commits={counts.get('commits')} "
         f"corr={counts.get('corrections')} aligned_ms={aligned} steps={','.join(steps) or '-'} sent={kb.sent}")
     return result
