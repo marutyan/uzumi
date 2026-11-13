@@ -121,24 +121,29 @@ object UzumiSettings {
             normalize = { value -> value as? BackupJsonValue.BooleanValue },
             apply = { context, value -> setKeyPreview(context, value.booleanValue()!!) },
         ),
+        // 三か所の並びを導入する前の形式の項目。古いバックアップでは、バーに出す機能の一覧（6個以上もありうる）だけを持つ。
+        // アプリ更新時と同じ移行で三か所をまとめて作る。新しいバックアップでは、続く toolbarBar・toolbarRight・toolbarTray が上書きする。
         BackupSettingDescriptor(
             key = "toolbarActions",
             capture = { context -> BackupJsonValue.ArrayValue(toolbarPreferences(context).selectedActions.map { BackupJsonValue.StringValue(it.name) }) },
             normalize = normalize@{ value ->
-                val actionValues = (value as? BackupJsonValue.ArrayValue)?.values
-                    ?: return@normalize null
-                val names = actionValues.map {
-                    (it as? BackupJsonValue.StringValue)?.value ?: return@normalize null
-                }
-                val actions = names.mapNotNull { name -> ToolbarAction.entries.firstOrNull { it.name == name } }
+                val actions = backupActions(value) ?: return@normalize null
+                // 移行で6個目以降を置き場へ回すため、ここでは個数で切らない
+                BackupJsonValue.ArrayValue(
+                    actions.filter { it in ToolbarPreferences.AVAILABLE_ACTIONS }.distinct().map { BackupJsonValue.StringValue(it.name) },
+                )
+            },
+            apply = { context, value -> applyLegacyToolbarActions(context, actionsOf(value)) },
+        ),
+        // バーの中央の並び（最大5個）。
+        BackupSettingDescriptor(
+            key = "toolbarBar",
+            capture = { context -> BackupJsonValue.ArrayValue(toolbarPreferences(context).selectedActions.map { BackupJsonValue.StringValue(it.name) }) },
+            normalize = normalize@{ value ->
+                val actions = backupActions(value) ?: return@normalize null
                 BackupJsonValue.ArrayValue(ToolbarPreferences.normalizeActions(actions).map { BackupJsonValue.StringValue(it.name) })
             },
-            apply = { context, value ->
-                val actions = value.arrayValue()!!.mapNotNull { action ->
-                    ToolbarAction.entries.firstOrNull { it.name == action.stringValue() }
-                }
-                setToolbarActions(context, actions)
-            },
+            apply = { context, value -> setToolbarActions(context, actionsOf(value)) },
         ),
         // 右端の機能。空の文字列は右端なし。
         BackupSettingDescriptor(
@@ -297,6 +302,27 @@ object UzumiSettings {
         val bar = ToolbarPreferences.normalizeActions(actions)
         saveToolbarLayout(context, current.copy(selectedActions = bar, rightAction = current.rightAction?.takeIf { it !in bar }))
     }
+
+    /** 導入前の形式の一覧[legacy]から、アプリ更新時と同じ移行で三か所の並びを作って保存する。段数と区切り線は今の値を保つ。 */
+    private fun applyLegacyToolbarActions(context: Context, legacy: List<ToolbarAction>) {
+        val migrated = ToolbarPreferences.migrateFromBarActions(legacy)
+        saveToolbarLayout(context, toolbarPreferences(context).copy(
+            selectedActions = migrated.selectedActions,
+            rightAction = migrated.rightAction,
+            trayActions = migrated.trayActions,
+        ))
+    }
+
+    /** バックアップの機能名の配列を読む。文字列でない要素があれば値全体を拒否し、未知の名前は除く。 */
+    private fun backupActions(value: BackupJsonValue): List<ToolbarAction>? {
+        val values = (value as? BackupJsonValue.ArrayValue)?.values ?: return null
+        val names = values.map { (it as? BackupJsonValue.StringValue)?.value ?: return null }
+        return names.mapNotNull(ToolbarPreferences::decodeAction)
+    }
+
+    /** 正規化済みのバックアップ値から機能の一覧を取り出す。 */
+    private fun actionsOf(value: BackupJsonValue): List<ToolbarAction> =
+        value.arrayValue()!!.mapNotNull { ToolbarPreferences.decodeAction(it.stringValue()!!) }
 
     /** 右端の丸いボタンの機能を保存する。nullで空にする。バーに同じ機能があればバーから外す。 */
     fun setToolbarRight(context: Context, action: ToolbarAction?) {

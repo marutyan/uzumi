@@ -1276,12 +1276,24 @@ class UzumiInputMethodService : InputMethodService() {
 
     /**
      * 候補バーを見せ、機能バーを隠す。入力していない間は、左端に機能タイルを開くボタン、右端に右端の機能の丸を足す。
-     * 入力中は候補を広く使うため、足さない。
+     * 入力中は候補を広く使うため、足さない。ただしライブ変換を取り消せる間は、機能バーが隠れていても
+     * 取り消せるように、左端に元に戻すのボタンだけを足す。
      */
     private fun showCandidateBar(current: EditorSession?, preferences: ToolbarPreferences, composing: Boolean) {
         val toolbar = toolbarViews ?: return
         val leading = barLeading ?: return
         val trailing = barTrailing ?: return
+        if (composing && current?.liveCandidateState()?.canUndo == true) {
+            val undo = barViews?.iconButton(R.drawable.ic_undo, getString(R.string.toolbar_undo)) {
+                handleToolbarAction(ToolbarAction.UNDO)
+            }
+            // アイコンの部品が持つ丸い押下域の大きさは保ち、バーの中で縦の中央に置く
+            undo?.layoutParams = (undo?.layoutParams as? LinearLayout.LayoutParams)?.apply {
+                gravity = Gravity.CENTER_VERTICAL
+                marginStart = (UNDO_BUTTON_MARGIN_DP * resources.displayMetrics.density).toInt()
+            }
+            if (undo != null) leading.addView(undo, 0)
+        }
         if (!composing) {
             leading.addView(toolbar.leftButton(ToolbarMode.NONE, ::openToolbarTiles), 0,
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT))
@@ -2018,6 +2030,9 @@ class UzumiInputMethodService : InputMethodService() {
 
         /** 候補の列の左右の端をぼかす幅（dp）。候補が横へ続くことを示す。 */
         const val CANDIDATE_FADE_DP = 24f
+
+        /** 入力中に出す元に戻すのボタンと、バーの左端との間隔（dp）。 */
+        const val UNDO_BUTTON_MARGIN_DP = 4f
 
         /** 候補以外のUndo・戻る・一覧・機能ボタン用に残す幅（dp）。 */
         const val CANDIDATE_FIXED_WIDTH_DP = 192

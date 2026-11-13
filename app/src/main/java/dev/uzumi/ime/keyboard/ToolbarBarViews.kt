@@ -590,6 +590,8 @@ class ToolbarEditPanel(context: Context) : FrameLayout(context) {
     init {
         setBackgroundColor(views.colors.keyboardBackground)
         visibility = View.GONE
+        // 案内文や左右の余白に触れても、背面のキーへタッチが届かないよう面全体で受け止める
+        isClickable = true
         addView(TextView(context).apply {
             text = context.getString(R.string.toolbar_edit_hint)
             setTextSize(TypedValue.COMPLEX_UNIT_DIP, HINT_TEXT_DP)

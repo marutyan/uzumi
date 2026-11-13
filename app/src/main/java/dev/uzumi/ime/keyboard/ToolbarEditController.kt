@@ -123,12 +123,21 @@ class ToolbarEditController(
 
     override fun onTouch(event: MotionEvent) {
         val current = drag ?: return
+        if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
+            finish(current, cancelled = true)
+            return
+        }
         val index = event.findPointerIndex(current.pointerId)
-        if (index < 0) return
+        // ドラッグしていた指の行方が分からなくなったら、持ち上げた表示を残さないよう取り消す
+        if (index < 0) {
+            finish(current, cancelled = true)
+            return
+        }
         when (event.actionMasked) {
             MotionEvent.ACTION_MOVE -> move(current, event.getRawX(index), event.getRawY(index))
             MotionEvent.ACTION_UP -> finish(current, cancelled = false)
-            MotionEvent.ACTION_CANCEL -> finish(current, cancelled = true)
+            // 別の指を置いたまま、ドラッグしていた指だけを先に離した場合も、その位置で確定する
+            MotionEvent.ACTION_POINTER_UP -> if (event.actionIndex == index) finish(current, cancelled = false)
         }
     }
 

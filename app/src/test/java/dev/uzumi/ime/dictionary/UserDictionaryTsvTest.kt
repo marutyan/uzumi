@@ -227,6 +227,24 @@ class UserDictionaryTsvTest {
         )
     }
 
+    /** 導入前の形式の toolbarActions は移行のため個数で切らず、新しい toolbarBar はバーの上限の5個に収める。 */
+    @Test
+    fun settingsBackupKeepsAllLegacyToolbarActionsButLimitsBar() {
+        val names = listOf(
+            ToolbarAction.PASTE, ToolbarAction.CLIPBOARD_HISTORY, ToolbarAction.UNDO, ToolbarAction.USER_DICTIONARY,
+            ToolbarAction.SETTINGS, ToolbarAction.CLOSE_KEYBOARD, ToolbarAction.TEMPLATES,
+        ).map { BackupJsonValue.StringValue(it.name) }
+        val normalized = UzumiSettings.normalizeBackupSettings(
+            mapOf(
+                "toolbarActions" to BackupJsonValue.ArrayValue(names),
+                "toolbarBar" to BackupJsonValue.ArrayValue(names),
+            ),
+        )
+
+        assertEquals(names, (normalized.getValue("toolbarActions") as BackupJsonValue.ArrayValue).values)
+        assertEquals(names.take(5), (normalized.getValue("toolbarBar") as BackupJsonValue.ArrayValue).values)
+    }
+
     /** 右端の機能・置き場の並び・候補の区切り線のバックアップ値は、未知の機能を除き、型の違う値を拒否する。 */
     @Test
     fun settingsBackupNormalizesToolbarLayoutAndCandidateDividers() {
