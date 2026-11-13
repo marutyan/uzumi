@@ -98,6 +98,8 @@ class SettingsActivity : Activity() {
             UzumiSettings.toolbarPreferences(this).candidateRows,
             UzumiSettings::setCandidateRows,
         ))
+        content.addView(switchRow(R.string.settings_candidate_dividers, R.string.settings_candidate_dividers_description,
+            UzumiSettings.toolbarPreferences(this).candidateDividers) { UzumiSettings.setCandidateDividers(this, it) })
         content.addView(switchRow(
             R.string.settings_clipboard_history,
             R.string.settings_clipboard_history_description,
@@ -593,8 +595,20 @@ class SettingsActivity : Activity() {
                     text = toolbarActionLabel(action)
                     isChecked = action in selected
                     minimumHeight = px(48)
-                    setOnCheckedChangeListener { _, checked ->
-                        if (checked) selected.add(action) else selected.remove(action)
+                    setOnCheckedChangeListener { button, checked ->
+                        when {
+                            !checked -> selected.remove(action)
+                            selected.size >= ToolbarPreferences.BAR_MAX && action !in selected -> {
+                                // バーに置ける数を超える選択は取り消し、理由を知らせる。
+                                button.isChecked = false
+                                Toast.makeText(
+                                    this@SettingsActivity,
+                                    getString(R.string.settings_toolbar_tiles_limit, ToolbarPreferences.BAR_MAX),
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            }
+                            else -> selected.add(action)
+                        }
                     }
                 }
                 val up = Button(this).apply {
@@ -644,9 +658,8 @@ class SettingsActivity : Activity() {
             .setView(scroll)
             .setNegativeButton(android.R.string.cancel, null)
             .setPositiveButton(android.R.string.ok) { _, _ ->
-                val actions = ordered.filter { it in selected }
-                UzumiSettings.setToolbarActions(this, actions)
-                summaryButton.text = toolbarActionSummary(actions)
+                UzumiSettings.setToolbarActions(this, ordered.filter { it in selected })
+                summaryButton.text = toolbarActionSummary(UzumiSettings.toolbarPreferences(this).selectedActions)
             }
             .show()
     }
@@ -689,6 +702,9 @@ class SettingsActivity : Activity() {
         ToolbarAction.TEMPLATES -> getString(R.string.toolbar_templates)
         ToolbarAction.SETTINGS -> getString(R.string.open_settings)
         ToolbarAction.CLOSE_KEYBOARD -> getString(R.string.close_keyboard)
+        ToolbarAction.EMOJI -> getString(R.string.toolbar_emoji)
+        ToolbarAction.KISEKAE -> getString(R.string.toolbar_kisekae)
+        ToolbarAction.HEIGHT -> getString(R.string.toolbar_height)
     }
 
     private fun toolbarActionSummary(actions: List<ToolbarAction>): String =

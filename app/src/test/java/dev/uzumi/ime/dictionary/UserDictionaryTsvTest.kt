@@ -227,6 +227,34 @@ class UserDictionaryTsvTest {
         )
     }
 
+    /** 右端の機能・置き場の並び・候補の区切り線のバックアップ値は、未知の機能を除き、型の違う値を拒否する。 */
+    @Test
+    fun settingsBackupNormalizesToolbarLayoutAndCandidateDividers() {
+        val normalized = UzumiSettings.normalizeBackupSettings(
+            mapOf(
+                "toolbarRight" to BackupJsonValue.StringValue("FUTURE_ACTION"),
+                "toolbarTray" to BackupJsonValue.ArrayValue(
+                    listOf(
+                        BackupJsonValue.StringValue(ToolbarAction.HEIGHT.name),
+                        BackupJsonValue.StringValue("FUTURE_ACTION"),
+                        BackupJsonValue.StringValue(ToolbarAction.HEIGHT.name),
+                    ),
+                ),
+                "candidateDividers" to BackupJsonValue.BooleanValue(false),
+            ),
+        )
+
+        assertEquals(BackupJsonValue.StringValue(""), normalized.getValue("toolbarRight"))
+        assertEquals(
+            listOf(BackupJsonValue.StringValue(ToolbarAction.HEIGHT.name)),
+            (normalized.getValue("toolbarTray") as BackupJsonValue.ArrayValue).values,
+        )
+        assertEquals(BackupJsonValue.BooleanValue(false), normalized.getValue("candidateDividers"))
+        assertThrows(SettingsBackupException::class.java) {
+            UzumiSettings.normalizeBackupSettings(mapOf("candidateDividers" to BackupJsonValue.StringValue("false")))
+        }
+    }
+
     /** 文字列の組をバックアップのJSON objectにする。 */
     private fun stringObject(values: Map<String, String>): BackupJsonValue =
         BackupJsonValue.ObjectValue(values.mapValues { BackupJsonValue.StringValue(it.value) })

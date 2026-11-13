@@ -2,6 +2,8 @@ package dev.uzumi.ime.keyboard
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.text.TextUtils
 import android.view.View
 import android.widget.LinearLayout
@@ -339,6 +341,12 @@ class KeyboardPanel(
         emojiPickerBottomRow?.visibility = View.VISIBLE
     }
 
+    /** 機能タイルから一覧を開く。記号面へ切り替えてから、記号面のキーと同じ一覧を出す。 */
+    fun openEmojiPickerFromToolbar(recentValues: List<String>) {
+        switchMode(KeyboardMode.SYMBOL)
+        showEmojiPicker(recentValues)
+    }
+
     /** 入力が成功した履歴を一覧へ渡し、最近タブの表示を同期する。 */
     fun setRecentEmojiValues(values: List<String>) {
         emojiPickerView?.setRecentValues(values)
@@ -403,7 +411,8 @@ class KeyboardPanel(
      * 12キーかなレイアウトを構築する（5列×4行、5列とも同じ幅）。キーの並びはSimejiに合わせる。
      */
     private fun buildKanaLayout(): LinearLayout {
-        val container = LinearLayout(context).apply {
+        // キーの地を塗らない設定（不透明度0%）のときだけ、列の間に区切り線を引く。
+        val container = KanaKeyContainer(context, colors.divider, showDividers = preferences.appearance.keyOpacity == 0).apply {
             orientation = VERTICAL
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         }
@@ -722,6 +731,44 @@ class KeyboardPanel(
     companion object {
         /** タップ領域の高さの下限（dp）。 */
         private const val MIN_TOUCH_DP = 48f
+    }
+}
+
+/**
+ * 12キーの左の列と中央3列、中央3列と右の列の間に縦の区切り線を引くコンテナ。キーの地を塗らない設定で、
+ * キーの境目を見せるために使う。線はキー面の上下から14dp内側に収める。
+ */
+// 色を引数に取るプログラム生成専用のViewで、XMLからは生成しない。
+@SuppressLint("ViewConstructor")
+private class KanaKeyContainer(
+    context: Context,
+    dividerColor: Int,
+    private val showDividers: Boolean,
+) : LinearLayout(context) {
+    private val density = context.resources.displayMetrics.density
+    private val paint = Paint().apply {
+        color = dividerColor
+        strokeWidth = maxOf(1f, density)
+    }
+
+    // 5列が同じ幅なので、区切りは左端から1/5と4/5の位置になる。
+    override fun dispatchDraw(canvas: Canvas) {
+        super.dispatchDraw(canvas)
+        if (!showDividers) return
+        // コンテナは外周の余白の内側にあるため、その分を引いて面の端から14dp内側にそろえる。
+        val inset = (DIVIDER_INSET_DP - KeyboardDimens.PANEL_PADDING_DP) * density
+        DIVIDER_COLUMN_FRACTIONS.forEach { fraction ->
+            val x = width * fraction
+            canvas.drawLine(x, inset, x, height - inset, paint)
+        }
+    }
+
+    private companion object {
+        /** キー面の上下の端から線までの距離（dp）。 */
+        const val DIVIDER_INSET_DP = 14f
+
+        /** 区切り線を引く位置（コンテナの幅に対する割合）。 */
+        val DIVIDER_COLUMN_FRACTIONS = listOf(0.2f, 0.8f)
     }
 }
 

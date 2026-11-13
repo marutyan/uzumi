@@ -27,6 +27,7 @@ import android.view.inputmethod.InputMethodInfo
 import android.view.inputmethod.InputMethodManager
 import android.view.inputmethod.InputMethodSubtype
 import android.widget.FrameLayout
+import android.widget.Toast
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.inline.InlineContentView
@@ -87,8 +88,15 @@ import dev.uzumi.ime.keyboard.KeyboardDimens
 import dev.uzumi.ime.keyboard.KeyboardLayoutData
 import dev.uzumi.ime.keyboard.KeyboardPanel
 import dev.uzumi.ime.keyboard.KeyboardPreferences
+import dev.uzumi.ime.keyboard.KeyboardHeightPanel
+import dev.uzumi.ime.keyboard.KeyboardRootLayout
 import dev.uzumi.ime.keyboard.ToolbarAction
 import dev.uzumi.ime.keyboard.ToolbarBarViews
+import dev.uzumi.ime.keyboard.ToolbarEditController
+import dev.uzumi.ime.keyboard.ToolbarEditPanel
+import dev.uzumi.ime.keyboard.ToolbarItem
+import dev.uzumi.ime.keyboard.ToolbarLayout
+import dev.uzumi.ime.keyboard.ToolbarMode
 import dev.uzumi.ime.keyboard.ToolbarPreferences
 import dev.uzumi.ime.keyboard.ToolbarTilePanel
 import dev.uzumi.ime.keyboard.TemplatePickerPanel
@@ -129,7 +137,15 @@ class UzumiInputMethodService : InputMethodService() {
     // 部品を外すと別プロセスの描画面が作り直され、カーソル移動のたびに候補が一瞬消えるため。
     private var inlineHost: LinearLayout? = null
     private var inlineHostItems: List<InlineSuggestionItem>? = null
-    private var toolbarRow: LinearLayout? = null
+    // バー1段分（48dp）の領域。候補バーと、入力していない間の機能バーを重ね、段数で高さを固定する。
+    private var barArea: FrameLayout? = null
+    // 入力していない間の機能バー（左端のボタン、中央のアイコン、右端の丸）の置き場。
+    private var idleBar: FrameLayout? = null
+    // 機能タイルの一覧・並べ替え・高さの変更の面と、並べ替えのドラッグ処理。
+    private var toolbarEditPanel: ToolbarEditPanel? = null
+    private var heightPanel: KeyboardHeightPanel? = null
+    private var toolbarEditController: ToolbarEditController? = null
+    private var toolbarMode = ToolbarMode.NONE
     // 候補バーの左端（元に戻す・読みの札）と右端（末尾へ戻る・候補一覧の開閉）の置き場。
     private var barLeading: LinearLayout? = null
     private var barTrailing: LinearLayout? = null
@@ -282,6 +298,8 @@ class UzumiInputMethodService : InputMethodService() {
         } else {
             views.colors.bar
         }
+        // 並べ替え中のタッチと、持ち上げたタイルを全体の上に描くため、入力Viewの根は専用のFrameLayoutにする。
+        val inputRoot = KeyboardRootLayout(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             if (backgroundImage != null) {
@@ -290,18 +308,11 @@ class UzumiInputMethodService : InputMethodService() {
                 setBackgroundColor(views.colors.keyboardBackground)
             }
         }
-        val toolbar = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(barColor)
-        }
-        toolbarRow = toolbar
-        toolbarViews = ToolbarBarViews(this)
+        inputRoot.addView(root, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
         val toolbarPreferences = UzumiSettings.toolbarPreferences(this)
         builtToolbarPreferences = toolbarPreferences
-        root.addView(toolbar, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            0,
-        ))
+        toolbarViews = ToolbarBarViews(this)
+        toolbarMode = ToolbarMode.NONE
         // 候補の列は候補バーの地の上に重ねるため、地を塗らない（背景画像の透け方を候補バー全体でそろえる）。
         val candidates = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -320,7 +331,6 @@ class UzumiInputMethodService : InputMethodService() {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(barColor)
         }
         candidateBar = bar
         val match = LinearLayout.LayoutParams.MATCH_PARENT
@@ -334,13 +344,20 @@ class UzumiInputMethodService : InputMethodService() {
         bar.addView(candidates, LinearLayout.LayoutParams(0, match, 1f))
         inlineHostItems = null
         bar.addView(trailing, LinearLayout.LayoutParams(wrap, match))
-        root.addView(bar, LinearLayout.LayoutParams(match, (CandidateBarViews.BAR_HEIGHT_DP * density).toInt()))
+        val idle = FrameLayout(this)
+        idleBar = idle
+        // 候補バーと機能バーは同じ領域に重ね、どちらか一方だけを見せる。高さは段数で決めて入力の前後で変えない。
+        val area = FrameLayout(this).apply { setBackgroundColor(barColor) }
+        area.addView(bar, FrameLayout.LayoutParams(match, match))
+        area.addView(idle, FrameLayout.LayoutParams(match, match))
+        barArea = area
+        root.addView(area, LinearLayout.LayoutParams(match, (CandidateBarViews.BAR_HEIGHT_DP * density).toInt()))
 
         // 候補一覧はキーボードの面と同じ場所に重ね、開いている間はキーを覆う
         val keyboardArea = FrameLayout(this)
         builtPreferences = preferences
         val rowBudget = maximumBarRows()
-        val reservedBarRows = minOf(toolbarPreferences.toolbarRows + toolbarPreferences.candidateRows, rowBudget)
+        val reservedBarRows = minOf(maxOf(toolbarPreferences.toolbarRows, toolbarPreferences.candidateRows), rowBudget)
         val displayPreferences = displayKeyboardPreferences(preferences, reservedBarRows)
         builtInputLayout = rowBudget to displayPreferences.rowHeightDp
         keyboardPanel = KeyboardPanel(
@@ -361,6 +378,23 @@ class UzumiInputMethodService : InputMethodService() {
         toolbarPanel = ToolbarTilePanel(this).also { panel ->
             keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
         }
+        val toolbarEdit = ToolbarEditPanel(this).also { panel ->
+            keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
+        }
+        toolbarEditPanel = toolbarEdit
+        toolbarEditController = ToolbarEditController(
+            context = this,
+            views = requireNotNull(toolbarViews),
+            rootLayout = inputRoot,
+            barHost = idle,
+            panel = toolbarEdit,
+            itemFor = { action -> toolbarItem(action, session) },
+            onDone = ::finishToolbarEdit,
+            onCommit = ::saveToolbarLayout,
+        )
+        heightPanel = KeyboardHeightPanel(this).also { panel ->
+            keyboardArea.addView(panel, FrameLayout.LayoutParams(match, wrap, Gravity.TOP))
+        }
         templatePanel = TemplatePickerPanel(this).also { panel ->
             keyboardArea.addView(panel, FrameLayout.LayoutParams(match, match))
         }
@@ -380,7 +414,7 @@ class UzumiInputMethodService : InputMethodService() {
         applyPolicyToKeyboard()
         refreshCandidates()
         applyNavigationInsets(root)
-        return root
+        return inputRoot
     }
 
     /**
@@ -420,7 +454,7 @@ class UzumiInputMethodService : InputMethodService() {
     private fun currentInputLayout(): Pair<Int, Float> {
         val rowBudget = maximumBarRows()
         val toolbarPreferences = UzumiSettings.toolbarPreferences(this)
-        val reservedBarRows = minOf(toolbarPreferences.toolbarRows + toolbarPreferences.candidateRows, rowBudget)
+        val reservedBarRows = minOf(maxOf(toolbarPreferences.toolbarRows, toolbarPreferences.candidateRows), rowBudget)
         return rowBudget to displayKeyboardPreferences(UzumiSettings.keyboardPreferences(this), reservedBarRows).rowHeightDp
     }
 
@@ -1044,7 +1078,7 @@ class UzumiInputMethodService : InputMethodService() {
             KeyboardPreferences.MIN_ROW_HEIGHT_DP * KANA_KEYBOARD_ROW_COUNT,
             MIN_KEY_TOUCH_DP * QWERTY_KEYBOARD_ROW_COUNT,
         ) + KEYBOARD_PANEL_PADDING_DP
-        return ((availableHeight - minimumKeyboardHeight) / BAR_ROW_HEIGHT_WITH_DIVIDER_DP)
+        return ((availableHeight - minimumKeyboardHeight) / BAR_ROW_HEIGHT_DP)
             .coerceIn(1, MAX_VISIBLE_BAR_ROWS)
     }
 
@@ -1054,7 +1088,7 @@ class UzumiInputMethodService : InputMethodService() {
         reservedBarRows: Int,
     ): KeyboardPreferences {
         val availableHeight = availableInputHeightDp()
-        val barsHeight = reservedBarRows * BAR_ROW_HEIGHT_WITH_DIVIDER_DP + KEYBOARD_PANEL_PADDING_DP
+        val barsHeight = reservedBarRows * BAR_ROW_HEIGHT_DP + KEYBOARD_PANEL_PADDING_DP
         val keyboardHeight = (availableHeight - barsHeight).coerceAtLeast(0)
         val qwertyHeightPerRow = KeyboardDimens.QWERTY_ROW_HEIGHT_DP / KeyboardDimens.ROW_HEIGHT_DP
         val maximumRowHeight = (keyboardHeight / maxOf(
@@ -1123,25 +1157,34 @@ class UzumiInputMethodService : InputMethodService() {
         ))
         val grid = candidateGrid
         val preferences = UzumiSettings.toolbarPreferences(this)
-        val visibleActions = availableToolbarActions(current)
-        val requestedToolbarRows = preferences.toolbarActionRows(visibleActions).size
         val availableCandidateWidthDp = (resources.configuration.screenWidthDp - CANDIDATE_FIXED_WIDTH_DP)
             .coerceAtLeast(MIN_CANDIDATE_SLOT_DP)
         val maxItemsPerRow = availableCandidateWidthDp / MIN_CANDIDATE_SLOT_DP
         // 候補の件数で候補列の高さが変わるとキーボード全体が上下し、長押し中の操作が途切れるため、設定段数で固定する。
-        val requestedCandidateRows = preferences.candidateRows
-        val effectiveRows = fitBarRows(requestedToolbarRows, requestedCandidateRows)
-        refreshToolbar(effectiveRows.first)
+        // 機能バーも同じ領域に出すため、領域の高さは両方の段数の大きい方にする。
+        val effectiveRows = effectiveBarRows(preferences)
+        resizeBarArea(maxOf(effectiveRows.first, effectiveRows.second))
+        val composing = current?.hasComposition == true
+        if (toolbarMode != ToolbarMode.NONE) {
+            // 機能タイルの一覧・並べ替え中は、機能バーを見せる。並べ替え中のバーはドラッグの処理が描くため触らない。
+            grid?.hide()
+            showToolbarBar(current, preferences, effectiveRows.first)
+            return
+        }
+        val hint = hintText(current?.policy)
         if (entries.isEmpty()) {
             grid?.hide()
-            if (current?.hasComposition == true) {
-                row.addView(views.hint(hintText(current.policy, current.isLiveMode)),
-                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT))
-            } else {
-                showIdleBar(current, trailing)
+            val barShowsCandidates = composing || leading.childCount > 0 || inlineHost?.visibility == View.VISIBLE
+            if (!barShowsCandidates) {
+                // 候補も札もない間は、機能バーを出す。候補が出ない入力欄では、理由の案内を中央に小さく出す。
+                showToolbarBar(current, preferences, effectiveRows.first, blockedHint = blockedHintText(current?.policy))
+                return
             }
-            addToolbarEntry(trailing, current)
-            resizeCandidateBar(effectiveRows.second)
+            if (composing && hint != null) {
+                row.addView(views.hint(hint),
+                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT))
+            }
+            showCandidateBar(current, preferences, composing)
             return
         }
         val indexRows = preferences.copy(candidateRows = effectiveRows.second)
@@ -1156,11 +1199,15 @@ class UzumiInputMethodService : InputMethodService() {
             }
             indexes.forEach { index ->
                 val entry = entries[index]
-                if (entry.sectionBreakBefore && index != indexes.first()) candidateLine.addView(views.divider())
+                val firstInRow = index == indexes.first()
+                // 区切り線ありでは候補の左端の線が区分けも兼ねる。なしでは、予測と通常の候補の境目だけに線を引く。
+                if (entry.sectionBreakBefore && !firstInRow && !preferences.candidateDividers) candidateLine.addView(views.divider())
                 candidateLine.addView(views.item(
                     entry.label,
                     entry.selected,
                     entry.isPrediction,
+                    dividerBefore = preferences.candidateDividers && !firstInRow && !entry.selected &&
+                        entries[index - 1].selected.not(),
                     onLongClick = { openCandidateActionMenu(current, entry) },
                 ) { pickCandidate(current, entry, index) }.apply {
                     maxLines = 1
@@ -1177,18 +1224,13 @@ class UzumiInputMethodService : InputMethodService() {
                 ))
             }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
                 (CandidateBarViews.BAR_HEIGHT_DP * resources.displayMetrics.density).toInt()))
-            if (rowIndex < indexRows.lastIndex) {
-                row.addView(views.divider().apply {
-                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1)
-                })
-            }
         }
         // 縦線は右端の固定ボタン（末尾・∨）すべての手前に置き、候補の列がそこで終わることを示す
         trailing.addView(views.divider(), 0)
-        if (regularEntries.isEmpty() && current?.hasComposition != true) {
-            // 次の語の予測がバーの上限を超えた場合は一覧を開けるようにし、キーボードを閉じる操作も残す。
+        if (regularEntries.isEmpty() && !composing) {
+            // 次の語の予測がバーの上限を超えた場合は一覧を開けるようにする。
             if (listEntries.size > entries.size) {
-                trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
+                trailing.addView(candidateListButton(grid) {
                     evaluation.record(OperationKind.OTHER)
                     hideKeyboardOverlays(except = KeyboardOverlay.CANDIDATE_GRID)
                     if (grid?.isShowing == true) grid.hide() else showCandidateGrid(current, listEntries)
@@ -1197,16 +1239,13 @@ class UzumiInputMethodService : InputMethodService() {
                 if (grid?.isShowing == true) showCandidateGrid(current, listEntries)
             } else {
                 grid?.hide()
+                // 一覧のボタンが無いときは、候補の列を区切る縦線も要らない。
+                trailing.removeViewAt(0)
             }
-            trailing.addView(views.symbolButton("⌄", getString(R.string.close_keyboard)) {
-                evaluation.record(OperationKind.OTHER)
-                requestHideSelf(0)
-            })
-            addToolbarEntry(trailing, current)
-            resizeCandidateBar(effectiveRows.second)
+            showCandidateBar(current, preferences, composing)
             return
         }
-        trailing.addView(views.symbolButton(if (grid?.isShowing == true) "∧" else "∨", getString(R.string.candidate_list_toggle)) {
+        trailing.addView(candidateListButton(grid) {
             evaluation.record(OperationKind.OTHER)
             hideKeyboardOverlays(except = KeyboardOverlay.CANDIDATE_GRID)
             if (grid?.isShowing == true) {
@@ -1218,88 +1257,196 @@ class UzumiInputMethodService : InputMethodService() {
             }
             refreshCandidates()
         })
-        addToolbarEntry(trailing, current)
-        resizeCandidateBar(effectiveRows.second)
+        showCandidateBar(current, preferences, composing)
         // 一覧を開いたまま候補が変わった場合は、一覧も新しい候補で描き直す
         if (grid?.isShowing == true) showCandidateGrid(current, listEntries)
     }
 
-    /** 候補バーを設定に応じた段数の高さで表示する。候補が少なくても高さを変えず、キーボードの上下動を防ぐ。 */
-    private fun resizeCandidateBar(rows: Int) {
-        val density = resources.displayMetrics.density
-        val dividerHeight = (density + 0.5f).toInt()
-        val rowHeight = (CandidateBarViews.BAR_HEIGHT_DP * density).toInt()
-        val height = rowHeight * rows + dividerHeight * (rows - 1).coerceAtLeast(0)
-        candidateBar?.layoutParams = candidateBar?.layoutParams?.apply { this.height = height }
-        candidateBar?.requestLayout()
+    /** 候補一覧を開閉する∨のボタン。開いている間は∧にする。名前は開閉で変えず、自動測定の道具が同じ名前で探せるようにする。 */
+    private fun candidateListButton(grid: CandidateGridView?, onClick: () -> Unit): View {
+        val views = barViews ?: return View(this)
+        val icon = if (grid?.isShowing == true) R.drawable.ic_keyboard_arrow_up else R.drawable.ic_keyboard_arrow_down
+        return views.iconButton(icon, getString(R.string.candidate_list_toggle), onClick = onClick).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                (CANDIDATE_LIST_BUTTON_DP * resources.displayMetrics.density).toInt(),
+                LinearLayout.LayoutParams.MATCH_PARENT,
+            )
+        }
     }
 
-    /** 選んだショートカットを機能バーへ表示し、使えないUndoなどの空枠は省く。 */
-    private fun refreshToolbar(maxRows: Int) {
-        val parent = toolbarRow ?: return
-        val views = toolbarViews ?: return
-        val preferences = UzumiSettings.toolbarPreferences(this)
-        val visibleActions = availableToolbarActions(session)
-        val rows = if (maxRows <= 0) emptyList() else preferences.copy(toolbarRows = maxRows)
-            .toolbarActionRows(visibleActions)
-        views.addToolbarRows(parent, rows, ::toolbarActionLabel, ::handleToolbarAction)
-        val height = (ToolbarBarViews.BAR_ROW_HEIGHT_DP * resources.displayMetrics.density * rows.size).toInt()
-        parent.layoutParams = parent.layoutParams?.apply { this.height = height }
-        parent.visibility = if (rows.isEmpty()) View.GONE else View.VISIBLE
-        parent.requestLayout()
+    /**
+     * 候補バーを見せ、機能バーを隠す。入力していない間は、左端に機能タイルを開くボタン、右端に右端の機能の丸を足す。
+     * 入力中は候補を広く使うため、足さない。
+     */
+    private fun showCandidateBar(current: EditorSession?, preferences: ToolbarPreferences, composing: Boolean) {
+        val toolbar = toolbarViews ?: return
+        val leading = barLeading ?: return
+        val trailing = barTrailing ?: return
+        if (!composing) {
+            leading.addView(toolbar.leftButton(ToolbarMode.NONE, ::openToolbarTiles), 0,
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT))
+            trailing.addView(
+                toolbar.rightButton(preferences.rightAction?.let { toolbarItem(it, current) }) { onToolbarItemTap(it) },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT),
+            )
+        }
+        candidateBar?.visibility = View.VISIBLE
+        idleBar?.visibility = View.GONE
     }
 
+    /**
+     * 機能バー（左端のボタン、中央のアイコン、右端の丸）を見せ、候補バーを隠す。
+     * [blockedHint]があれば、候補を出せない入力欄だと知らせるため、中央のアイコンの代わりに小さく出す。
+     */
+    private fun showToolbarBar(current: EditorSession?, preferences: ToolbarPreferences, rows: Int, blockedHint: String? = null) {
+        val toolbar = toolbarViews ?: return
+        val idle = idleBar ?: return
+        // 並べ替え中のバーはドラッグの処理が描く。ここで描き直すと持ち上げた機能が消えてしまう。
+        if (toolbarMode == ToolbarMode.EDIT) {
+            candidateBar?.visibility = View.GONE
+            idle.visibility = View.VISIBLE
+            return
+        }
+        val center: View = if (blockedHint != null) {
+            barViews?.hint(blockedHint) ?: View(this)
+        } else {
+            val items = preferences.copy(toolbarRows = rows).toolbarActionRows()
+                .map { line -> line.map { toolbarItem(it, current) } }
+            toolbar.centerRows(items) { onToolbarItemTap(it) }
+        }
+        val left = toolbar.leftButton(
+            if (toolbarMode == ToolbarMode.TILES) ToolbarMode.TILES else ToolbarMode.NONE,
+            if (toolbarMode == ToolbarMode.TILES) ::closeToolbarTiles else ::openToolbarTiles,
+        )
+        val right = toolbar.rightButton(preferences.rightAction?.let { toolbarItem(it, current) }) { onToolbarItemTap(it) }
+        idle.removeAllViews()
+        idle.addView(toolbar.assemble(left, center, right),
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        candidateBar?.visibility = View.GONE
+        idle.visibility = View.VISIBLE
+        if (toolbarMode == ToolbarMode.TILES) toolbarPanel?.update(tileItems(current, preferences))
+    }
 
-    /** 画面高に収まらない場合、候補を最低1段残して両バーの実段数を縮める。 */
-    private fun fitBarRows(toolbarRows: Int, candidateRows: Int): Pair<Int, Int> {
-        var toolbar = toolbarRows
-        var candidates = candidateRows.coerceAtLeast(1)
+    /** バーの領域を設定した段数の高さで表示する。候補や機能が少なくても高さを変えず、キーボードの上下動を防ぐ。 */
+    private fun resizeBarArea(rows: Int) {
+        val rowHeight = (CandidateBarViews.BAR_HEIGHT_DP * resources.displayMetrics.density).toInt()
+        val area = barArea ?: return
+        val height = rowHeight * rows.coerceAtLeast(1)
+        if (area.layoutParams.height != height) {
+            area.layoutParams = area.layoutParams.apply { this.height = height }
+            area.requestLayout()
+        }
+    }
+
+    /** 画面高に収まらない場合、機能バーと候補の段数を画面に入る上限へ縮める。 */
+    private fun effectiveBarRows(preferences: ToolbarPreferences): Pair<Int, Int> {
         val budget = maximumBarRows()
-        while (toolbar + candidates > budget) {
-            when {
-                candidates > 1 && (candidates >= toolbar || toolbar == 0) -> candidates -= 1
-                toolbar > 1 -> toolbar -= 1
-                candidates > 1 -> candidates -= 1
-                toolbar > 0 -> toolbar -= 1
-                else -> break
-            }
-        }
-        return toolbar to candidates
+        return minOf(preferences.toolbarRows, budget) to minOf(preferences.candidateRows, budget)
     }
 
-    /** 機能一覧の入口を候補バーへ常時表示する。候補一覧とは同時に開かない。 */
-    private fun addToolbarEntry(trailing: LinearLayout, current: EditorSession?) {
-        val views = barViews ?: return
-        trailing.addView(views.symbolButton("▦", getString(R.string.toolbar_open)) {
-            val panel = toolbarPanel ?: return@symbolButton
-            hideKeyboardOverlays(except = KeyboardOverlay.TOOLBAR)
-            if (panel.isShowing) {
+    /** 機能の名前と、今使えない理由（使えるならnull）をまとめる。 */
+    private fun toolbarItem(action: ToolbarAction, current: EditorSession?): ToolbarItem =
+        ToolbarItem(action, toolbarActionLabel(action), unavailableReason(action, current))
+
+    /** 機能が今使えない理由を短く返す。使えるならnull。使えない機能も隠さず、押したときにこの理由を知らせる。 */
+    private fun unavailableReason(action: ToolbarAction, current: EditorSession?): String? {
+        val inputActive = current?.isActive == true && inputViewVisible
+        val reason = when (action) {
+            // 明示的な貼り付けは60秒の自動提案期限に縛らず、テキストclipがある間は出す。
+            ToolbarAction.PASTE -> if (inputActive &&
+                (hasCurrentClipboardSuggestion(current) || recentClipboard?.hasCurrentText() == true)
+            ) null else R.string.toolbar_unavailable_paste
+            ToolbarAction.CLIPBOARD_HISTORY -> if (canShowClipboardHistory()) null else R.string.toolbar_unavailable_clipboard_history
+            ToolbarAction.UNDO -> if (current?.let {
+                it.canUndoDeletion || it.liveCandidateState()?.canUndo == true
+            } == true) null else R.string.toolbar_unavailable_undo
+            ToolbarAction.EDIT -> if (canOpenEditPanel()) null else R.string.toolbar_unavailable_edit
+            ToolbarAction.MICROPHONE -> if (voiceInputMethod != null) null else R.string.toolbar_unavailable_microphone
+            ToolbarAction.TEMPLATES, ToolbarAction.EMOJI -> if (current?.isActive == true) null else R.string.toolbar_unavailable_input
+            else -> null
+        }
+        return reason?.let(::getString)
+    }
+
+    /** バーやタイルの機能を押したとき、使えなければ理由を知らせ、使えれば実行する。 */
+    private fun onToolbarItemTap(item: ToolbarItem) {
+        item.unavailableReason?.let {
+            Toast.makeText(this, it, Toast.LENGTH_SHORT).show()
+            return
+        }
+        // タイル一覧から選んだときは一覧を閉じてから実行する。
+        if (toolbarMode != ToolbarMode.NONE) hideToolbarPanels()
+        handleToolbarAction(item.action)
+    }
+
+    /** 機能タイルの置き場の並びを、一覧に出す表示値にする。 */
+    private fun tileItems(current: EditorSession?, preferences: ToolbarPreferences): List<ToolbarItem> =
+        preferences.trayActions.map { toolbarItem(it, current) }
+
+    /** 左端のボタンから機能タイルの一覧を開く。候補一覧など他の面は閉じる。 */
+    private fun openToolbarTiles() {
+        val panel = toolbarPanel ?: return
+        hideKeyboardOverlays(except = KeyboardOverlay.TOOLBAR)
+        toolbarMode = ToolbarMode.TILES
+        panel.show(tileItems(session, UzumiSettings.toolbarPreferences(this)), ::onToolbarItemTap, ::startToolbarEdit)
+        refreshCandidates()
+    }
+
+    /** 左端の×で機能タイルの一覧を閉じる。 */
+    private fun closeToolbarTiles() {
+        hideToolbarPanels()
+    }
+
+    /** 機能タイルの一覧と並べ替えの面を閉じ、バーを通常の表示へ戻す。 */
+    private fun hideToolbarPanels() {
+        val wasOpen = toolbarMode != ToolbarMode.NONE
+        toolbarMode = ToolbarMode.NONE
+        toolbarEditController?.stop()
+        toolbarEditPanel?.hide()
+        toolbarPanel?.hide()
+        if (wasOpen) refreshCandidates()
+    }
+
+    /** 鉛筆ボタンで並べ替えを始める。バーと置き場のタイルを押して動かせる状態にする。 */
+    private fun startToolbarEdit() {
+        val controller = toolbarEditController ?: return
+        toolbarPanel?.hide()
+        toolbarMode = ToolbarMode.EDIT
+        candidateBar?.visibility = View.GONE
+        idleBar?.visibility = View.VISIBLE
+        controller.start(UzumiSettings.toolbarPreferences(this).layout)
+    }
+
+    /** 並べ替えを終え、機能タイルの一覧へ戻る。 */
+    private fun finishToolbarEdit() {
+        toolbarEditController?.stop()
+        toolbarEditPanel?.hide()
+        toolbarMode = ToolbarMode.TILES
+        toolbarPanel?.show(tileItems(session, UzumiSettings.toolbarPreferences(this)), ::onToolbarItemTap, ::startToolbarEdit)
+        refreshCandidates()
+    }
+
+    /** 並べ替えの結果を保存し、保存後の並びを返す。並びの変更だけなので入力Viewは作り直さない。 */
+    private fun saveToolbarLayout(layout: ToolbarLayout): ToolbarLayout {
+        UzumiSettings.setToolbarLayout(this, layout)
+        val saved = UzumiSettings.toolbarPreferences(this)
+        builtToolbarPreferences = builtToolbarPreferences?.withLayout(saved.layout)
+        return saved.layout
+    }
+
+    /** 「高さの変更」の面を開く。つまみで設定の「キーボードの高さ」と同じ値を保存し、「完了」で閉じて新しい高さで作り直す。 */
+    private fun showHeightPanel() {
+        val panel = heightPanel ?: return
+        hideKeyboardOverlays(except = KeyboardOverlay.HEIGHT)
+        panel.show(
+            currentDp = UzumiSettings.keyboardHeightDp(this),
+            onChange = { UzumiSettings.setKeyboardHeightDp(this, it) },
+            onDone = {
                 panel.hide()
-            } else {
-                panel.show(availableToolbarActions(current), ::toolbarActionLabel) { action ->
-                    panel.hide()
-                    handleToolbarAction(action)
-                }
-            }
-        })
+                if (builtPreferences != UzumiSettings.keyboardPreferences(this)) setInputView(onCreateInputView())
+            },
+        )
     }
-
-    /** 現在実行できるタイルだけを機能バーと機能一覧へ渡す。 */
-    private fun availableToolbarActions(current: EditorSession?): List<ToolbarAction> =
-        ToolbarPreferences.AVAILABLE_ACTIONS.filter { action ->
-            when (action) {
-                // 明示的な貼り付けは60秒の自動提案期限に縛らず、テキストclipがある間は出す。
-                ToolbarAction.PASTE -> current?.isActive == true && inputViewVisible &&
-                    (hasCurrentClipboardSuggestion(current) || recentClipboard?.hasCurrentText() == true)
-                ToolbarAction.CLIPBOARD_HISTORY -> canShowClipboardHistory()
-                ToolbarAction.UNDO -> current?.let {
-                    it.canUndoDeletion || it.liveCandidateState()?.canUndo == true
-                } == true
-                ToolbarAction.EDIT -> canOpenEditPanel()
-                ToolbarAction.MICROPHONE -> voiceInputMethod != null
-                else -> true
-            }
-        }
 
     /** 機能タイルを現在の編集セッションへ適用する。 */
     private fun handleToolbarAction(action: ToolbarAction) {
@@ -1324,6 +1471,15 @@ class UzumiInputMethodService : InputMethodService() {
             ToolbarAction.TEMPLATES -> showTemplatePicker()
             ToolbarAction.SETTINGS -> openSettings()
             ToolbarAction.CLOSE_KEYBOARD -> requestHideSelf(0)
+            ToolbarAction.EMOJI -> {
+                hideKeyboardOverlays()
+                val isSensitive = currentPolicy?.isSensitive != false
+                keyboardPanel?.openEmojiPickerFromToolbar(if (isSensitive) emptyList() else emojiRecentStore.load())
+            }
+            ToolbarAction.KISEKAE -> startActivity(
+                Intent(this, KisekaeActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+            ToolbarAction.HEIGHT -> showHeightPanel()
         }
         refreshCandidates()
     }
@@ -1340,6 +1496,9 @@ class UzumiInputMethodService : InputMethodService() {
         ToolbarAction.TEMPLATES -> getString(R.string.toolbar_templates)
         ToolbarAction.SETTINGS -> getString(R.string.open_settings)
         ToolbarAction.CLOSE_KEYBOARD -> getString(R.string.close_keyboard)
+        ToolbarAction.EMOJI -> getString(R.string.toolbar_emoji)
+        ToolbarAction.KISEKAE -> getString(R.string.toolbar_kisekae)
+        ToolbarAction.HEIGHT -> getString(R.string.toolbar_height)
     }
 
     /** 定型文を別threadで読み込み、タップされた本文を貼り付け経路で入力する。 */
@@ -1543,12 +1702,13 @@ class UzumiInputMethodService : InputMethodService() {
     )
 
     /** キーボード面に重ねる一覧・パネル。同時には一つだけ開き、IME非表示や欄の切り替えではすべて閉じる。 */
-    private enum class KeyboardOverlay { CANDIDATE_GRID, TOOLBAR, TEMPLATES, CLIPBOARD_HISTORY, EDIT, CANDIDATE_ACTION }
+    private enum class KeyboardOverlay { CANDIDATE_GRID, TOOLBAR, HEIGHT, TEMPLATES, CLIPBOARD_HISTORY, EDIT, CANDIDATE_ACTION }
 
     /** 重ねる一覧・パネルをexcept以外すべて閉じる。開く操作の直前と、表示・欄の終了時にこの一か所から呼ぶ。 */
     private fun hideKeyboardOverlays(except: KeyboardOverlay? = null) {
         if (except != KeyboardOverlay.CANDIDATE_GRID) candidateGrid?.hide()
-        if (except != KeyboardOverlay.TOOLBAR) toolbarPanel?.hide()
+        if (except != KeyboardOverlay.TOOLBAR) hideToolbarPanels()
+        if (except != KeyboardOverlay.HEIGHT) heightPanel?.hide()
         if (except != KeyboardOverlay.TEMPLATES) templatePanel?.hide()
         if (except != KeyboardOverlay.CLIPBOARD_HISTORY) {
             clipboardHistoryPanel?.hide()
@@ -1615,7 +1775,7 @@ class UzumiInputMethodService : InputMethodService() {
             ellipsize = TextUtils.TruncateAt.END
             maxWidth = resources.displayMetrics.widthPixels / 2
         })
-        leading.addView(views.symbolButton("✕", getString(R.string.clipboard_suggestion_dismiss)) {
+        leading.addView(views.iconButton(R.drawable.ic_close, getString(R.string.clipboard_suggestion_dismiss)) {
             dismissClipboardSuggestion()
         })
     }
@@ -1748,35 +1908,6 @@ class UzumiInputMethodService : InputMethodService() {
     }
 
     /**
-     * 入力していない間の候補バーに案内とキーボードを閉じる操作を置く。Inline Autofill候補がある間は、案内の代わりに候補を並べる。
-     */
-    private fun showIdleBar(current: EditorSession?, trailing: LinearLayout) {
-        val views = barViews ?: return
-        val row = candidateRow ?: return
-        val showInline = current != null && InlineAutofillPolicy.shouldShow(
-            hasComposition = current.hasComposition,
-            hasRegularCandidates = false,
-            inlineCount = inlineSuggestions.size,
-        )
-        val line = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        // Inline候補は常設の枠（updateInlineHost）に出すため、ここでは候補がない場合の案内だけを置く。
-        if (!showInline && !hasCurrentClipboardSuggestion(current)) {
-            line.addView(views.hint(hintText(current?.policy, current?.isLiveMode == true)))
-        }
-        row.addView(line, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            (CandidateBarViews.BAR_HEIGHT_DP * resources.displayMetrics.density).toInt(),
-        ))
-        trailing.addView(views.symbolButton("⌄", getString(R.string.close_keyboard)) {
-            evaluation.record(OperationKind.OTHER)
-            requestHideSelf(0)
-        })
-    }
-
-    /**
      * 待機中だけInline候補の常設枠を表示する。枠の中身は候補の一覧が変わったときだけ作り直し、
      * 候補バーの再構築では部品を付け外ししない。pinnedの候補は横スクロールの外の右端に固定する。
      */
@@ -1832,15 +1963,16 @@ class UzumiInputMethodService : InputMethodService() {
         startActivity(Intent(this, SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
-    /** 候補を出さない理由または候補バーの用途を短く返す。 */
-    private fun hintText(policy: InputFieldPolicy?, live: Boolean): String = when {
+    /** 候補を出さない入力欄（機密入力・互換入力）の理由を短く返す。該当しなければnull。 */
+    private fun blockedHintText(policy: InputFieldPolicy?): String? = when {
         policy?.isPassword == true -> getString(R.string.candidate_hint_sensitive)
         policy?.isTypeNull == true -> getString(R.string.candidate_hint_compatibility)
-        engineHealth is EngineHealth.Unavailable -> getString(R.string.candidate_hint_no_dictionary)
-        live && engineHealth is EngineHealth.Ready -> getString(R.string.candidate_hint_live)
-        engineHealth is EngineHealth.Ready -> getString(R.string.candidate_hint_conversion)
-        else -> getString(R.string.candidate_hint_default)
+        else -> null
     }
+
+    /** 候補が出ない理由（機密入力・互換入力・辞書なし）を短く返す。通常の案内は出さないためnull。 */
+    private fun hintText(policy: InputFieldPolicy?): String? = blockedHintText(policy)
+        ?: if (engineHealth is EngineHealth.Unavailable) getString(R.string.candidate_hint_no_dictionary) else null
 
     /** 評価用の状態の確認口へ返す、IMEの状態の要約（数値と真偽だけ）。UIスレッドから呼ばれる。 */
     private fun evaluationStatus(): ImeEvaluationStatus {
@@ -1890,8 +2022,11 @@ class UzumiInputMethodService : InputMethodService() {
         /** 候補以外のUndo・戻る・一覧・機能ボタン用に残す幅（dp）。 */
         const val CANDIDATE_FIXED_WIDTH_DP = 192
 
-        /** 1候補の最小タップ領域（dp）。 */
-        const val MIN_CANDIDATE_SLOT_DP = 48
+        /** 候補一覧を開閉する∨のボタンの幅（dp）。 */
+        const val CANDIDATE_LIST_BUTTON_DP = 48f
+
+        /** 1候補の最小の幅（dp）。候補の区切り線の有無にかかわらず78dp。 */
+        const val MIN_CANDIDATE_SLOT_DP = 78
 
         /** バー段数計算で確保するQWERTYの最小タップ領域（dp）。 */
         const val MIN_KEY_TOUCH_DP = 48
@@ -1908,7 +2043,7 @@ class UzumiInputMethodService : InputMethodService() {
 
         /** 設定時は両バー最大6段。表示時は画面高に応じて制限する。 */
         const val MAX_VISIBLE_BAR_ROWS = 6
-        const val BAR_ROW_HEIGHT_WITH_DIVIDER_DP = 53
+        const val BAR_ROW_HEIGHT_DP = 48
 
         /** Inline Autofill候補の札の高さ（dp）。52dpの候補バーへ上下の余白を残して収める。 */
         const val INLINE_HEIGHT_DP = 36f
