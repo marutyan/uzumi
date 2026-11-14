@@ -587,7 +587,7 @@ class KeyboardLayoutDataTest {
         assertEquals(ThemePreset.STANDARD, defaults.preset)
         assertEquals(ThemeMode.SYSTEM, defaults.mode)
         assertEquals(85, defaults.backgroundBrightness)
-        assertEquals(100, defaults.keyOpacity)
+        assertEquals(0, defaults.keyOpacity)
         assertEquals(KeyFont.GOTHIC, defaults.keyFont)
         assertEquals(FlickDisplayMode.BUBBLE, defaults.flickMode)
         assertEquals(FlickBubbleShape.PENTAGON, defaults.flickShape)

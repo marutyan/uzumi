@@ -169,8 +169,8 @@ data class ThemePalette(
  */
 enum class ThemePreset(val light: ThemePalette?, val dark: ThemePalette?) {
     STANDARD(
-        palette("#E4E7EB", "#FFFFFF", "#CDD3DA", "#D6E1F3", "#345995", "#1B1F24", "#F3F4F6", "#D0D5DB", "#8A8A8A"),
-        palette("#17191D", "#34373D", "#262A30", "#2D3C57", "#9DB8EA", "#E8EAED", "#1E2126", "#3A3F47", "#6B7078"),
+        palette("#F0F4F9", "#FFFFFF", "#E1E3E1", "#D3E3FD", "#0B57D0", "#1F1F1F", "#F0F4F9", "#C4C7C5", "#8A8A8A"),
+        palette("#1E1F20", "#37393B", "#444746", "#0B3A75", "#A8C7FA", "#E3E3E3", "#1E1F20", "#444746", "#6B7078"),
     ),
     WASHI(
         palette("#E9E3D6", "#FBF8F1", "#DDD5C4", "#E4D9C2", "#5B4A36", "#2A241C", "#F3EEE3", "#D3C9B5", "#8C7B64"),
@@ -430,6 +430,6 @@ object KeyboardDimens {
     /** キーの描画を枠から内側へ縮める量。隣のキーとの見た目の隙間は2倍の4dpになる。 */
     const val KEY_INSET_DP = 2f
 
-    /** キーの角丸の半径。 */
-    const val KEY_CORNER_DP = 8f
+    /** キーの角丸の半径。Gboardの実測に合わせる。 */
+    const val KEY_CORNER_DP = 6f
 }

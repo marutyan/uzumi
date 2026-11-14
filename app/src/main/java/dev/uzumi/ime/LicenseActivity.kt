@@ -30,7 +30,7 @@ class LicenseActivity : Activity() {
     }
 
     /**
-     * 同梱した表示文書を読む。Mozc、llama.cpp、同梱フォントのライセンスを続けて表示する。
+     * 同梱した表示文書を読む。Mozc、llama.cpp、同梱フォントとアイコンのライセンスを続けて表示する。
      * どれも無かった場合はnullを返す。
      */
     private fun readNotice(): String? {
@@ -51,6 +51,7 @@ class LicenseActivity : Activity() {
             "licenses/llama.cpp-NOTICE.txt",
             "licenses/zen-maru-gothic-OFL.txt",
             "licenses/yusei-magic-OFL.txt",
+            "licenses/material-symbols-Apache-2.0.txt",
         )
     }
 }

@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.drawable.Drawable
 import android.graphics.Typeface
 import android.media.AudioManager
 import android.os.Bundle
@@ -106,8 +107,11 @@ class KeyView(context: Context) : View(context) {
     private var boldTypeface: Typeface = Typeface.DEFAULT_BOLD
     private var textScale = 1f
 
-    // キーの地の不透明度（0〜1）。背景画像があるときだけ設定の値を使い、無ければ常に不透明にする。
-    private var keyAlpha = 1f
+    // キーの地の不透明度（0〜1）。きせかえの「キーの不透明度」。0なら地を塗らない。押している間は不透明に描く。
+    private var keyAlpha = 0f
+
+    // 文字の代わりに描くアイコン。resource idごとに色を付け替えて使うため、キーごとに複製して持つ。
+    private val iconCache = HashMap<Int, Drawable>()
 
     private var spec: KeySpec? = null
     private var onAction: ((KeyboardAction) -> Unit)? = null
@@ -205,6 +209,7 @@ class KeyView(context: Context) : View(context) {
         typeface = Typeface.DEFAULT
     }
     private val rectF = RectF()
+    private val pillRect = RectF()
 
     init {
         isFocusable = true
@@ -280,7 +285,7 @@ class KeyView(context: Context) : View(context) {
         baseTypeface = keyTypeface(getContext(), appearance.keyFont)
         boldTypeface = Typeface.create(baseTypeface, Typeface.BOLD)
         textScale = appearance.keyTextScale / 100f
-        keyAlpha = if (appearance.hasBackgroundImage) appearance.keyOpacity / 100f else 1f
+        keyAlpha = appearance.keyOpacity / 100f
         borderPaint.color = colors.divider
         borderPaint.strokeWidth = maxOf(1f, density)
         invalidate()
@@ -889,8 +894,9 @@ class KeyView(context: Context) : View(context) {
             else -> false
         }
 
-        // 背景色の決定。強調色のキー以外は、背景画像があるとき設定の不透明度で描く。
+        // 背景色の決定。押している間は不透明な押下色、それ以外は設定の不透明度で描く（0なら塗らない）。
         val isActiveShift = currentSpec is KeySpec.Shift && (isShifted || isCapsLock)
+        val isModePill = currentSpec is KeySpec.ModeSwitch && currentSpec.label == MODE_PILL_LABEL
         val bgColor = when {
             isAccent -> if (isKeyPressed) colors.accentPressed else colors.accent
             isActiveShift -> if (isKeyPressed) colors.functionPressed else colors.keyActive
@@ -898,17 +904,29 @@ class KeyView(context: Context) : View(context) {
             else -> if (isKeyPressed) colors.keyPressed else colors.keyBackground
         }
 
-        // 枠なしの形では、押していない普通のキーの地を塗らず、文字だけを見せる。
-        val paintsBackground = isAccent || isKeyPressed || isActiveShift || appearance.keyShape != KeyShape.FLAT
-        if (paintsBackground) {
-            backgroundPaint.color = if (isAccent) bgColor else ThemeColorMath.withAlpha(bgColor, keyAlpha)
-            canvas.drawRoundRect(rectF, cornerRadius, cornerRadius, backgroundPaint)
+        // 強調色のEnterと「あA」は、キーの枠ではなく幅78%・高さ46dpの丸い形で描く。
+        val isPill = isAccent || isModePill
+        if (isPill) {
+            val pillHeight = minOf(PILL_HEIGHT_DP * density, rectF.height())
+            val pillWidth = w * PILL_WIDTH_RATIO
+            pillRect.set(rectF.centerX() - pillWidth / 2f, rectF.centerY() - pillHeight / 2f,
+                rectF.centerX() + pillWidth / 2f, rectF.centerY() + pillHeight / 2f)
+            backgroundPaint.color = bgColor
+            canvas.drawRoundRect(pillRect, pillHeight / 2f, pillHeight / 2f, backgroundPaint)
+        } else {
+            // 枠なしの形では、押していない普通のキーの地を塗らず、文字だけを見せる。
+            val resting = keyAlpha > 0f && appearance.keyShape != KeyShape.FLAT
+            if (resting || isKeyPressed || isActiveShift) {
+                backgroundPaint.color = if (isKeyPressed) bgColor else ThemeColorMath.withAlpha(bgColor, if (isActiveShift) 1f else keyAlpha)
+                canvas.drawRoundRect(rectF, cornerRadius, cornerRadius, backgroundPaint)
+            }
+            if (appearance.keyBorder) canvas.drawRoundRect(rectF, cornerRadius, cornerRadius, borderPaint)
         }
-        if (appearance.keyBorder) canvas.drawRoundRect(rectF, cornerRadius, cornerRadius, borderPaint)
 
         // テキスト色とサイズの決定
         val textColor = when {
             isAccent -> colors.onAccent
+            isFunctionKey -> colors.textSecondary
             else -> colors.text
         }
 
@@ -933,12 +951,16 @@ class KeyView(context: Context) : View(context) {
 
             is KeySpec.Action -> {
                 val label = customActionLabel ?: currentSpec.label
-                drawCenteredText(canvas, label, centerX, centerY, textColor, 15f, baseTypeface)
+                val iconRes = actionIconRes(currentSpec, label)
+                if (iconRes != null) drawIcon(canvas, iconRes, centerX, centerY, textColor)
+                else drawCenteredText(canvas, label, centerX, centerY, textColor, 15f, baseTypeface)
             }
 
             is KeySpec.ModeSwitch -> {
                 val longLabel = currentSpec.longPressLabel
-                if (isLongPressed && longLabel != null) {
+                if (isModePill) {
+                    drawModePillLabel(canvas, centerX, centerY)
+                } else if (isLongPressed && longLabel != null) {
                     drawCenteredText(canvas, longLabel, centerX, centerY, colors.accent, 14f, boldTypeface)
                 } else {
                     drawCenteredText(canvas, currentSpec.label, centerX, centerY, textColor, 14f, baseTypeface)
@@ -959,6 +981,45 @@ class KeyView(context: Context) : View(context) {
                 drawCenteredText(canvas, currentSpec.label, centerX, centerY, textColor, 14f, baseTypeface)
             }
         }
+    }
+
+    /**
+     * 文字の代わりにアイコンで描くアクションのdrawable。削除・←→・空白（ラベルが「空白」のとき）・
+     * 改行または確定のEnterが対象で、検索・送信など欄が求める名前のEnterは文字のまま描く。
+     */
+    private fun actionIconRes(action: KeySpec.Action, label: String): Int? = when (val key = action.action) {
+        KeyboardAction.Delete -> R.drawable.ic_backspace
+        is KeyboardAction.MoveCursor -> if (key.delta < 0) R.drawable.ic_arrow_left_filled else R.drawable.ic_arrow_right_filled
+        KeyboardAction.Space -> R.drawable.ic_space_bar.takeIf { label == SPACE_LABEL }
+        KeyboardAction.Enter -> R.drawable.ic_keyboard_return.takeIf { label in ENTER_ICON_LABELS }
+        else -> null
+    }
+
+    /** アイコンを[color]に染めて中心へ描く。大きさは24dp固定で、文字の大きさの設定には従わない。 */
+    private fun drawIcon(canvas: Canvas, resId: Int, centerX: Float, centerY: Float, color: Int) {
+        val icon = iconCache.getOrPut(resId) { requireNotNull(context.getDrawable(resId)).mutate() }
+        val half = (ICON_SIZE_DP * density / 2f).toInt()
+        icon.setBounds(centerX.toInt() - half, centerY.toInt() - half, centerX.toInt() + half, centerY.toInt() + half)
+        icon.setTint(color)
+        icon.draw(canvas)
+    }
+
+    /** 「あA」の丸い形の中の文字。「あ」を強調色の太字、「A」を補助の色で描く。 */
+    private fun drawModePillLabel(canvas: Canvas, centerX: Float, centerY: Float) {
+        mainTextPaint.textSize = MODE_PILL_TEXT_DP * textScale * density
+        mainTextPaint.typeface = boldTypeface
+        val kanaWidth = mainTextPaint.measureText("あ")
+        mainTextPaint.typeface = baseTypeface
+        val latinWidth = mainTextPaint.measureText("A")
+        val startX = centerX - (kanaWidth + latinWidth) / 2f
+        val textY = centerY - (mainTextPaint.descent() + mainTextPaint.ascent()) / 2f
+        mainTextPaint.textAlign = Paint.Align.LEFT
+        mainTextPaint.color = colors.textSecondary
+        canvas.drawText("A", startX + kanaWidth, textY, mainTextPaint)
+        mainTextPaint.typeface = boldTypeface
+        mainTextPaint.color = colors.accent
+        canvas.drawText("あ", startX, textY, mainTextPaint)
+        mainTextPaint.textAlign = Paint.Align.CENTER
     }
 
     /** キー中央へ一つのラベルを描画する。サイズはdp単位で受け取り、設定の文字の大きさを掛ける。 */
@@ -1112,6 +1173,21 @@ class KeyView(context: Context) : View(context) {
         } catch (_: Exception) {
             Typeface.DEFAULT
         }
+
+        /** 丸い形で描くキーの高さ（dp）と、キーの幅に対する幅の割合。Gboardの実測に合わせる。 */
+        private const val PILL_HEIGHT_DP = 46f
+        private const val PILL_WIDTH_RATIO = 0.78f
+
+        /** アイコンの大きさ（dp）。Material Symbolsの標準の大きさ。 */
+        private const val ICON_SIZE_DP = 24f
+
+        /** 12キーの「かな・英字」切り替えキーのラベル。丸い形で「あ」と「A」を並べて描く。 */
+        private const val MODE_PILL_LABEL = "あA"
+        private const val MODE_PILL_TEXT_DP = 17f
+
+        /** アイコンで描くキーのラベル。空白は「空白」、Enterは改行と確定のときだけアイコンにする。 */
+        private const val SPACE_LABEL = "空白"
+        private val ENTER_ICON_LABELS = setOf("改行", "確定")
 
         /** かなキーの文字の大きさ（dp）。Simejiの実測（約23〜24dp）に合わせる。 */
         private const val KANA_LABEL_DP = 23f

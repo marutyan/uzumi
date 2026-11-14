@@ -144,7 +144,8 @@ class KisekaeActivity : Activity() {
     /** 背景画像を切り抜く大きさの目安。候補バー・機能バーの段数とキーの高さの設定から、キーボード全体の高さを見積もる。 */
     private fun estimatedKeyboardHeightDp(): Float {
         val toolbar = UzumiSettings.toolbarPreferences(this)
-        val bars = (toolbar.toolbarRows + toolbar.candidateRows) * CandidateBarViews.BAR_HEIGHT_DP
+        // 機能バーと候補バーは同じ領域に出るため、段数の大きい方が高さになる。
+        val bars = maxOf(toolbar.toolbarRows, toolbar.candidateRows) * CandidateBarViews.BAR_HEIGHT_DP
         return bars + KANA_ROWS * UzumiSettings.keyboardHeightDp(this) + PANEL_PADDING_DP
     }
 
@@ -199,9 +200,12 @@ class KisekaeActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             val barAlpha = if (image != null) maxOf(MIN_BAR_ALPHA_WITH_IMAGE, appearance.keyOpacity / 100f) else 1f
             setBackgroundColor(ThemeColorMath.withAlpha(views.colors.bar, barAlpha))
+            val dividers = UzumiSettings.toolbarPreferences(this@KisekaeActivity).candidateDividers
             PREVIEW_PREDICTIONS.forEach { addView(views.item(it, selected = false, prediction = true) {}) }
             addView(views.divider())
-            PREVIEW_CANDIDATES.forEachIndexed { index, value -> addView(views.item(value, selected = index == 0) {}) }
+            PREVIEW_CANDIDATES.forEachIndexed { index, value ->
+                addView(views.item(value, selected = index == 0, dividerBefore = dividers && index > 1) {})
+            }
         }
         val panel = KeyboardPanel(this, ::onPreviewAction, preferences = preferences)
         previewFrame.addView(LinearLayout(this).apply {

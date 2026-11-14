@@ -8,6 +8,7 @@ import dev.uzumi.ime.keyboard.KeyboardAppearance
 import dev.uzumi.ime.keyboard.KeyboardBackgroundImage
 import dev.uzumi.ime.keyboard.KeyboardPreferences
 import dev.uzumi.ime.keyboard.ToolbarAction
+import dev.uzumi.ime.keyboard.ToolbarLayout
 import dev.uzumi.ime.keyboard.ToolbarPreferences
 import dev.uzumi.ime.learning.LearningStores
 import kotlin.math.roundToInt
@@ -48,9 +49,14 @@ object UzumiSettings {
     private const val KEY_VIBRATION = "vibration"
     private const val KEY_SOUND = "key_sound"
     private const val KEY_DELETE_DRAG = "delete_drag"
+    // バーの中央の機能。導入前から使っている名前で、右端と置き場の保存名はこの導入で加えた。
     private const val KEY_TOOLBAR_ACTIONS = "toolbar_actions"
+    private const val KEY_TOOLBAR_RIGHT = "toolbar_right"
+    private const val KEY_TOOLBAR_TRAY = "toolbar_tray"
+    private const val KEY_CANDIDATE_DIVIDERS = "candidate_dividers"
     private const val KEY_TOOLBAR_ROWS = "toolbar_rows"
     private const val KEY_CANDIDATE_ROWS = "candidate_rows"
+    private const val KEY_TOOLBAR_ON_TOP = "toolbar_on_top"
     // クリップボード履歴の表示・保存を切り替えるキー。
     private const val KEY_CLIPBOARD_HISTORY_ENABLED = "clipboard_history_enabled"
     // 履歴を最後にONへ戻した時刻（ミリ秒）。これより前のコピーは保存しない。
@@ -116,24 +122,60 @@ object UzumiSettings {
             normalize = { value -> value as? BackupJsonValue.BooleanValue },
             apply = { context, value -> setKeyPreview(context, value.booleanValue()!!) },
         ),
+        // 三か所の並びを導入する前の形式の項目。古いバックアップでは、バーに出す機能の一覧（6個以上もありうる）だけを持つ。
+        // アプリ更新時と同じ移行で三か所をまとめて作る。新しいバックアップでは、続く toolbarBar・toolbarRight・toolbarTray が上書きする。
         BackupSettingDescriptor(
             key = "toolbarActions",
             capture = { context -> BackupJsonValue.ArrayValue(toolbarPreferences(context).selectedActions.map { BackupJsonValue.StringValue(it.name) }) },
             normalize = normalize@{ value ->
-                val actionValues = (value as? BackupJsonValue.ArrayValue)?.values
-                    ?: return@normalize null
-                val names = actionValues.map {
-                    (it as? BackupJsonValue.StringValue)?.value ?: return@normalize null
-                }
-                val actions = names.mapNotNull { name -> ToolbarAction.entries.firstOrNull { it.name == name } }
+                val actions = backupActions(value) ?: return@normalize null
+                // 移行で6個目以降を置き場へ回すため、ここでは個数で切らない
+                BackupJsonValue.ArrayValue(
+                    actions.filter { it in ToolbarPreferences.AVAILABLE_ACTIONS }.distinct().map { BackupJsonValue.StringValue(it.name) },
+                )
+            },
+            apply = { context, value -> applyLegacyToolbarActions(context, actionsOf(value)) },
+        ),
+        // バーの中央の並び（最大5個）。
+        BackupSettingDescriptor(
+            key = "toolbarBar",
+            capture = { context -> BackupJsonValue.ArrayValue(toolbarPreferences(context).selectedActions.map { BackupJsonValue.StringValue(it.name) }) },
+            normalize = normalize@{ value ->
+                val actions = backupActions(value) ?: return@normalize null
                 BackupJsonValue.ArrayValue(ToolbarPreferences.normalizeActions(actions).map { BackupJsonValue.StringValue(it.name) })
             },
-            apply = { context, value ->
-                val actions = value.arrayValue()!!.mapNotNull { action ->
-                    ToolbarAction.entries.firstOrNull { it.name == action.stringValue() }
+            apply = { context, value -> setToolbarActions(context, actionsOf(value)) },
+        ),
+        // 右端の機能。空の文字列は右端なし。
+        BackupSettingDescriptor(
+            key = "toolbarRight",
+            capture = { context -> BackupJsonValue.StringValue(toolbarPreferences(context).rightAction?.name.orEmpty()) },
+            normalize = { value ->
+                (value as? BackupJsonValue.StringValue)?.let {
+                    BackupJsonValue.StringValue(ToolbarPreferences.decodeAction(it.value)?.name.orEmpty())
                 }
-                setToolbarActions(context, actions)
             },
+            apply = { context, value -> setToolbarRight(context, ToolbarPreferences.decodeAction(value.stringValue()!!)) },
+        ),
+        BackupSettingDescriptor(
+            key = "toolbarTray",
+            capture = { context -> BackupJsonValue.ArrayValue(toolbarPreferences(context).trayActions.map { BackupJsonValue.StringValue(it.name) }) },
+            normalize = normalize@{ value ->
+                val names = (value as? BackupJsonValue.ArrayValue)?.values?.map {
+                    (it as? BackupJsonValue.StringValue)?.value ?: return@normalize null
+                } ?: return@normalize null
+                val actions = names.mapNotNull(ToolbarPreferences::decodeAction).filter { it in ToolbarPreferences.AVAILABLE_ACTIONS }.distinct()
+                BackupJsonValue.ArrayValue(actions.map { BackupJsonValue.StringValue(it.name) })
+            },
+            apply = { context, value ->
+                setToolbarTray(context, value.arrayValue()!!.mapNotNull { ToolbarPreferences.decodeAction(it.stringValue()!!) })
+            },
+        ),
+        BackupSettingDescriptor(
+            key = "candidateDividers",
+            capture = { BackupJsonValue.BooleanValue(toolbarPreferences(it).candidateDividers) },
+            normalize = { value -> value as? BackupJsonValue.BooleanValue },
+            apply = { context, value -> setCandidateDividers(context, value.booleanValue()!!) },
         ),
         BackupSettingDescriptor(
             key = "toolbarRows",
@@ -146,6 +188,12 @@ object UzumiSettings {
             capture = { BackupJsonValue.NumberValue(toolbarPreferences(it).candidateRows.toString()) },
             normalize = { value -> value.intOrNull()?.let { BackupJsonValue.NumberValue(ToolbarPreferences.normalizeRows(it).toString()) } },
             apply = { context, value -> setCandidateRows(context, value.intOrNull()!!) },
+        ),
+        BackupSettingDescriptor(
+            key = "toolbarOnTop",
+            capture = { BackupJsonValue.BooleanValue(toolbarPreferences(it).toolbarOnTop) },
+            normalize = { value -> value as? BackupJsonValue.BooleanValue },
+            apply = { context, value -> setToolbarOnTop(context, value.booleanValue()!!) },
         ),
         BackupSettingDescriptor(
             key = "romajiInput",
@@ -238,32 +286,88 @@ object UzumiSettings {
         editor.apply()
     }
 
-    /** 機能バーの選択順と、機能バー・候補バーの段数を読む。 */
+    /** バーの並び（中央、右端、置き場）と、機能バー・候補バーの段数、候補の区切り線、機能バーの段を読む。導入前の保存値は移行して読む。 */
     fun toolbarPreferences(context: Context): ToolbarPreferences {
         val prefs = preferences(context)
-        val defaultActions = ToolbarPreferences.DEFAULT_ACTIONS.joinToString(",") { it.name }
-        val actions = prefs.getString(KEY_TOOLBAR_ACTIONS, defaultActions)
-            ?.split(',')
-            ?.mapNotNull { name -> ToolbarAction.entries.firstOrNull { it.name == name } }
-            ?: ToolbarPreferences.DEFAULT_ACTIONS
-        return ToolbarPreferences(
-            selectedActions = actions,
+        return ToolbarPreferences.fromStorage(
+            barNames = prefs.getString(KEY_TOOLBAR_ACTIONS, null),
+            rightName = prefs.getString(KEY_TOOLBAR_RIGHT, null),
+            trayNames = prefs.getString(KEY_TOOLBAR_TRAY, null),
+        ).copy(
             toolbarRows = prefs.getInt(KEY_TOOLBAR_ROWS, ToolbarPreferences.DEFAULT_ROWS),
             candidateRows = prefs.getInt(KEY_CANDIDATE_ROWS, ToolbarPreferences.DEFAULT_ROWS),
+            candidateDividers = prefs.getBoolean(KEY_CANDIDATE_DIVIDERS, true),
+            toolbarOnTop = prefs.getBoolean(KEY_TOOLBAR_ON_TOP, true),
         ).normalized()
     }
 
-    /** 機能バーへ出す機能と順序を保存する。 */
+    /**
+     * バーの中央に出す機能と順序を保存する。設定画面の「上段に表示する機能」から呼ぶ。
+     * 右端の機能がバーへ移るときは右端を空にし、バーから外した機能は置き場へ戻る。
+     */
     fun setToolbarActions(context: Context, actions: List<ToolbarAction>) {
+        val current = toolbarPreferences(context)
+        val bar = ToolbarPreferences.normalizeActions(actions)
+        saveToolbarLayout(context, current.copy(selectedActions = bar, rightAction = current.rightAction?.takeIf { it !in bar }))
+    }
+
+    /** 導入前の形式の一覧[legacy]から、アプリ更新時と同じ移行で三か所の並びを作って保存する。段数と区切り線は今の値を保つ。 */
+    private fun applyLegacyToolbarActions(context: Context, legacy: List<ToolbarAction>) {
+        val migrated = ToolbarPreferences.migrateFromBarActions(legacy)
+        saveToolbarLayout(context, toolbarPreferences(context).copy(
+            selectedActions = migrated.selectedActions,
+            rightAction = migrated.rightAction,
+            trayActions = migrated.trayActions,
+        ))
+    }
+
+    /** バックアップの機能名の配列を読む。文字列でない要素があれば値全体を拒否し、未知の名前は除く。 */
+    private fun backupActions(value: BackupJsonValue): List<ToolbarAction>? {
+        val values = (value as? BackupJsonValue.ArrayValue)?.values ?: return null
+        val names = values.map { (it as? BackupJsonValue.StringValue)?.value ?: return null }
+        return names.mapNotNull(ToolbarPreferences::decodeAction)
+    }
+
+    /** 正規化済みのバックアップ値から機能の一覧を取り出す。 */
+    private fun actionsOf(value: BackupJsonValue): List<ToolbarAction> =
+        value.arrayValue()!!.mapNotNull { ToolbarPreferences.decodeAction(it.stringValue()!!) }
+
+    /** 右端の丸いボタンの機能を保存する。nullで空にする。バーに同じ機能があればバーから外す。 */
+    fun setToolbarRight(context: Context, action: ToolbarAction?) {
+        val current = toolbarPreferences(context)
+        saveToolbarLayout(context, current.copy(selectedActions = current.selectedActions.filter { it != action }, rightAction = action))
+    }
+
+    /** 機能タイルの置き場の並びを保存する。バーと右端にある機能は置き場へ入れない。 */
+    fun setToolbarTray(context: Context, actions: List<ToolbarAction>) {
+        saveToolbarLayout(context, toolbarPreferences(context).copy(trayActions = actions))
+    }
+
+    /** バーの中央・右端・置き場の並びを、ドラッグでの並べ替えの結果としてまとめて保存する。 */
+    fun setToolbarLayout(context: Context, layout: ToolbarLayout) {
+        saveToolbarLayout(context, toolbarPreferences(context).withLayout(layout))
+    }
+
+    /** 整えた並びを三つの保存名へ書く。右端が空でも名前を書き、導入後の保存であると分かるようにする。 */
+    private fun saveToolbarLayout(context: Context, value: ToolbarPreferences) {
+        val normalized = value.normalized()
         preferences(context).edit()
-            .putString(KEY_TOOLBAR_ACTIONS, ToolbarPreferences.normalizeActions(actions).joinToString(",") { it.name })
+            .putString(KEY_TOOLBAR_ACTIONS, ToolbarPreferences.encodeActions(normalized.selectedActions))
+            .putString(KEY_TOOLBAR_RIGHT, normalized.rightAction?.name.orEmpty())
+            .putString(KEY_TOOLBAR_TRAY, ToolbarPreferences.encodeActions(normalized.trayActions))
             .apply()
     }
+
+    /** 候補の区切り線を引くかを保存する。 */
+    fun setCandidateDividers(context: Context, enabled: Boolean) = putBoolean(context, KEY_CANDIDATE_DIVIDERS, enabled)
 
     /** 機能バーの段数を保存する。 */
     fun setToolbarRows(context: Context, rows: Int) {
         preferences(context).edit().putInt(KEY_TOOLBAR_ROWS, ToolbarPreferences.normalizeRows(rows)).apply()
     }
+
+    /** 入力していない間の機能バーを上の段に置くか（falseなら下の段）を保存する。 */
+    fun setToolbarOnTop(context: Context, onTop: Boolean) = putBoolean(context, KEY_TOOLBAR_ON_TOP, onTop)
 
     /** 候補バーの段数を保存する。 */
     fun setCandidateRows(context: Context, rows: Int) {

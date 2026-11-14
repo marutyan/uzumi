@@ -208,13 +208,18 @@ abstract class PrepareMozcAssets : DefaultTask() {
     @get:PathSensitive(PathSensitivity.NONE)
     abstract val yuseiMagicLicenseFile: RegularFileProperty
 
+    @get:Optional
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val materialSymbolsLicenseFile: RegularFileProperty
+
     @get:OutputDirectory
     abstract val outputDirectory: DirectoryProperty
 
     @get:Inject
     abstract val fileSystem: FileSystemOperations
 
-    /** 出力先を作り直し、辞書とMozc・フォントの表示文書をassetsへ置く。 */
+    /** 出力先を作り直し、辞書とMozc・フォント・アイコンの表示文書をassetsへ置く。 */
     @TaskAction
     fun prepare() {
         val output = outputDirectory.get().asFile
@@ -244,6 +249,13 @@ abstract class PrepareMozcAssets : DefaultTask() {
             fileSystem.copy {
                 from(license)
                 rename { "yusei-magic-OFL.txt" }
+                into(output.resolve("licenses"))
+            }
+        }
+        materialSymbolsLicenseFile.orNull?.asFile?.let { license ->
+            fileSystem.copy {
+                from(license)
+                rename { "material-symbols-Apache-2.0.txt" }
                 into(output.resolve("licenses"))
             }
         }
@@ -330,6 +342,7 @@ val prepareMozcAssets = tasks.register<PrepareMozcAssets>("prepareMozcAssets") {
     rootProject.file("third_party/mozc/NOTICE.txt").takeIf(File::isFile)?.let(noticeFile::set)
     rootProject.file("third_party/fonts/zen-maru-gothic/OFL.txt").takeIf(File::isFile)?.let(zenMaruGothicLicenseFile::set)
     rootProject.file("third_party/fonts/yusei-magic/OFL.txt").takeIf(File::isFile)?.let(yuseiMagicLicenseFile::set)
+    rootProject.file("third_party/icons/material-symbols/LICENSE.txt").takeIf(File::isFile)?.let(materialSymbolsLicenseFile::set)
     outputDirectory.set(layout.buildDirectory.dir("generated/mozc/assets"))
 }
 

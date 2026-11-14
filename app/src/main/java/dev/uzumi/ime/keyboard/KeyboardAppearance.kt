@@ -78,8 +78,8 @@ data class KeyboardAppearance(
     /** 背景画像のぼかしの強さ（dp、0でぼかさない）。 */
     val backgroundBlur: Int = 0,
     val keyShape: KeyShape = KeyShape.ROUNDED,
-    /** 背景画像があるときのキーの不透明度（%）。画像がなければ常に不透明に描く。 */
-    val keyOpacity: Int = 100,
+    /** キーの地の不透明度（%）。0なら地を塗らず、12キーの列の間に区切り線を引く。 */
+    val keyOpacity: Int = DEFAULT_KEY_OPACITY,
     /** キーの境界線を描くか。 */
     val keyBorder: Boolean = false,
     val keyFont: KeyFont = KeyFont.GOTHIC,
@@ -136,6 +136,9 @@ data class KeyboardAppearance(
     }
 
     companion object {
+        /** キーの地の不透明度の既定値（%）。外枠なしの見た目にする。 */
+        const val DEFAULT_KEY_OPACITY = 0
+
         /** 背景画像の明るさの既定値（%）。試作と同じく少し暗くして文字を読みやすくする。 */
         const val DEFAULT_BACKGROUND_BRIGHTNESS = 85
         val BACKGROUND_BRIGHTNESS_RANGE = 30..130
