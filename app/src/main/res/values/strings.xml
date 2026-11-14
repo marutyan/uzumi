@@ -163,6 +163,8 @@
     <string name="keyboard_preview_state">見本の状態</string>
     <string name="keyboard_preview_idle">入力前</string>
     <string name="keyboard_preview_composing">入力中</string>
+    <!-- 見本のTalkBackの操作。見本の左下のキーと同じく、選んだ順の次の配列へ切り替える。 -->
+    <string name="keyboard_preview_next_keymap">次のキーマップ</string>
     <string name="settings_keymaps">キーマップ</string>
     <!-- キーマップのカードをTalkBackで読むときの名前。選んだ順の番号を付ける。 -->
     <string name="settings_keymap_selected">%1$d. %2$s</string>

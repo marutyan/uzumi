@@ -13,6 +13,7 @@ import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.CheckBox
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -64,6 +65,24 @@ class KeyboardSettingsActivity : Activity() {
     private var previewPanel: KeyboardPanel? = null
     private var previewKeymap: Keymap? = null
 
+    // キーマップ・テーマ・背景画像のカード。押したときは作り直さず、選択の印と配色と読み上げ名だけを書き換える
+    // （横にスクロールした位置と、TalkBackで選んでいるカードを保つため）。
+    private val keymapCardViews = mutableMapOf<Keymap, Card>()
+    private val themeCardViews = mutableMapOf<ThemePreset, Card>()
+    private var photoCard: Card? = null
+    private var noneCard: Card? = null
+
+    // カードの列。項目を作り直すときに横のスクロール位置を保つために持つ。
+    private val strips = mutableListOf<HorizontalScrollView>()
+
+    // 「ほかの機能」の置き場を入れる場所。テーマを変えたときは置き場だけを新しい配色で作り直す。
+    private var trayHost: FrameLayout? = null
+
+    /** カード一つの部品。選択の状態・番号・配色・読み上げ名を、作り直さずに書き換えるために持つ。 */
+    private class Card(val view: LinearLayout, val thumb: KeyboardThumbView, val label: String) {
+        var checked = false
+    }
+
     // スライダーを動かしている間に見本を作り直しすぎないよう、少し待ってからまとめて作り直す。
     private val handler = Handler(Looper.getMainLooper())
     private val previewRefresh = Runnable { buildPreview() }
@@ -83,6 +102,7 @@ class KeyboardSettingsActivity : Activity() {
                 setStroke(ui.px(1).coerceAtLeast(1), ui.divider)
             }
             clipToOutline = true
+            accessibilityDelegate = previewAccessibility()
             // 見本が画面の高さの半分を超えないようにする（試作と同じ上限）。
             maxHeightPx = (resources.displayMetrics.heightPixels * PREVIEW_MAX_SCREEN_FRACTION).toInt() - ui.px(PREVIEW_HEAD_DP)
         }
@@ -139,9 +159,13 @@ class KeyboardSettingsActivity : Activity() {
     /** 項目と見本を今の設定から作り直す。スクロール位置は保つ。 */
     private fun rebuild() {
         val scrollY = scroll.scrollY
+        val stripScrolls = strips.map { it.scrollX }
         scroll.removeAllViews()
         scroll.addView(buildSettings())
-        scroll.post { scroll.scrollTo(0, scrollY) }
+        scroll.post {
+            scroll.scrollTo(0, scrollY)
+            strips.zip(stripScrolls).forEach { (strip, x) -> strip.scrollTo(x, 0) }
+        }
         buildPreview()
     }
 
@@ -203,6 +227,7 @@ class KeyboardSettingsActivity : Activity() {
         }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         previewBox.removeAllViews()
         previewBox.addView(sample, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
+        previewBox.stateDescription = previewPanel?.shownKeymap?.displayName
 
         val currentTray = tray ?: return
         if (composing) {
@@ -237,6 +262,29 @@ class KeyboardSettingsActivity : Activity() {
             setEditorMode(numeric = false, password = false, directCommit = false)
             previewKeymap?.takeIf { it in order }?.let(::selectKeymap)
             previewPanel = this
+        }
+    }
+
+    /**
+     * 見本のTalkBackでの扱い。見本のキーは隠したまま、見本全体の状態として今の配列の名前を読ませ、「次のキーマップ」の操作で
+     * 左下のキーと同じく選んだ順の次の配列へ切り替える。切り替えた後は状態の変化として新しい配列の名前が読み上げられる。
+     */
+    private fun previewAccessibility(): View.AccessibilityDelegate = object : View.AccessibilityDelegate() {
+        override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+            super.onInitializeAccessibilityNodeInfo(host, info)
+            // 指で左下のキーを押して切り替えた後も、読み上げる時点の配列を伝える。
+            previewPanel?.let { info.stateDescription = it.shownKeymap.displayName }
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.action_next_keymap, getString(R.string.keyboard_preview_next_keymap)))
+        }
+
+        override fun performAccessibilityAction(host: View, action: Int, args: Bundle?): Boolean {
+            if (action != R.id.action_next_keymap) return super.performAccessibilityAction(host, action, args)
+            val panel = previewPanel ?: return false
+            val next = KeymapRules.next(UzumiSettings.keymaps(this@KeyboardSettingsActivity), panel.shownKeymap,
+                password = false, directCommit = false)
+            panel.selectKeymap(next)
+            host.stateDescription = next.displayName
+            return true
         }
     }
 
@@ -371,6 +419,7 @@ class KeyboardSettingsActivity : Activity() {
 
     /** 見本の下に並べる項目。 */
     private fun buildSettings(): LinearLayout {
+        strips.clear()
         val page = ui.page().apply { clipToPadding = false }
         val preferences = UzumiSettings.keyboardPreferences(this)
         val toolbar = UzumiSettings.toolbarPreferences(this)
@@ -387,14 +436,68 @@ class KeyboardSettingsActivity : Activity() {
                 buildPreview()
             }.first.view,
         ))))
-        val newTray = SettingsToolbarTray(this, ToolbarBarViews(this), ::onTrayTileClick)
-        tray = newTray
-        ui.addBlock(page, ui.section(getString(R.string.settings_toolbar_tray), newTray.area))
+        val host = FrameLayout(this)
+        trayHost = host
+        replaceTray()
+        ui.addBlock(page, ui.section(getString(R.string.settings_toolbar_tray), host))
         ui.addBlock(page, ui.group(listOf(
             ui.row(getString(R.string.settings_fine_tune), getString(R.string.settings_fine_tune_summary), R.drawable.ic_tune,
                 trailing = ui.chevron()) { startActivity(Intent(this, KisekaeActivity::class.java)) }.view,
         )))
+        refreshCards()
         return page
+    }
+
+    /** 「ほかの機能」の置き場を今のテーマの配色で作り直して置く。見本の並べ替えは、この後の[buildPreview]で新しい置き場につなぐ。 */
+    private fun replaceTray() {
+        val host = trayHost ?: return
+        val newTray = SettingsToolbarTray(this, ToolbarBarViews(this), ::onTrayTileClick)
+        tray = newTray
+        host.removeAllViews()
+        host.addView(newTray.area, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
+    }
+
+    /**
+     * キーマップ・テーマ・背景画像のカードを、今の設定に合わせて書き換える。選んだ順の番号、選択の印、縮図の配色、
+     * 「今の写真」の有無、TalkBackの読み上げ名を合わせ、カードそのものは作り直さない。
+     */
+    private fun refreshCards() {
+        val appearance = UzumiSettings.keyboardAppearance(this)
+        val dark = KeyboardColors.isDark(this, appearance)
+        val palette = paletteFor(appearance, dark)
+        val order = UzumiSettings.keymaps(this)
+        keymapCardViews.forEach { (keymap, card) ->
+            val position = order.indexOf(keymap)
+            showCard(card, palette, checked = position >= 0, number = (position + 1).takeIf { position >= 0 },
+                description = if (position >= 0) getString(R.string.settings_keymap_selected, position + 1, keymap.displayName) else null)
+        }
+        themeCardViews.forEach { (preset, card) ->
+            showCard(card, paletteFor(appearance.copy(preset = preset), dark), checked = appearance.preset == preset)
+        }
+        val photo = KeyboardBackgroundImage.load(this, appearance.backgroundStamp, appearance.backgroundBlur)
+        photoCard?.let { card ->
+            card.view.visibility = if (photo != null) View.VISIBLE else View.GONE
+            showCard(card, palette, checked = photo != null, photo = photo)
+        }
+        noneCard?.let { showCard(it, palette, checked = photo == null) }
+    }
+
+    /** カード一つの縮図と選択の状態、読み上げ名を書き換える。 */
+    private fun showCard(
+        card: Card,
+        palette: ThemePalette,
+        checked: Boolean,
+        number: Int? = null,
+        description: String? = null,
+        photo: Bitmap? = null,
+    ) {
+        card.checked = checked
+        card.thumb.palette = palette
+        card.thumb.checked = checked
+        card.thumb.number = number
+        card.thumb.photo = photo
+        card.thumb.invalidate()
+        card.view.contentDescription = description ?: card.label
     }
 
     /** 横に流して選ぶカードの列を、見出しつきで置く。列は画面の端まで広げ、最初のカードを左端から24dpで始める。 */
@@ -412,6 +515,7 @@ class KeyboardSettingsActivity : Activity() {
             isHorizontalScrollBarEnabled = false
             addView(row)
         }
+        strips += strip
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             clipChildren = false
@@ -429,24 +533,17 @@ class KeyboardSettingsActivity : Activity() {
      * 押すと選択・解除し（最後の1つは外さない）、足した配列を見本に出す。保存はUzumiSettingsのキーマップの読み書きを使う。
      */
     private fun keymapCards(): List<View> {
-        val appearance = UzumiSettings.keyboardAppearance(this)
-        val palette = paletteFor(appearance, KeyboardColors.isDark(this, appearance))
-        val order = UzumiSettings.keymaps(this)
+        keymapCardViews.clear()
         return Keymap.entries.map { keymap ->
-            val position = order.indexOf(keymap)
-            card(
-                label = keymap.displayName,
-                palette = palette,
-                checked = position >= 0,
-                role = CheckBox::class.java.name,
-                number = (position + 1).takeIf { position >= 0 },
-                keymapRows = KeymapThumbnails.rows(keymap),
-                description = if (position >= 0) getString(R.string.settings_keymap_selected, position + 1, keymap.displayName) else null,
-            ) { toggleKeymap(keymap) }
+            card(keymap.displayName, CheckBox::class.java.name, keymapRows = KeymapThumbnails.rows(keymap)) { toggleKeymap(keymap) }
+                .also { keymapCardViews[keymap] = it }.view
         }
     }
 
-    /** キーマップの選択を切り替えて保存し、見本と項目を作り直す。足した配列は見本に出し、外した配列を見本に出していたら最初の配列へ戻す。 */
+    /**
+     * キーマップの選択を切り替えて保存し、カードの番号と見本を合わせる。足した配列は見本に出し、
+     * 外した配列を見本に出していたら最初の配列へ戻す。
+     */
     private fun toggleKeymap(keymap: Keymap) {
         val order = UzumiSettings.keymaps(this)
         val changed = KeymapRules.toggled(order, keymap)
@@ -454,21 +551,17 @@ class KeyboardSettingsActivity : Activity() {
         UzumiSettings.setKeymaps(this, changed)
         previewKeymap = if (keymap in changed) keymap else previewPanel?.shownKeymap?.takeIf { it in changed }
         previewPanel = null
-        rebuild()
+        refreshCards()
+        buildPreview()
     }
 
     /** テーマのカード。各テーマの今の明るさの配色で縮図を描き、カスタムには左上にスポイトの印を付ける。 */
     private fun themeCards(): List<View> {
-        val appearance = UzumiSettings.keyboardAppearance(this)
-        val dark = KeyboardColors.isDark(this, appearance)
+        themeCardViews.clear()
         return ThemePreset.entries.map { preset ->
-            card(
-                label = getString(keyboardThemeName(preset)),
-                palette = paletteFor(appearance.copy(preset = preset), dark),
-                checked = appearance.preset == preset,
-                role = RadioButton::class.java.name,
-                badge = if (preset == ThemePreset.CUSTOM) R.drawable.ic_colorize else null,
-            ) { selectTheme(preset) }
+            card(getString(keyboardThemeName(preset)), RadioButton::class.java.name,
+                badge = if (preset == ThemePreset.CUSTOM) R.drawable.ic_colorize else null) { selectTheme(preset) }
+                .also { themeCardViews[preset] = it }.view
         }
     }
 
@@ -484,7 +577,10 @@ class KeyboardSettingsActivity : Activity() {
         }
         if (current.preset == preset) return
         UzumiSettings.setKeyboardAppearance(this, current.copy(preset = preset))
-        rebuild()
+        // カードと置き場の配色、見本を新しいテーマに合わせる。カードは作り直さない。
+        refreshCards()
+        replaceTray()
+        buildPreview()
     }
 
     /**
@@ -492,25 +588,22 @@ class KeyboardSettingsActivity : Activity() {
      * 「なし」を選ぶと、きせかえの画面の「画像を外す」と同じく保存した写真を消す。
      */
     private fun backgroundCards(): List<View> {
-        val appearance = UzumiSettings.keyboardAppearance(this)
-        val palette = paletteFor(appearance, KeyboardColors.isDark(this, appearance))
-        val photo = KeyboardBackgroundImage.load(this, appearance.backgroundStamp, appearance.backgroundBlur)
-        return buildList {
-            add(card(getString(R.string.kisekae_background_pick), palette = null, checked = false, role = null) {
-                KeyboardBackgroundPicker.open(this@KeyboardSettingsActivity, REQUEST_BACKGROUND_IMAGE)
-            })
-            if (photo != null) {
-                add(card(getString(R.string.keyboard_background_current), palette, checked = true, role = RadioButton::class.java.name,
-                    photo = photo) {})
-            }
-            add(card(getString(R.string.keyboard_background_none), palette, checked = photo == null, role = RadioButton::class.java.name) {
-                if (appearance.hasBackgroundImage) {
-                    KeyboardBackgroundImage.remove(this@KeyboardSettingsActivity)
-                    UzumiSettings.setBackgroundStamp(this@KeyboardSettingsActivity, 0L)
-                    rebuild()
-                }
-            })
+        val pick = card(getString(R.string.kisekae_background_pick), role = null) {
+            KeyboardBackgroundPicker.open(this@KeyboardSettingsActivity, REQUEST_BACKGROUND_IMAGE)
         }
+        // 「今の写真」は写真を保存しているときだけ見せる（[refreshCards]で切り替える）。
+        val current = card(getString(R.string.keyboard_background_current), RadioButton::class.java.name) {}
+        val none = card(getString(R.string.keyboard_background_none), RadioButton::class.java.name) {
+            if (UzumiSettings.keyboardAppearance(this).hasBackgroundImage) {
+                KeyboardBackgroundImage.remove(this@KeyboardSettingsActivity)
+                UzumiSettings.setBackgroundStamp(this@KeyboardSettingsActivity, 0L)
+                refreshCards()
+                buildPreview()
+            }
+        }
+        photoCard = current
+        noneCard = none
+        return listOf(pick.view, current.view, none.view)
     }
 
     /** 選んだテーマと明るさの配色。標準は色resourceと同じ値を持つ定義から読む。 */
@@ -519,36 +612,38 @@ class KeyboardSettingsActivity : Activity() {
 
     /**
      * カード一つ。縮図の下に名前を置き、押すと[onClick]を呼ぶ。[role]があればTalkBackにその部品（ラジオボタン・チェックボックス）として、
-     * 選択中かどうかとともに読ませる。読み上げの名前は[description]、なければ[label]にする。
+     * 読み上げる時点で選択中かどうかとともに読ませる。縮図の配色と選択の状態は[refreshCards]で入れる。
+     * 配色を入れないカード（写真を選ぶ）は、行の地に＋を描く。
      */
     private fun card(
         label: String,
-        palette: ThemePalette?,
-        checked: Boolean,
         role: String?,
         badge: Int? = null,
-        photo: Bitmap? = null,
-        number: Int? = null,
         keymapRows: List<List<ThumbKey>>? = null,
-        description: String? = null,
         onClick: () -> Unit,
-    ): View = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        gravity = Gravity.CENTER_HORIZONTAL
-        isClickable = true
-        isFocusable = true
-        contentDescription = description ?: label
-        setOnClickListener { onClick() }
-        if (role != null) accessibilityDelegate = ui.checkedRole(role) { checked }
-        addView(KeyboardThumbView(this@KeyboardSettingsActivity).apply {
-            this.palette = palette
-            this.photo = photo
-            this.checked = checked
-            this.number = number
+    ): Card {
+        val thumb = KeyboardThumbView(this).apply {
             this.keymapRows = keymapRows
             this.badge = badge?.let { requireNotNull(getDrawable(it)).mutate() }
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+        val view = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            isClickable = true
+            isFocusable = true
+            contentDescription = label
+            setOnClickListener { onClick() }
+            addView(thumb, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+        val card = Card(view, thumb, label)
+        if (role != null) view.accessibilityDelegate = ui.checkedRole(role) { card.checked }
+        view.addCardLabel(label)
+        return card
+    }
+
+    /** カードの縮図の下に名前を置く。名前はカード全体の読み上げ名で伝えるため、TalkBackには別に読ませない。 */
+    private fun LinearLayout.addCardLabel(label: String) {
         addView(TextView(this@KeyboardSettingsActivity).apply {
             text = label
             gravity = Gravity.CENTER
