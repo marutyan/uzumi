@@ -23,10 +23,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.launch
 
@@ -58,6 +58,10 @@ class OnDeviceVoiceTranslator(
     private var sessionJob: Job? = null
     // 停止の操作でマイクを閉じる合図。録音のthreadが読む。
     private var stopRequested: AtomicBoolean? = null
+    // 停止から確定を待つ上限を超えたことを、取り消された翻訳のcoroutineへ伝える。立っていれば届いた訳文で確定する。
+    private var stopTimedOut: AtomicBoolean? = null
+    // 停止の後に確定が届かないまま止まった場合に備える見張り。
+    private var stopWatchdog: Runnable? = null
     // このIMEが取得を始め、まだ終わっていない向き。同じ向きの取得を何度も始めないために持つ。
     private val downloadingDirections = mutableSetOf<VoiceTranslationDirection>()
 
@@ -78,9 +82,11 @@ class OnDeviceVoiceTranslator(
         }
         val generation = ++sessionGeneration
         val stopSignal = AtomicBoolean(false)
+        val timedOut = AtomicBoolean(false)
         stopRequested = stopSignal
+        stopTimedOut = timedOut
         setState(VoiceInputState.LISTENING)
-        sessionJob = scope.launch { runSession(generation, direction, stopSignal) }
+        sessionJob = scope.launch { runSession(generation, direction, stopSignal, timedOut) }
         return VoiceStartStatus.STARTED
     }
 
@@ -93,6 +99,16 @@ class OnDeviceVoiceTranslator(
         if (state != VoiceInputState.LISTENING) return false
         stopRequested?.set(true)
         setState(VoiceInputState.STOPPING)
+        val generation = sessionGeneration
+        val timedOut = stopTimedOut
+        // 翻訳器が完了を返さないまま止まっても停止待ちが残り続けないよう、上限を超えたら届いた訳文で確定させる。
+        val watchdog = Runnable {
+            if (generation != sessionGeneration || state != VoiceInputState.STOPPING) return@Runnable
+            timedOut?.set(true)
+            sessionJob?.cancel()
+        }
+        stopWatchdog = watchdog
+        mainHandler.postAtTime(watchdog, handlerToken, SystemClock.uptimeMillis() + STOP_TIMEOUT_MILLIS)
         return true
     }
 
@@ -103,6 +119,8 @@ class OnDeviceVoiceTranslator(
             return true
         }
         if (state != VoiceInputState.LISTENING && state != VoiceInputState.STOPPING) return false
+        // 録音のループはcoroutineの取り消しでは止まらない（AudioRecordの読み出しで塞がる）ので、合図でマイクを閉じさせる。
+        stopRequested?.set(true)
         sessionJob?.cancel()
         endSession()
         listener.onCancelled()
@@ -117,6 +135,7 @@ class OnDeviceVoiceTranslator(
         }
         if (state == VoiceInputState.DESTROYED) return
         mainHandler.removeCallbacksAndMessages(handlerToken)
+        stopRequested?.set(true)
         sessionGeneration++
         sessionJob = null
         stopRequested = null
@@ -128,9 +147,16 @@ class OnDeviceVoiceTranslator(
      * 1回分の翻訳を行う。モデルの確認、マイクの音声の受け渡し、訳文の集約までをcoroutineで進め、
      * 結果はメインスレッドへ戻して世代番号が一致するときだけ通知する。
      */
-    private suspend fun runSession(generation: Long, direction: VoiceTranslationDirection, stopSignal: AtomicBoolean) {
+    private suspend fun runSession(
+        generation: Long,
+        direction: VoiceTranslationDirection,
+        stopSignal: AtomicBoolean,
+        timedOut: AtomicBoolean,
+    ) {
         val source = Locale.forLanguageTag(direction.sourceTag)
         val translator = createTranslator(direction)
+        val segments = mutableListOf<String>()
+        var errorResponses = 0
         try {
             when (val status = translator.checkStatus()) {
                 FeatureStatus.AVAILABLE -> Unit
@@ -145,8 +171,6 @@ class OnDeviceVoiceTranslator(
                 }
             }
             val stats = MicrophoneStats()
-            val segments = mutableListOf<String>()
-            var errorResponses = 0
             val request = SpeechTranslatorRequest.builder(microphoneAudio(source, stopSignal, stats)).build()
             translator.startTranslation(request)
                 // 完了の応答の後に流れが閉じない場合に備え、完了を受け取った時点で読むのをやめる。
@@ -174,30 +198,49 @@ class OnDeviceVoiceTranslator(
             // 実機で、IMEのprocessから録った音が無音へ置き換えられていないかと、最後の文が無音の間に届いたかを確かめるための記録。
             // 訳文そのものは記録しない。
             Log.i(TAG, "session finished: direction=${direction.id} ${stats.summary()} segments=${segments.size} errors=$errorResponses")
-            val raw = joinSegments(segments, direction)
-            // 英語のフィラーは訳先が英語のときだけ消す。日本語の訳文には英語のフィラーの規則を当てない。
-            val text = if (direction.targetTag.startsWith("en")) EnglishFillerRemover.removeFillers(raw) else raw
-            // 聞き取れなかった（またはフィラーだけだった）ときは、空の確定ではなくNO_MATCHとして知らせ、UIが出し分けられるようにする。
-            // 翻訳器が誤りを返していた場合は、聞き取れなかったのではなく処理の失敗として知らせる。
-            postToMain {
-                when {
-                    text.isNotBlank() -> complete(generation, text)
-                    errorResponses > 0 -> fail(generation, VoiceInputError.RECOGNIZER_ERROR)
-                    else -> fail(generation, VoiceInputError.NO_MATCH)
-                }
-            }
+            finishWith(generation, direction, segments, errorResponses)
         } catch (error: CancellationException) {
+            // 停止の上限を超えて取り消した場合は、そこまでに届いた訳文で確定する。利用者の取り消しでは何も入れない。
+            if (timedOut.get()) {
+                Log.w(TAG, "translation did not complete after stop: direction=${direction.id} segments=${segments.size}")
+                finishWith(generation, direction, segments, errorResponses)
+            }
             throw error
         } catch (error: Throwable) {
             Log.w(TAG, "translation failed: direction=${direction.id}", error)
             val mapped = when (error) {
-                is MicrophoneException -> VoiceInputError.AUDIO
+                is MicrophoneException, is TranslatorStalledException -> VoiceInputError.AUDIO
                 is SecurityException -> VoiceInputError.PERMISSION_DENIED
                 else -> VoiceInputError.RECOGNIZER_ERROR
             }
             postToMain { fail(generation, mapped) }
         } finally {
+            // 翻訳器の誤りなどで受け渡しが先に終わった場合も、録音のループを止めてマイクを閉じる。
+            stopSignal.set(true)
             translator.close()
+        }
+    }
+
+    /**
+     * 届いた訳文[segments]をつなぎ、訳先が英語ならフィラーを消して、メインスレッドで確定または失敗として知らせる。
+     */
+    private fun finishWith(
+        generation: Long,
+        direction: VoiceTranslationDirection,
+        segments: List<String>,
+        errorResponses: Int,
+    ) {
+        val raw = joinSegments(segments, direction)
+        // 英語のフィラーは訳先が英語のときだけ消す。日本語の訳文には英語のフィラーの規則を当てない。
+        val text = if (direction.targetTag.startsWith("en")) EnglishFillerRemover.removeFillers(raw) else raw
+        // 聞き取れなかった（またはフィラーだけだった）ときは、空の確定ではなくNO_MATCHとして知らせ、UIが出し分けられるようにする。
+        // 翻訳器が誤りを返していた場合は、聞き取れなかったのではなく処理の失敗として知らせる。
+        postToMain {
+            when {
+                text.isNotBlank() -> complete(generation, text)
+                errorResponses > 0 -> fail(generation, VoiceInputError.RECOGNIZER_ERROR)
+                else -> fail(generation, VoiceInputError.NO_MATCH)
+            }
         }
     }
 
@@ -283,9 +326,12 @@ class OnDeviceVoiceTranslator(
 
     /** 進行中の翻訳の記録を捨てて待機状態へ戻す。以降に届く同じ回の通知は世代番号で捨てる。 */
     private fun endSession() {
+        stopWatchdog?.let(mainHandler::removeCallbacks)
+        stopWatchdog = null
         sessionGeneration++
         sessionJob = null
         stopRequested = null
+        stopTimedOut = null
         setState(VoiceInputState.IDLE)
     }
 
@@ -320,24 +366,38 @@ class OnDeviceVoiceTranslator(
     /**
      * マイクの音声を100ミリ秒ずつ翻訳器へ渡す流れ。[stopSignal]が立ったらマイクを閉じ、
      * 最後の文を確定させるための無音を実時間の速さで流してから流れを閉じる。
+     * 録音は翻訳器への受け渡しと切り離し、間に上限つきの待ち行列を置く。翻訳器が受け取りを止めても録音のthreadは塞がらず、
+     * 待ち行列があふれた時点でマイクを閉じて失敗として終える（マイクが開いたまま残らないようにするため）。
      * 録音権限は[start]で確かめた後にだけ呼ばれる。
      */
     private fun microphoneAudio(
         source: Locale,
         stopSignal: AtomicBoolean,
         stats: MicrophoneStats,
-    ): Flow<TranslationAudio> = flow {
-        MicrophonePcm.read(stopSignal) { chunk ->
-            stats.recordAudio(chunk)
-            emit(TranslationAudio(source, chunk))
+    ): Flow<TranslationAudio> = channelFlow {
+        val chunks = Channel<ByteArray>(MICROPHONE_QUEUE_CHUNKS)
+        launch(Dispatchers.IO) {
+            try {
+                MicrophonePcm.read(stopSignal) { chunk ->
+                    stats.recordAudio(chunk)
+                    if (chunks.trySend(chunk).isFailure) throw TranslatorStalledException()
+                }
+                chunks.close()
+            } catch (error: Throwable) {
+                chunks.close(error)
+            }
         }
+        for (chunk in chunks) send(TranslationAudio(source, chunk))
         stats.recordMicrophoneClosed()
         val silence = ByteArray(MicrophonePcm.CHUNK_BYTES)
         repeat(TAIL_SILENCE_CHUNKS) {
-            emit(TranslationAudio(source, silence))
+            send(TranslationAudio(source, silence))
             delay(MicrophonePcm.CHUNK_MS)
         }
-    }.flowOn(Dispatchers.IO)
+    }
+
+    /** 翻訳器が音声を受け取らなくなり、録音の待ち行列があふれたことを表す。[VoiceInputError.AUDIO]として知らせる。 */
+    private class TranslatorStalledException : Exception("translator stopped consuming audio")
 
     /**
      * 録った音の大きさ（最大値とRMS）と、マイクを閉じてから最後の訳文が届くまでの時間を数える。
@@ -396,5 +456,11 @@ class OnDeviceVoiceTranslator(
          * 本体での実機確認（2026-11-14、V09）でも、最後の文はマイクを閉じてから0.5秒後に届き、この無音の間に確定した。
          */
         const val TAIL_SILENCE_CHUNKS = 25
+
+        /** 録音と翻訳器の受け渡しの間に置く待ち行列の長さ（100ミリ秒の個数、5秒分）。 */
+        const val MICROPHONE_QUEUE_CHUNKS = 50
+
+        /** 停止から確定を待つ上限（ミリ秒）。末尾の無音2.5秒と、最後の文の確定（実機で0.5〜2.2秒）に余裕を足す。 */
+        const val STOP_TIMEOUT_MILLIS = 9_000L
     }
 }

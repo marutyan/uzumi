@@ -22,6 +22,12 @@ class EnglishFillerRemoverTest {
                 "So after that, we all went to karaoke together.",
             "Um, I think so." to "I think so.",
             "Uh, okay." to "Okay.",
+            // フィラーだけの文は文末記号ごと消し、文の途中のフィラーに付いた文末記号は残す。
+            "Um. I agree." to "I agree.",
+            "I agree. Uh. Let us go." to "I agree. Let us go.",
+            "I agree, um." to "I agree.",
+            "Is that right, uh?" to "Is that right?",
+            "Um." to "",
         )
         for ((input, expected) in cases) {
             assertEquals(input, expected, EnglishFillerRemover.removeFillers(input))

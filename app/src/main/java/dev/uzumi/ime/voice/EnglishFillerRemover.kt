@@ -10,9 +10,10 @@ object EnglishFillerRemover {
      * 消すフィラーと、その前に付いた読点・空白、直後の読点をまとめて捉える。
      * 前後が文字・数字・アポストロフィ・ハイフンなら語の一部とみなして対象にしない（「Uh-oh」「drum」を守る）。
      * 直前の読点ごと消すのは、「is, um, about」を「is about」へ戻し、読点が二つ残るのを避けるため。
+     * 直後の文末記号も捉え、フィラーだけの文（「Um.」）では記号ごと消し、文の途中のフィラーでは記号を残す。
      */
     private val FILLER = Regex(
-        """(?:\s*,)?\s*(?<![\p{L}\p{N}'’-])(?:umm?|uhh?)(?![\p{L}\p{N}'’-]),?""",
+        """(?:\s*,)?\s*(?<![\p{L}\p{N}'’-])(?:umm?|uhh?)(?![\p{L}\p{N}'’-])([,.!?])?""",
         RegexOption.IGNORE_CASE,
     )
 
@@ -28,6 +29,11 @@ object EnglishFillerRemover {
         var capitalizeNext = false
         for (match in FILLER.findAll(text)) {
             capitalizeNext = appendKept(result, text.substring(cursor, match.range.first), capitalizeNext)
+            val trailing = match.groupValues[1]
+            // 文の途中のフィラーに付いた文末記号は、その文の終わりなので残す（「I agree, um.」→「I agree.」）。
+            if (trailing.isNotEmpty() && trailing.first() in SENTENCE_END_CHARS && !isSentenceStart(result)) {
+                result.append(trailing)
+            }
             capitalizeNext = capitalizeNext || isSentenceStart(result)
             cursor = match.range.last + 1
         }
