@@ -176,20 +176,12 @@ class SettingsActivity : Activity() {
         startActivity(Intent(this, SettingsActivity::class.java).putExtra(EXTRA_PAGE, target.name))
     }
 
-    /**
-     * 「入力」の画面。ライブ変換を置く。英字配列でのローマ字かな入力の2項目は、キーマップの選択へ置き換えるまでの間ここに残す。
-     */
+    /** 「入力」の画面。ライブ変換を置く。キーの配列の選択（キーマップ）は「キーボード」の画面に置く。 */
     private fun buildInput(content: LinearLayout) {
         ui.addBlock(content, ui.section(getString(R.string.settings_section_conversion), ui.group(listOf(
             switchRow(R.string.live_conversion_switch, R.string.live_conversion_description,
                 UzumiSettings.isLiveConversionEnabled(this)) { UzumiSettings.setLiveConversionEnabled(this, it) },
         ))))
-        ui.addBlock(content, ui.group(listOf(
-            switchRow(R.string.settings_romaji_input, R.string.settings_romaji_input_description,
-                UzumiSettings.isRomajiInputEnabled(this)) { UzumiSettings.setRomajiInputEnabled(this, it) },
-            switchRow(R.string.settings_romaji_english_qwerty, R.string.settings_romaji_english_qwerty_description,
-                UzumiSettings.isRomajiEnglishQwertyIncluded(this)) { UzumiSettings.setRomajiEnglishQwertyIncluded(this, it) },
-        )))
     }
 
     /** 「キーの操作と音」の画面。押したキーの拡大表示と削除キーのなぞり、振動とキー音。 */

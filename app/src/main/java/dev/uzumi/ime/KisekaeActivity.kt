@@ -205,6 +205,7 @@ class KisekaeActivity : Activity() {
         when (action) {
             is KeyboardAction.KanaTap -> echoText.append(KeyboardLayoutData.getKanaChar(action.type, FlickDirection.CENTER))
             is KeyboardAction.Text -> echoText.append(action.value)
+            is KeyboardAction.ToggleTap -> echoText.append(action.values.first())
             KeyboardAction.Delete -> if (echoText.isNotEmpty()) echoText.setLength(echoText.length - 1)
             else -> return
         }

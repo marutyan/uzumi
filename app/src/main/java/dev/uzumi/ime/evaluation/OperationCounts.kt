@@ -61,17 +61,20 @@ object OperationClassifier {
      * キーボードの操作[action]の種類。変換キーは、明示変換（[liveMode]がfalse）では変換を始める確定操作、
      * ライブ変換では次の候補へ切り替える訂正操作とする。Enterは入力中でも確定と改行・送信を一度に行うため終端操作とする。
      * 顔文字・絵文字の選択は入力、一覧の開閉はその他の操作とする。同じ長押しの文節伸縮と、カーソルドラッグの
-     * 2回目以降の書記素移動は一回の操作として数え、続きにnullを返す。
+     * 2回目以降の書記素移動は一回の操作として数え、続きにnullを返す。英字12キーのタップと「a/A」は入力、数字Simeji型の
+     * 「元に戻す」は機能バーの「元に戻す」と同じく訂正操作とする（これらのキーは評価の記録中の面には無い）。
      */
     fun keyboardAction(action: KeyboardAction, liveMode: Boolean): OperationKind? = when (action) {
         is KeyboardAction.Text -> text(action.value)
         is KeyboardAction.KanaTap -> text(KeyboardLayoutData.getKanaChar(action.type, FlickDirection.CENTER))
-        KeyboardAction.Space, KeyboardAction.TransformKana -> OperationKind.INPUT
+        is KeyboardAction.ToggleTap -> text(action.values.firstOrNull().orEmpty())
+        KeyboardAction.Space, KeyboardAction.TransformKana, KeyboardAction.ToggleCase -> OperationKind.INPUT
         KeyboardAction.Convert -> if (liveMode) OperationKind.CORRECTION else OperationKind.COMMIT
         KeyboardAction.Delete,
         KeyboardAction.DeleteToLineStart,
         is KeyboardAction.MoveCursor,
         KeyboardAction.ToKatakana,
+        KeyboardAction.Undo,
         -> OperationKind.CORRECTION
         is KeyboardAction.MoveEditorCursor -> if (action.continued) null else OperationKind.CORRECTION
         is KeyboardAction.ResizeSegment -> if (action.continued) null else OperationKind.CORRECTION

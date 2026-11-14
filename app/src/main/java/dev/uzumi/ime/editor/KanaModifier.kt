@@ -59,6 +59,15 @@ object KanaModifier {
     /** 対応する次のかなを返し、対象外の文字ではnullを返す。 */
     fun transform(value: String): String? = replacements[value]
 
+    /**
+     * 英字一文字の大文字と小文字を入れ替える。英字以外ならnull。英字12キーの「a/A」キーで、
+     * かなの「小゛゜」キーと同じくカーソル直前の一文字を置き換えるために使う。
+     */
+    fun toggleLetterCase(value: String): String? {
+        val char = value.singleOrNull()?.takeIf { it in 'a'..'z' || it in 'A'..'Z' } ?: return null
+        return (if (char.isLowerCase()) char.uppercaseChar() else char.lowercaseChar()).toString()
+    }
+
     /** 小書き・濁点・半濁点の違いを除いた表記へ揃える。打ち分けの違う読み同士を照合するために使う。 */
     fun stripModifiers(text: String): String = buildString(text.length) {
         text.forEach { append(bases[it] ?: it) }

@@ -1279,6 +1279,26 @@ class EditorSessionTest {
         assertEquals(listOf("は", "ば", "ぱ", "は"), connection.composingTexts)
     }
 
+    /** 英字12キーのタップは続けて押すと文字が順に替わり、「a/A」で直前の英字の大文字と小文字を入れ替える。 */
+    @Test
+    fun englishTwelveKeyTogglesLettersAndCase() {
+        val connection = ModelEditorConnection(text = "", selectionStart = 0, selectionEnd = 0)
+        val session = EditorSession(connection, normalPolicy())
+        val abc = listOf("a", "b", "c")
+
+        assertTrue(session.inputKanaTap(abc, 0, fromTwelveKey = false))
+        assertTrue(session.inputKanaTap(abc, 300, fromTwelveKey = false))
+        assertEquals("b", connection.text)
+        assertTrue(session.toggleLetterCase())
+        assertEquals("B", connection.text)
+        assertTrue(session.toggleLetterCase())
+        assertEquals("b", connection.text)
+        // かなは対象外で、何も変えない
+        session.inputText("あ")
+        assertFalse(session.toggleLetterCase())
+        assertEquals("bあ", connection.text)
+    }
+
     /** 「あ」のcomposition確定通知を送る。 */
     private fun notifyCharacterCommitted(session: EditorSession) {
         session.updateSelection(1, 1, 1, 1, -1, -1)

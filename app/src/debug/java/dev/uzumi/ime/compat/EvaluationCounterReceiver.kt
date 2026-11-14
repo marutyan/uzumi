@@ -71,6 +71,10 @@ class EvaluationCounterReceiver : BroadcastReceiver() {
             }
             else -> return reject("unknown action")
         }
+        // 記録の開始と終了をIMEへ知らせ、キーボードを記録中の面（キーマップを導入する前の面）へ合わせる。計数には関わらない。
+        if (intent.action == ACTION_START || intent.action == ACTION_FINISH || intent.action == ACTION_CLEAR) {
+            EvaluationStatusSource.recordingChanged?.invoke()
+        }
         setResult(Activity.RESULT_OK, message, null)
     }
 

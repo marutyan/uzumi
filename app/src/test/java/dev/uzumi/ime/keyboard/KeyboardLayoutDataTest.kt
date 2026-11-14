@@ -396,55 +396,278 @@ class KeyboardLayoutDataTest {
         return (high + 0.05) / (low + 0.05)
     }
 
-    /** ローマ字かな入力の欄では、かな → ローマ字 → 英字 → かなの順に切り替わり、空白キーに今の層が出る。 */
+    /** 保存値は配列名のカンマ区切りで、未知の名前と重複を除き、空なら既定の選択にする。未保存はnullで移行に任せる。 */
     @Test
-    fun qwertyLayerCyclesKanaRomajiEnglishWhenEnglishIncluded() {
-        val layer = QwertyLayerState()
-        layer.configure(romajiInput = true, includesEnglish = true)
-
-        layer.enterFrom(KeyboardMode.KANA)
-        assertTrue(layer.isRomaji)
-        assertEquals("ローマ字", layer.spaceLabel)
-        assertEquals(KeyboardMode.QWERTY to "ABC", layer.cycleTarget to layer.cycleLabel)
-
-        layer.enterFrom(KeyboardMode.QWERTY)
-        assertFalse(layer.isRomaji)
-        assertEquals("English", layer.spaceLabel)
-        assertEquals(KeyboardMode.KANA to "あ", layer.cycleTarget to layer.cycleLabel)
-
-        // かなへ戻ってから「あA」で入ると、再びローマ字の層から始まる
-        layer.enterFrom(KeyboardMode.KANA)
-        assertTrue(layer.isRomaji)
-        // 記号・数字面の「ABC」は英字の層へ入る
-        layer.enterFrom(KeyboardMode.SYMBOL)
-        assertFalse(layer.isRomaji)
+    fun keymapsEncodeDecodeAndNormalize() {
+        val order = listOf(Keymap.EN_TWELVE, Keymap.JA_TWELVE, Keymap.NUMBER_CALCULATOR)
+        assertEquals("EN_TWELVE,JA_TWELVE,NUMBER_CALCULATOR", KeymapRules.encode(order))
+        assertEquals(order, KeymapRules.decode(KeymapRules.encode(order)))
+        assertEquals(listOf(Keymap.JA_QWERTY), KeymapRules.decode("JA_QWERTY,REMOVED,JA_QWERTY"))
+        assertEquals(KeymapRules.DEFAULT_ORDER, KeymapRules.decode(""))
+        assertEquals(KeymapRules.DEFAULT_ORDER, KeymapRules.normalize(emptyList()))
+        assertNull(KeymapRules.decode(null))
+        assertEquals(listOf(Keymap.JA_TWELVE, Keymap.EN_QWERTY, Keymap.NUMBER_SIMEJI), KeymapRules.DEFAULT_ORDER)
     }
 
-    /** 英字の層を含めない設定では、英字配列は常にローマ字の層で、左下キーはかなへ戻る。 */
+    /** 旧設定からの移行。かなの12キーを先頭に、ローマ字かな入力と英字の扱いに応じてQWERTYを足し、最後にSimeji型の数字。 */
     @Test
-    fun qwertyLayerStaysRomajiWhenEnglishExcluded() {
-        val layer = QwertyLayerState()
-        layer.configure(romajiInput = true, includesEnglish = true)
-        layer.enterFrom(KeyboardMode.NUMERIC)
-        assertFalse(layer.isRomaji)
-
-        layer.configure(romajiInput = true, includesEnglish = false)
-        assertTrue(layer.isRomaji)
-        layer.enterFrom(KeyboardMode.SYMBOL)
-        assertTrue(layer.isRomaji)
-        assertEquals(KeyboardMode.KANA to "あ", layer.cycleTarget to layer.cycleLabel)
-        assertEquals("ローマ字", layer.spaceLabel)
+    fun keymapsMigrateFromLegacyRomajiSettings() {
+        // 旧設定の既定（ローマ字かな入力オフ、英字を含める）は新しい既定の選択と同じ
+        assertEquals(KeymapRules.DEFAULT_ORDER, KeymapRules.migrate(romajiInput = false, includesEnglish = true))
+        assertEquals(KeymapRules.DEFAULT_ORDER, KeymapRules.migrate(romajiInput = false, includesEnglish = false))
+        assertEquals(
+            listOf(Keymap.JA_TWELVE, Keymap.JA_QWERTY, Keymap.EN_QWERTY, Keymap.NUMBER_SIMEJI),
+            KeymapRules.migrate(romajiInput = true, includesEnglish = true),
+        )
+        assertEquals(
+            listOf(Keymap.JA_TWELVE, Keymap.JA_QWERTY, Keymap.NUMBER_SIMEJI),
+            KeymapRules.migrate(romajiInput = true, includesEnglish = false),
+        )
     }
 
-    /** ローマ字かな入力を使わない欄では従来どおり、英字配列は英字で、左下キーは「あ」でかなへ戻る。 */
+    /** 左下のキーは選んだ順の次へ移り、最後の次は最初。キーには次の配列の短い名前を出し、移る先の種類を読み上げる。 */
     @Test
-    fun qwertyLayerWithoutRomajiKeepsPreviousSwitch() {
-        val layer = QwertyLayerState()
-        layer.configure(romajiInput = false, includesEnglish = true)
-        layer.enterFrom(KeyboardMode.KANA)
-        assertFalse(layer.isRomaji)
-        assertEquals(KeyboardMode.KANA to "あ", layer.cycleTarget to layer.cycleLabel)
-        assertEquals("space", layer.spaceLabel)
+    fun keymapSwitchKeyCyclesInSelectedOrder() {
+        val order = listOf(Keymap.JA_TWELVE, Keymap.JA_QWERTY, Keymap.EN_QWERTY, Keymap.EN_TWELVE, Keymap.NUMBER_SIMEJI)
+        assertEquals(Keymap.JA_QWERTY, KeymapRules.next(order, Keymap.JA_TWELVE, password = false))
+        assertEquals(Keymap.EN_QWERTY, KeymapRules.next(order, Keymap.JA_QWERTY, password = false))
+        assertEquals(Keymap.JA_TWELVE, KeymapRules.next(order, Keymap.NUMBER_SIMEJI, password = false))
+        // 選んでいない配列（「123」で移った数字の配列など）からは最初へ戻る
+        assertEquals(Keymap.JA_TWELVE, KeymapRules.next(order, Keymap.NUMBER_CALCULATOR, password = false))
+        // 1つだけ選んだ場合は同じ配列のまま
+        assertEquals(Keymap.EN_TWELVE, KeymapRules.next(listOf(Keymap.EN_TWELVE), Keymap.EN_TWELVE, password = false))
+
+        assertEquals(
+            KeySpec.ModeSwitch("ローマ字", KeyboardMode.KANA, emphasized = true),
+            KeymapRules.switchKey(order, Keymap.JA_TWELVE, password = false),
+        )
+        assertEquals(
+            KeySpec.ModeSwitch("abc", KeyboardMode.QWERTY, emphasized = true),
+            KeymapRules.switchKey(order, Keymap.EN_QWERTY, password = false),
+        )
+        assertEquals(
+            KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC, emphasized = true),
+            KeymapRules.switchKey(order, Keymap.EN_TWELVE, password = false),
+        )
+        assertEquals(
+            KeySpec.ModeSwitch("あ", KeyboardMode.KANA, emphasized = true),
+            KeymapRules.switchKey(order, Keymap.NUMBER_SIMEJI, password = false),
+        )
+        assertEquals("かな入力へ切り替え", KeySpeech.modeSwitchDescription(Keymap.JA_QWERTY.category))
+        assertEquals("英字入力へ切り替え", KeySpeech.modeSwitchDescription(Keymap.EN_TWELVE.category))
+        assertEquals("数字入力へ切り替え", KeySpeech.modeSwitchDescription(Keymap.NUMBER_SIMEJI.category))
+        assertEquals(listOf("あ", "ローマ字", "ABC", "abc", "123", "123"), Keymap.entries.map { it.shortLabel })
+    }
+
+    /** パスワード欄では日本語の配列を飛ばし、英字の配列が無ければ英字QWERTYを足す。 */
+    @Test
+    fun keymapCycleSkipsJapaneseInPasswordFields() {
+        // パスワード欄は文字をその場で確定する欄でもあるため、英字12キーは英字QWERTYに置き換わる
+        val order = listOf(Keymap.JA_TWELVE, Keymap.EN_TWELVE, Keymap.JA_QWERTY, Keymap.NUMBER_CALCULATOR)
+        assertEquals(listOf(Keymap.EN_QWERTY, Keymap.NUMBER_CALCULATOR), KeymapRules.cycleOrder(order, password = true))
+        assertEquals(Keymap.NUMBER_CALCULATOR, KeymapRules.next(order, Keymap.EN_QWERTY, password = true))
+        assertEquals(Keymap.EN_QWERTY, KeymapRules.next(order, Keymap.NUMBER_CALCULATOR, password = true))
+        // 英字の配列を選んでいなければ、文字を打てるよう英字QWERTYを先頭に足す
+        assertEquals(
+            listOf(Keymap.EN_QWERTY, Keymap.NUMBER_SIMEJI),
+            KeymapRules.cycleOrder(listOf(Keymap.JA_TWELVE, Keymap.NUMBER_SIMEJI), password = true),
+        )
+        assertEquals(listOf(Keymap.EN_QWERTY), KeymapRules.cycleOrder(listOf(Keymap.JA_TWELVE), password = true))
+        // かなを求められても英字にする
+        assertEquals(Keymap.EN_QWERTY, KeymapRules.forCategory(order, KeyboardMode.KANA, password = true))
+    }
+
+    /** 「123」などの種類を指定するキーは、選んだ順の中で最初のその種類の配列へ移り、無ければ決まった配列を使う。 */
+    @Test
+    fun keymapForCategoryUsesFirstSelectedOfThatKind() {
+        val order = listOf(Keymap.JA_QWERTY, Keymap.EN_TWELVE, Keymap.NUMBER_CALCULATOR, Keymap.NUMBER_SIMEJI)
+        assertEquals(Keymap.NUMBER_CALCULATOR, KeymapRules.forCategory(order, KeyboardMode.NUMERIC, password = false))
+        assertEquals(Keymap.EN_TWELVE, KeymapRules.forCategory(order, KeyboardMode.QWERTY, password = false))
+        assertEquals(Keymap.JA_QWERTY, KeymapRules.forCategory(order, KeyboardMode.KANA, password = false))
+        val kanaOnly = listOf(Keymap.JA_TWELVE)
+        assertEquals(Keymap.NUMBER_SIMEJI, KeymapRules.forCategory(kanaOnly, KeyboardMode.NUMERIC, password = false))
+        assertEquals(Keymap.EN_QWERTY, KeymapRules.forCategory(kanaOnly, KeyboardMode.QWERTY, password = false))
+        assertEquals(Keymap.JA_TWELVE, KeymapRules.forCategory(listOf(Keymap.EN_QWERTY), KeyboardMode.KANA, password = false))
+    }
+
+    /** 入力欄を開いたときは、数字の欄で最初の数字の配列、パスワード欄で英字、それ以外は前回の通常の欄の配列を出す。 */
+    @Test
+    fun initialKeymapFollowsFieldAndLastNormalKeymap() {
+        val order = listOf(Keymap.JA_TWELVE, Keymap.EN_TWELVE, Keymap.NUMBER_CALCULATOR)
+        assertEquals(Keymap.NUMBER_CALCULATOR, KeymapRules.initial(order, numeric = true, password = false, last = Keymap.EN_TWELVE))
+        assertEquals(Keymap.NUMBER_SIMEJI, KeymapRules.initial(listOf(Keymap.JA_TWELVE), numeric = true, password = false, last = null))
+        // パスワード欄は最初の英字の配列（英字12キーはその場で確定する欄では英字QWERTYになる）
+        assertEquals(Keymap.EN_QWERTY, KeymapRules.initial(order, numeric = false, password = true, last = Keymap.JA_TWELVE))
+        assertEquals(Keymap.EN_TWELVE, KeymapRules.initial(order, numeric = false, password = false, last = Keymap.EN_TWELVE))
+        // 前回の配列を外した場合と初回は、数字以外の最初の配列
+        assertEquals(Keymap.JA_TWELVE, KeymapRules.initial(order, numeric = false, password = false, last = Keymap.JA_QWERTY))
+        assertEquals(Keymap.EN_QWERTY, KeymapRules.initial(listOf(Keymap.NUMBER_SIMEJI, Keymap.EN_QWERTY), false, false, null))
+        assertEquals(Keymap.NUMBER_SIMEJI, KeymapRules.initial(listOf(Keymap.NUMBER_SIMEJI), false, false, null))
+        // 覚えるのは通常の欄で使った数字以外の配列だけ
+        assertTrue(KeymapRules.remembers(Keymap.EN_TWELVE, numeric = false, password = false))
+        assertFalse(KeymapRules.remembers(Keymap.NUMBER_SIMEJI, numeric = false, password = false))
+        assertFalse(KeymapRules.remembers(Keymap.EN_QWERTY, numeric = false, password = true))
+        assertFalse(KeymapRules.remembers(Keymap.JA_TWELVE, numeric = true, password = false))
+    }
+
+    /**
+     * 評価の記録中は、キーマップの設定によらず導入前の面と切り替えキーにする。自動測定の道具（run_automated.py の MODE_SWITCH）が
+     * 前提にする面ごとの読み上げ名と、電卓型の数字面を守る。
+     */
+    @Test
+    fun recordingRulesKeepPreKeymapSwitchesForAutomatedMeasurement() {
+        fun description(keymap: Keymap, password: Boolean = false) =
+            KeySpeech.modeSwitchDescription(RecordingKeymapRules.switchKey(keymap, password).targetMode)
+        // かなの面は「あA」で英字へ、英字の面は「あ」でかなへ、数字の面は「あ/A」でかなへ
+        assertEquals(KeySpec.ModeSwitch("あA", KeyboardMode.QWERTY), RecordingKeymapRules.switchKey(Keymap.JA_TWELVE, false))
+        assertEquals(KeySpec.ModeSwitch("あ", KeyboardMode.KANA), RecordingKeymapRules.switchKey(Keymap.EN_QWERTY, false))
+        assertEquals(KeySpec.ModeSwitch("あ/A", KeyboardMode.KANA), RecordingKeymapRules.switchKey(Keymap.NUMBER_CALCULATOR, false))
+        assertEquals("英字入力へ切り替え", description(Keymap.JA_TWELVE))
+        assertEquals("かな入力へ切り替え", description(Keymap.EN_QWERTY))
+        assertEquals("かな入力へ切り替え", description(Keymap.NUMBER_CALCULATOR))
+        // パスワード欄の数字の面は「ABC」で英字へ移り、かなへ移るキーは隠す
+        assertEquals(KeySpec.ModeSwitch("ABC", KeyboardMode.QWERTY), RecordingKeymapRules.switchKey(Keymap.NUMBER_CALCULATOR, true))
+        assertTrue(RecordingKeymapRules.hidesInPassword(RecordingKeymapRules.switchKey(Keymap.EN_QWERTY, true)))
+        assertFalse(RecordingKeymapRules.hidesInPassword(RecordingKeymapRules.switchKey(Keymap.NUMBER_CALCULATOR, true)))
+        // 種類を指定するキーは、選択によらず導入前の面（かなの12キー、英字QWERTY、電卓型の数字）へ移る
+        assertEquals(Keymap.JA_TWELVE, RecordingKeymapRules.keymapFor(KeyboardMode.KANA, password = false))
+        assertEquals(Keymap.EN_QWERTY, RecordingKeymapRules.keymapFor(KeyboardMode.KANA, password = true))
+        assertEquals(Keymap.EN_QWERTY, RecordingKeymapRules.keymapFor(KeyboardMode.QWERTY, password = false))
+        assertEquals(Keymap.NUMBER_CALCULATOR, RecordingKeymapRules.keymapFor(KeyboardMode.NUMERIC, password = false))
+        // 記録を始めたときに導入前に無い配列を出していれば、同じ種類の導入前の面へ移す
+        assertEquals(Keymap.EN_QWERTY, RecordingKeymapRules.coerce(Keymap.EN_TWELVE, password = false))
+        assertEquals(Keymap.NUMBER_CALCULATOR, RecordingKeymapRules.coerce(Keymap.NUMBER_SIMEJI, password = false))
+        assertEquals(Keymap.JA_TWELVE, RecordingKeymapRules.coerce(Keymap.JA_QWERTY, password = false))
+        assertEquals(Keymap.NUMBER_CALCULATOR, RecordingKeymapRules.coerce(Keymap.NUMBER_CALCULATOR, password = false))
+        // 入力欄を開いたときの面も導入前と同じ
+        assertEquals(Keymap.NUMBER_CALCULATOR, RecordingKeymapRules.initial(numeric = true, password = false, last = Keymap.JA_TWELVE))
+        assertEquals(Keymap.EN_QWERTY, RecordingKeymapRules.initial(numeric = false, password = true, last = Keymap.JA_TWELVE))
+        assertEquals(Keymap.JA_TWELVE, RecordingKeymapRules.initial(numeric = false, password = false, last = Keymap.EN_TWELVE))
+        assertEquals(Keymap.EN_QWERTY, RecordingKeymapRules.initial(numeric = false, password = false, last = Keymap.EN_QWERTY))
+        assertEquals("space", RecordingKeymapRules.QWERTY_SPACE_LABEL)
+    }
+
+    /** 評価の課題欄は privateImeOptions の目印で見分け、記録中か目印のある欄なら導入前の規則を使う。 */
+    @Test
+    fun recordingRulesApplyWhileRecordingOrInMarkedEvaluationField() {
+        val option = RecordingKeymapRules.EVALUATION_FIELD_OPTION
+        assertTrue(RecordingKeymapRules.isEvaluationField(option))
+        assertTrue(RecordingKeymapRules.isEvaluationField("com.example.other, $option"))
+        assertFalse(RecordingKeymapRules.isEvaluationField(null))
+        assertFalse(RecordingKeymapRules.isEvaluationField(""))
+        assertFalse(RecordingKeymapRules.isEvaluationField("$option.extra"))
+        assertTrue(RecordingKeymapRules.applies(recording = true, evaluationField = false))
+        assertTrue(RecordingKeymapRules.applies(recording = false, evaluationField = true))
+        assertFalse(RecordingKeymapRules.applies(recording = false, evaluationField = false))
+    }
+
+    /**
+     * 記録の開始・終了の知らせは、規則の選択もローマ字入力の可否も変わらなければ何もしない。変わるときは表示する配列だけを決め、
+     * 導入前の英字QWERTYを表示中なら面を変えない（Shiftと自動大文字化を触る理由を作らない）。
+     */
+    @Test
+    fun recordingNoticeDoesNothingUnlessRulesOrRomajiChange() {
+        fun notice(wasEnabled: Boolean, enabled: Boolean, current: Keymap, wasRomaji: Boolean = false, romaji: Boolean = false) =
+            RecordingKeymapRules.keymapAfterNotice(wasEnabled, wasRomaji, enabled, romaji, current, password = false)
+        // 評価の課題欄（すでに導入前の規則）で記録を始める・終える：何もしない
+        assertNull(notice(wasEnabled = true, enabled = true, current = Keymap.EN_QWERTY))
+        assertNull(notice(wasEnabled = false, enabled = false, current = Keymap.EN_TWELVE, wasRomaji = true, romaji = true))
+        // 英字QWERTYの面で記録を始める・終える：面は変えない
+        assertEquals(Keymap.EN_QWERTY, notice(wasEnabled = false, enabled = true, current = Keymap.EN_QWERTY))
+        assertEquals(Keymap.EN_QWERTY, notice(wasEnabled = true, enabled = false, current = Keymap.EN_QWERTY))
+        // 導入前に無い配列で記録を始めたときだけ置き換える。終えるときは置き換えない
+        assertEquals(Keymap.NUMBER_CALCULATOR, notice(wasEnabled = false, enabled = true, current = Keymap.NUMBER_SIMEJI))
+        assertEquals(Keymap.NUMBER_CALCULATOR, notice(wasEnabled = true, enabled = false, current = Keymap.NUMBER_CALCULATOR))
+        // ローマ字入力の可否だけが変わった場合は、規則を使っていても今の面のまま
+        assertEquals(Keymap.JA_TWELVE, notice(wasEnabled = true, enabled = true, current = Keymap.JA_TWELVE, wasRomaji = false, romaji = true))
+    }
+
+    /** 文字をその場で確定する欄では、トグル入力を使えない英字12キーを英字QWERTYに置き換える（循環と最初の面の両方）。 */
+    @Test
+    fun directCommitFieldsReplaceEnglishTwelveWithQwerty() {
+        assertEquals(Keymap.EN_QWERTY, KeymapRules.usable(Keymap.EN_TWELVE, directCommit = true))
+        assertEquals(Keymap.EN_TWELVE, KeymapRules.usable(Keymap.EN_TWELVE, directCommit = false))
+        assertEquals(Keymap.JA_TWELVE, KeymapRules.usable(Keymap.JA_TWELVE, directCommit = true))
+        val order = listOf(Keymap.JA_TWELVE, Keymap.EN_TWELVE, Keymap.EN_QWERTY, Keymap.NUMBER_SIMEJI)
+        // 数字の欄（パスワードではない）から循環しても英字12キーは出ず、重なった英字QWERTYは一度だけ
+        assertEquals(
+            listOf(Keymap.JA_TWELVE, Keymap.EN_QWERTY, Keymap.NUMBER_SIMEJI),
+            KeymapRules.cycleOrder(order, password = false, directCommit = true),
+        )
+        assertEquals(Keymap.EN_QWERTY, KeymapRules.next(order, Keymap.JA_TWELVE, password = false, directCommit = true))
+        assertEquals(
+            KeySpec.ModeSwitch("ABC", KeyboardMode.QWERTY, emphasized = true),
+            KeymapRules.switchKey(order, Keymap.JA_TWELVE, password = false, directCommit = true),
+        )
+        // パスワード欄は英字12キーを選んでいても英字QWERTYで始まる
+        assertEquals(Keymap.EN_QWERTY, KeymapRules.initial(order, numeric = false, password = true, last = null))
+        assertEquals(Keymap.EN_QWERTY, KeymapRules.forCategory(order, KeyboardMode.QWERTY, password = true))
+        // 互換入力の欄（数字・パスワードではない）で、前回の英字12キーを開く場合も置き換える
+        assertEquals(
+            Keymap.EN_QWERTY,
+            KeymapRules.initial(order, numeric = false, password = false, last = Keymap.EN_TWELVE, directCommit = true),
+        )
+        // 通常の欄では英字12キーのまま
+        assertEquals(Keymap.EN_TWELVE, KeymapRules.initial(order, numeric = false, password = false, last = Keymap.EN_TWELVE))
+    }
+
+    /** 英字12キーは、中央が1文字目、左が2文字目、上が3文字目、右が4文字目（5文字目は下）で、押すたびにその順で替わる。 */
+    @Test
+    fun englishTwelveKeysAssignFlickAndToggleOrder() {
+        val keys = KeyboardLayoutData.ENGLISH_TWELVE_ROWS.flatten() + KeyboardLayoutData.ENGLISH_TWELVE_SYMBOL_KEYS
+        assertEquals(
+            listOf("@#/&_", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ", "'\"()", ".,?!"),
+            keys.map { it.label },
+        )
+        assertEquals(
+            listOf("@#/&_", "abc", "def", "ghi", "jkl", "mno", "pqrs", "tuv", "wxyz", "'\"()", ".,?!"),
+            keys.map { it.toggleChars.joinToString("") },
+        )
+        val pqrs = keys.single { it.label == "PQRS" }
+        assertEquals(
+            mapOf(
+                FlickDirection.CENTER to "p",
+                FlickDirection.LEFT to "q",
+                FlickDirection.UP to "r",
+                FlickDirection.RIGHT to "s",
+            ),
+            pqrs.chars,
+        )
+        assertEquals("_", keys.first().chars[FlickDirection.DOWN])
+        assertTrue(keys.all { it.toggles && !it.showsGuide })
+        // a〜zがちょうど1回ずつ入る
+        assertEquals(('a'..'z').toList(), keys.flatMap { it.toggleChars }.filter { it.single() in 'a'..'z' }.map { it.single() }.sorted())
+    }
+
+    /** 数字Simeji型は中央3列に1〜9と「@ 0 #」を置き、フリックは下の段だけ（上・左・右）で、方向の文字を常に出す。 */
+    @Test
+    fun simejiNumberKeysMatchMeasuredLayout() {
+        assertEquals(listOf("123", "456", "789"), KeyboardLayoutData.SIMEJI_DIGIT_ROWS)
+        assertEquals(":", KeyboardLayoutData.SIMEJI_LEFT_SYMBOL)
+        assertEquals("-", KeyboardLayoutData.SIMEJI_RIGHT_SYMBOL)
+        val bottom = KeyboardLayoutData.SIMEJI_BOTTOM_KEYS
+        assertEquals(listOf("@", "0", "#"), bottom.map { it.label })
+        fun flicks(key: FlickKey) = listOf(FlickDirection.UP, FlickDirection.LEFT, FlickDirection.RIGHT).map { key.chars[it] }
+        assertEquals(listOf("~", "&", "…"), flicks(bottom[0]))
+        assertEquals(listOf("=", "+", "%"), flicks(bottom[1]))
+        assertEquals(listOf("^", ".", ","), flicks(bottom[2]))
+        assertTrue(bottom.all { !it.toggles && it.showsGuide && FlickDirection.DOWN !in it.chars })
+        assertEquals(listOf("@", "0", "#"), bottom.map { it.chars[FlickDirection.CENTER] })
+    }
+
+    /** 新しい配列の記号にも読み上げ名があり、フリックキーの補足説明は方向と文字を並べる。 */
+    @Test
+    fun newKeymapSymbolsHaveSpokenNames() {
+        val symbols = (KeyboardLayoutData.ENGLISH_TWELVE_ROWS.flatten() + KeyboardLayoutData.ENGLISH_TWELVE_SYMBOL_KEYS +
+            KeyboardLayoutData.SIMEJI_BOTTOM_KEYS).flatMap { it.chars.values }
+            .filter { it.single() !in 'a'..'z' && it.single() !in '0'..'9' } +
+            listOf(KeyboardLayoutData.SIMEJI_LEFT_SYMBOL, KeyboardLayoutData.SIMEJI_RIGHT_SYMBOL)
+        symbols.forEach { symbol -> assertTrue("読み上げ名がない: $symbol", KeySpeech.hasSymbolName(symbol)) }
+        assertEquals(
+            "フリック、左 アンド、上 チルダ、右 三点リーダー。操作メニューからも入力できます",
+            KeySpeech.flickHint(KeyboardLayoutData.SIMEJI_BOTTOM_KEYS.first().chars),
+        )
+        assertEquals("元に戻す", KeySpeech.actionDescription(KeyboardAction.Undo))
     }
 
     @Test

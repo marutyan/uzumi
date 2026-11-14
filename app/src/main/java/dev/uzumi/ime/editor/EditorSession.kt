@@ -149,7 +149,7 @@ class EditorSession(
      * 変換しない欄（互換入力・パスワード・数値・電話・日時）では、compositionを作らず一文字ずつ確定する。
      * 未確定が残らないため、「完了」「次へ」などのEnterが一回で欄へ届く（標準のキーボードと同じ）。
      */
-    private val commitsDirectly: Boolean = policy.isTypeNull || policy.isPassword || policy.isNumeric
+    private val commitsDirectly: Boolean = policy.commitsDirectly
 
     /** セッションがまだ編集を受け付けるかを返す。 */
     val isActive: Boolean
@@ -580,8 +580,9 @@ class EditorSession(
     /**
      * 12キーのタップ。同じキーを猶予時間内に続けて押すと、直前に入れた一文字を同じ行の次の文字（[values]の次）へ
      * 差し替える。差し替えは未確定の読みの末尾一文字の置き換えとして扱い、変換要求と「元に戻す」は通常の入力と同じ経路を通る。
+     * [fromTwelveKey]はかなの12キーか。英字12キーではfalseにし、小書き・濁点を区別しない変換の対象にしない。
      */
-    fun inputKanaTap(values: List<String>, nowMillis: Long): Boolean {
+    fun inputKanaTap(values: List<String>, nowMillis: Long, fromTwelveKey: Boolean = true): Boolean {
         if (!active || values.isEmpty()) return false
         if (!finishRomajiInput()) return false
         // 一文字ずつ直接確定する欄には差し替える未確定文字が無いため、従来どおり先頭の文字を入れる。
@@ -594,15 +595,15 @@ class EditorSession(
         val step = kanaToggle.next(values, nowMillis, compositionInputCursor())
         val previous = step.previous
         val accepted = if (previous == null) {
-            inputTextDirect(step.value, fromTwelveKey = true)
+            inputTextDirect(step.value, fromTwelveKey)
         } else {
-            noteInputSource(fromTwelveKey = true)
+            noteInputSource(fromTwelveKey)
             replaceCompositionTail(previous, step.value)
         }
         if (!accepted) {
             kanaToggle.reset()
             // 末尾が想定と違って差し替えられなかった場合は、タップを失わないよう新しい文字として入れ直す。
-            return previous != null && active && inputKanaTap(values, nowMillis)
+            return previous != null && active && inputKanaTap(values, nowMillis, fromTwelveKey)
         }
         kanaToggle.accept(values, step, nowMillis, compositionInputCursor())
         return true
@@ -1592,12 +1593,18 @@ class EditorSession(
     }
 
     /** カーソル直前のかなを小文字・濁点・半濁点へ循環変換する。 */
-    fun transformKana(): Boolean {
+    fun transformKana(): Boolean = transformBeforeCursor(KanaModifier::transform)
+
+    /** カーソル直前の英字の大文字と小文字を入れ替える。英字12キーの「a/A」キーに使う。 */
+    fun toggleLetterCase(): Boolean = transformBeforeCursor(KanaModifier::toggleLetterCase)
+
+    /** 未確定の読みのカーソル直前の一文字を[transform]で置き換える。置き換えられない文字なら何もしない。 */
+    private fun transformBeforeCursor(transform: (String) -> String?): Boolean {
         if (!active || policy.isTypeNull) return false
         if (!finishPendingInput()) return false
-        if (liveCore != null) return performLive { it.transformBeforeCursor(KanaModifier::transform) } ?: false
+        if (liveCore != null) return performLive { it.transformBeforeCursor(transform) } ?: false
         if (buffer.isEmpty) return false
-        if (!buffer.transformBeforeCursor(KanaModifier::transform)) return false
+        if (!buffer.transformBeforeCursor(transform)) return false
         markCompositionChanged()
         if (synchronizeComposition()) return true
         failClosed()

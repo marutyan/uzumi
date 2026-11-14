@@ -83,6 +83,8 @@ import dev.uzumi.ime.keyboard.ClipboardHistoryPanel
 import dev.uzumi.ime.keyboard.EditPanelView
 import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardAction
+import dev.uzumi.ime.keyboard.Keymap
+import dev.uzumi.ime.keyboard.RecordingKeymapRules
 import dev.uzumi.ime.keyboard.KeyboardBackgroundDrawable
 import dev.uzumi.ime.keyboard.KeyboardBackgroundImage
 import dev.uzumi.ime.keyboard.KeyboardColors
@@ -189,6 +191,9 @@ class UzumiInputMethodService : InputMethodService() {
     private var inlineResponseGeneration = 0L
     private var currentPolicy: InputFieldPolicy? = null
 
+    // 今の入力欄が評価の課題画面の欄（目印付き）か。キーボードの面の切り替えの規則を選ぶことにだけ使う。
+    private var evaluationField = false
+
     // カーソル位置で欄が求める大文字化の種類（TextUtils.CAP_MODE_*、0なら求めない）。キーボードを作り直しても引き継ぐ。
     private var autoCapsMode = 0
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -266,6 +271,8 @@ class UzumiInputMethodService : InputMethodService() {
         worker.start()
         EvaluationStatusSource.provider = ::evaluationStatus
         EvaluationStatusSource.neuralMemoryRequester = { neuralConnection?.requestMemory() }
+        // 評価の記録を始めた・終えた時点で、キーボードを記録中の面（キーマップを導入する前の面）へ合わせる
+        EvaluationStatusSource.recordingChanged = ::applyKeymapRulesToKeyboard
         scheduleClipboardHistoryExpiry()
     }
 
@@ -273,6 +280,7 @@ class UzumiInputMethodService : InputMethodService() {
     override fun onDestroy() {
         EvaluationStatusSource.provider = null
         EvaluationStatusSource.neuralMemoryRequester = null
+        EvaluationStatusSource.recordingChanged = null
         stopClipboardObservation()
         clipboardHistoryExpiry?.let(mainHandler::removeCallbacks)
         clipboardHistoryExpiry = null
@@ -485,9 +493,11 @@ class UzumiInputMethodService : InputMethodService() {
         clearInlineSuggestions()
         hideKeyboardOverlays()
         currentPolicy = null
+        evaluationField = false
         autoCapsMode = 0
         refreshCandidates()
         val info = attribute ?: return
+        evaluationField = RecordingKeymapRules.isEvaluationField(info.privateImeOptions)
         editorInOwnApp = info.packageName == packageName
         editorFieldId = info.fieldId
         val connection = currentInputConnection ?: return
@@ -496,8 +506,10 @@ class UzumiInputMethodService : InputMethodService() {
         val policy = InputFieldPolicy.fromEditorInfo(info)
             .copy(learningDisabledBySetting = LearningStores.peek()?.isEnabled != true)
         currentPolicy = policy
-        // ローマ字の層で自動大文字化を使わない判断はキーボード側が層ごとに行い、英字の層では欄の指定に従う。
-        val romaji = policy.usesRomajiInput(UzumiSettings.isRomajiInputEnabled(this))
+        // 日本語QWERTYを選んだときだけローマ字かな入力を用意する。自動大文字化を使わない判断はキーボード側が配列ごとに行う。
+        // 評価の記録中は、キーボードが導入前の規則で英字配列を英字のまま使うため、用意した組み立て器は使われない。
+        // 記録の有無で用意を変えないことで、記録の後に日本語QWERTYへ切り替えてもローマ字かな入力になる。
+        val romaji = policy.usesRomajiInput(Keymap.JA_QWERTY in UzumiSettings.keymaps(this))
         autoCapsMode = info.initialCapsMode and policy.capsModeFlags
         // ライブ変換の設定は入力開始ごとに読み、設定画面での変更を次の入力欄から反映する。
         val live = policy.usesLiveConversion(UzumiSettings.isLiveConversionEnabled(this))
@@ -714,7 +726,8 @@ class UzumiInputMethodService : InputMethodService() {
         OperationClassifier.keyboardAction(action, current.isLiveMode)?.let(evaluation::record)
         // Backspaceは連続削除をまとめ、絵文字一覧の開閉中は削除Undoを保ち、ほかの編集操作で記録を終える。
         if (action != KeyboardAction.Delete && action != KeyboardAction.DeleteToLineStart &&
-            action != KeyboardAction.OpenEmojiPicker && action != KeyboardAction.CloseEmojiPicker
+            action != KeyboardAction.OpenEmojiPicker && action != KeyboardAction.CloseEmojiPicker &&
+            action != KeyboardAction.Undo
         ) current.forgetDeletionUndo()
         when (action) {
             // 英字配列の文字は、ローマ字かな入力が有効な欄ではかなへ組み立てる（無効な欄と英字の層では従来どおり英字）。
@@ -725,6 +738,10 @@ class UzumiInputMethodService : InputMethodService() {
             }
             is KeyboardAction.KanaTap ->
                 current.inputKanaTap(KeyboardLayoutData.toggleChars(action.type), SystemClock.uptimeMillis())
+            // 英字12キーのタップも、かなと同じ仕組みで続けて押すたびに文字を切り替える
+            is KeyboardAction.ToggleTap -> current.inputKanaTap(action.values, SystemClock.uptimeMillis(), fromTwelveKey = false)
+            KeyboardAction.ToggleCase -> current.toggleLetterCase()
+            KeyboardAction.Undo -> undoLastEdit(current)
             KeyboardAction.Delete -> current.deleteBackward()
             is KeyboardAction.MoveCursor -> when {
                 // 12キーの連続タップの途中の→は、次のタップを新しい文字にする区切りとして使い、カーソルは動かさない。
@@ -854,17 +871,28 @@ class UzumiInputMethodService : InputMethodService() {
         }, CONVERSION_TIMEOUT_MILLIS)
     }
 
-    /** EditorInfo由来の表示モードとアクション名をキーボードへ反映する。 */
+    /** EditorInfo由来の表示モードとアクション名、設定で選んだキーマップ、評価の記録中かをキーボードへ反映する。 */
     private fun applyPolicyToKeyboard() {
         val policy = currentPolicy ?: return
-        keyboardPanel?.setEditorMode(policy.isNumeric, policy.isPassword)
-        // ローマ字かな入力の欄でだけ、英字配列をローマ字と英字の層に分ける。英字の層を含めるかは設定画面で選ぶ。
-        keyboardPanel?.setRomajiInput(
-            romajiInput = session?.isRomajiInputEnabled == true,
-            includesEnglish = UzumiSettings.isRomajiEnglishQwertyIncluded(this),
-        )
+        // キーマップの選択は設定画面で変えるため、入力欄を開くたびに読み直す（変わらなければキーボードは何もしない）
+        keyboardPanel?.setKeymaps(UzumiSettings.keymaps(this))
+        applyKeymapRulesToKeyboard()
+        keyboardPanel?.setEditorMode(policy.isNumeric, policy.isPassword, policy.commitsDirectly)
         keyboardPanel?.setActionLabel(policy.actionLabel)
         keyboardPanel?.setAutoCapsMode(autoCapsMode)
+    }
+
+    /**
+     * 導入前の規則を使うか（評価の記録中か評価の課題欄）と、今の編集セッションでローマ字かな入力を使えるかをキーボードへ渡す。
+     * 入力欄を開くたびと、評価の記録の開始・終了のたびに呼び、セッションとキーボードの状態をそろえる。
+     * どちらも変わらなければキーボードは何もせず、変わってもShiftと自動大文字化の状態は変えない。
+     */
+    private fun applyKeymapRulesToKeyboard() {
+        // 日本語QWERTYは、ローマ字かな入力を使える欄でだけかなにする。
+        keyboardPanel?.setRecordingRules(
+            enabled = RecordingKeymapRules.applies(evaluation.isRecording, evaluationField),
+            romajiAvailable = session?.isRomajiInputEnabled == true,
+        )
     }
 
     /** IME表示中だけクリップボード変更を監視し、貼り付け提案と履歴を更新する。 */
@@ -1587,10 +1615,7 @@ class UzumiInputMethodService : InputMethodService() {
             ToolbarAction.UNDO -> {
                 evaluation.record(OperationKind.CORRECTION)
                 if (current == null || session !== current) return
-                when {
-                    current.canUndoDeletion -> current.undoDeletion()
-                    current.liveCandidateState()?.canUndo == true -> current.undoLive()
-                }
+                undoLastEdit(current)
                 scheduleConversionTimeout(current)
             }
             ToolbarAction.USER_DICTIONARY -> startActivity(
@@ -1610,6 +1635,14 @@ class UzumiInputMethodService : InputMethodService() {
             ToolbarAction.HEIGHT -> showHeightPanel()
         }
         refreshCandidates()
+    }
+
+    /** 直前の削除か、ライブ変換の直前の変更を取り消す。機能バーと数字Simeji型の「元に戻す」で共通に使う。 */
+    private fun undoLastEdit(current: EditorSession) {
+        when {
+            current.canUndoDeletion -> current.undoDeletion()
+            current.liveCandidateState()?.canUndo == true -> current.undoLive()
+        }
     }
 
     /** 各タイルの識別名を、候補バーと設定画面で共通の文言へ変換する。 */

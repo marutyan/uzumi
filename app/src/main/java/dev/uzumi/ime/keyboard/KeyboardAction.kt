@@ -15,6 +15,19 @@ sealed interface KeyboardAction {
     data class KanaTap(val type: KanaKeyType) : KeyboardAction
 
     /**
+     * かな以外の12キー（英字12キー）の中央タップ。同じキーを続けて押すと[values]を順に切り替える（かなのトグル入力と同じ仕組み）。
+     *
+     * @property values 押すたびに順に入る文字。先頭が1回目
+     */
+    data class ToggleTap(val values: List<String>) : KeyboardAction
+
+    /** カーソル直前の英字の大文字と小文字を入れ替える要求。英字12キーの「a/A」キーで送る。 */
+    data object ToggleCase : KeyboardAction
+
+    /** 直前の操作を取り消す要求。数字Simeji型の「元に戻す」キーで送り、機能バーの「元に戻す」と同じ処理を行う。 */
+    data object Undo : KeyboardAction
+
+    /**
      * 1文字（またはカーソル直前の要素）の削除。
      */
     data object Delete : KeyboardAction
