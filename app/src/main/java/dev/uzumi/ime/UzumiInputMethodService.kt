@@ -113,6 +113,7 @@ import dev.uzumi.ime.voice.VoiceInputState
 import dev.uzumi.ime.voice.VoiceModelDownloadState
 import dev.uzumi.ime.voice.VoicePermissionActivity
 import dev.uzumi.ime.voice.VoiceStartStatus
+import dev.uzumi.ime.voice.VoiceTextSpacing
 import dev.uzumi.ime.voice.VoiceTranslationDirection
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
@@ -1527,6 +1528,13 @@ class UzumiInputMethodService : InputMethodService() {
      */
     internal fun commitVoiceText(text: String): Boolean {
         if (text.isEmpty()) return false
+        // 変換中の文字もカーソルの直前に含まれるので、確定前に読んでよい。
+        val previous = currentInputConnection?.getTextBeforeCursor(1, 0)?.lastOrNull()
+        return commitVoiceTextAsIs(VoiceTextSpacing.leadingSeparator(previous, text) + text)
+    }
+
+    /** 確定した音声入力の文を、空白の調整をせずにそのまま入れる。 */
+    private fun commitVoiceTextAsIs(text: String): Boolean {
         val current = session?.takeIf { it.isActive }
         if (current != null) {
             if (!current.pasteText(text)) return false
