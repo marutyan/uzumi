@@ -1,5 +1,6 @@
 package dev.uzumi.ime.keyboard
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.drawable.Drawable
@@ -8,7 +9,9 @@ import android.widget.TextView
 /**
  * アイコンだけを描くボタン。自動測定の道具がアクセシビリティの木でボタンをTextViewとして読むため、
  * ImageViewにせずTextViewのまま中央へアイコンを描く。名前はcontentDescriptionで伝える。
+ * キーボードと設定の見本はAppCompatのテーマを使わないため、AppCompatTextViewではなく標準のTextViewを継ぐ。
  */
+@SuppressLint("AppCompatCustomView")
 class IconTextView(context: Context) : TextView(context) {
     private var icon: Drawable? = null
     private val density = context.resources.displayMetrics.density

@@ -27,5 +27,17 @@
             android:name=".compat.EvaluationCounterReceiver"
             android:exported="true"
             android:permission="android.permission.DUMP" />
+        <!-- 端末内音声入力と音声翻訳の実機確認用受信口。IMEと同じprocessで動き、DUMP権限を持つadb shellからだけ送れる。 -->
+        <receiver
+            android:name=".voice.VoiceInputDebugReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="dev.uzumi.ime.debug.VOICE_START" />
+                <action android:name="dev.uzumi.ime.debug.VOICE_TRANSLATE_START" />
+                <action android:name="dev.uzumi.ime.debug.VOICE_STOP" />
+                <action android:name="dev.uzumi.ime.debug.VOICE_CANCEL" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
