@@ -874,6 +874,8 @@ class UzumiInputMethodService : InputMethodService() {
     /** EditorInfo由来の表示モードとアクション名、設定で選んだキーマップ、評価の記録中かをキーボードへ反映する。 */
     private fun applyPolicyToKeyboard() {
         val policy = currentPolicy ?: return
+        // キーマップの選択は設定画面で変えるため、入力欄を開くたびに読み直す（変わらなければキーボードは何もしない）
+        keyboardPanel?.setKeymaps(UzumiSettings.keymaps(this))
         applyKeymapRulesToKeyboard()
         keyboardPanel?.setEditorMode(policy.isNumeric, policy.isPassword, policy.commitsDirectly)
         keyboardPanel?.setActionLabel(policy.actionLabel)
@@ -881,13 +883,16 @@ class UzumiInputMethodService : InputMethodService() {
     }
 
     /**
-     * キーマップの選択、今の編集セッションでローマ字かな入力を使えるか、導入前の規則を使うか（評価の記録中か評価の課題欄）を
-     * キーボードへ渡す。入力欄を開くたびと、評価の記録の開始・終了のたびに呼び、セッションとキーボードの状態をそろえる。
+     * 導入前の規則を使うか（評価の記録中か評価の課題欄）と、今の編集セッションでローマ字かな入力を使えるかをキーボードへ渡す。
+     * 入力欄を開くたびと、評価の記録の開始・終了のたびに呼び、セッションとキーボードの状態をそろえる。
+     * どちらも変わらなければキーボードは何もせず、変わってもShiftと自動大文字化の状態は変えない。
      */
     private fun applyKeymapRulesToKeyboard() {
-        // 日本語QWERTYは、ローマ字かな入力を使える欄でだけかなにする。キーマップの順番は設定画面で選ぶ。
-        keyboardPanel?.setKeymaps(UzumiSettings.keymaps(this), romajiAvailable = session?.isRomajiInputEnabled == true)
-        keyboardPanel?.setRecordingRules(RecordingKeymapRules.applies(evaluation.isRecording, evaluationField))
+        // 日本語QWERTYは、ローマ字かな入力を使える欄でだけかなにする。
+        keyboardPanel?.setRecordingRules(
+            enabled = RecordingKeymapRules.applies(evaluation.isRecording, evaluationField),
+            romajiAvailable = session?.isRomajiInputEnabled == true,
+        )
     }
 
     /** IME表示中だけクリップボード変更を監視し、貼り付け提案と履歴を更新する。 */

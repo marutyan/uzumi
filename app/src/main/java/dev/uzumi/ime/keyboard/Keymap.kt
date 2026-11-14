@@ -172,6 +172,23 @@ object RecordingKeymapRules {
         KeyboardMode.SYMBOL -> throw IllegalArgumentException("記号面はキーマップではない")
     }
 
+    /**
+     * 規則を使うか（[enabled]）とローマ字入力の可否（[romaji]）の知らせを受けたときに表示する配列。どちらも前の値
+     * （[wasEnabled]、[wasRomaji]）から変わらなければnullを返し、知らせでは何もしない。規則を使い始めたときだけ、
+     * 導入前に無い配列を同じ種類の導入前の配列へ置き換える。Shiftと自動大文字化の状態はこの知らせでは変えない。
+     */
+    fun keymapAfterNotice(
+        wasEnabled: Boolean,
+        wasRomaji: Boolean,
+        enabled: Boolean,
+        romaji: Boolean,
+        current: Keymap,
+        password: Boolean,
+    ): Keymap? {
+        if (wasEnabled == enabled && wasRomaji == romaji) return null
+        return if (enabled) coerce(current, password) else current
+    }
+
     /** この規則で出せない配列を表示中なら、同じ種類の導入前の配列へ置き換える。規則を使い始めた瞬間の面を合わせるために使う。 */
     fun coerce(keymap: Keymap, password: Boolean): Keymap =
         if (keymap in KEYMAPS) keymap else keymapFor(keymap.category, password)

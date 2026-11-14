@@ -561,6 +561,27 @@ class KeyboardLayoutDataTest {
         assertFalse(RecordingKeymapRules.applies(recording = false, evaluationField = false))
     }
 
+    /**
+     * 記録の開始・終了の知らせは、規則の選択もローマ字入力の可否も変わらなければ何もしない。変わるときは表示する配列だけを決め、
+     * 導入前の英字QWERTYを表示中なら面を変えない（Shiftと自動大文字化を触る理由を作らない）。
+     */
+    @Test
+    fun recordingNoticeDoesNothingUnlessRulesOrRomajiChange() {
+        fun notice(wasEnabled: Boolean, enabled: Boolean, current: Keymap, wasRomaji: Boolean = false, romaji: Boolean = false) =
+            RecordingKeymapRules.keymapAfterNotice(wasEnabled, wasRomaji, enabled, romaji, current, password = false)
+        // 評価の課題欄（すでに導入前の規則）で記録を始める・終える：何もしない
+        assertNull(notice(wasEnabled = true, enabled = true, current = Keymap.EN_QWERTY))
+        assertNull(notice(wasEnabled = false, enabled = false, current = Keymap.EN_TWELVE, wasRomaji = true, romaji = true))
+        // 英字QWERTYの面で記録を始める・終える：面は変えない
+        assertEquals(Keymap.EN_QWERTY, notice(wasEnabled = false, enabled = true, current = Keymap.EN_QWERTY))
+        assertEquals(Keymap.EN_QWERTY, notice(wasEnabled = true, enabled = false, current = Keymap.EN_QWERTY))
+        // 導入前に無い配列で記録を始めたときだけ置き換える。終えるときは置き換えない
+        assertEquals(Keymap.NUMBER_CALCULATOR, notice(wasEnabled = false, enabled = true, current = Keymap.NUMBER_SIMEJI))
+        assertEquals(Keymap.NUMBER_CALCULATOR, notice(wasEnabled = true, enabled = false, current = Keymap.NUMBER_CALCULATOR))
+        // ローマ字入力の可否だけが変わった場合は、規則を使っていても今の面のまま
+        assertEquals(Keymap.JA_TWELVE, notice(wasEnabled = true, enabled = true, current = Keymap.JA_TWELVE, wasRomaji = false, romaji = true))
+    }
+
     /** 文字をその場で確定する欄では、トグル入力を使えない英字12キーを英字QWERTYに置き換える（循環と最初の面の両方）。 */
     @Test
     fun directCommitFieldsReplaceEnglishTwelveWithQwerty() {

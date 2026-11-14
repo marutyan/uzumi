@@ -165,31 +165,39 @@ class KeyboardPanel(
     }
 
     /**
-     * 設定で選んだキーマップの順番[order]と、この欄で日本語QWERTYをローマ字かな入力にできるか（[romajiAvailable]）を受け取り、
-     * 左下の切り替えキーと空白キーの表示を合わせる。IMEは入力欄の開始と表示のたびに、[setEditorMode]より先に呼ぶ。
+     * 設定で選んだキーマップの順番[order]を受け取り、左下の切り替えキーの表示を合わせる。選択が変わらなければ何もしない。
+     * IMEは入力欄の開始と表示のたびに（設定画面での変更をそこで読むため）、[setEditorMode]より先に呼ぶ。
      */
-    fun setKeymaps(order: List<Keymap>, romajiAvailable: Boolean) {
-        keymaps = KeymapRules.normalize(order)
-        this.romajiAvailable = romajiAvailable
+    fun setKeymaps(order: List<Keymap>) {
+        val normalized = KeymapRules.normalize(order)
+        if (normalized == keymaps) return
+        keymaps = normalized
         refreshKeymapKeys()
-        applyAutoCaps()
     }
 
     /**
-     * 研究の評価の記録中の規則を使うか（評価の記録中か、評価の課題欄か）を受け取る。使う間は[RecordingKeymapRules]に従い、
-     * その規則で出せない配列を表示中なら同じ種類の導入前の配列へ移す。IMEは入力欄を開くたびと、記録の開始と終了のたびに呼ぶ。
+     * 研究の評価の記録中の規則を使うか（評価の記録中か、評価の課題欄か）と、この欄で日本語QWERTYをローマ字かな入力に
+     * できるか（[romajiAvailable]）を受け取る。どちらも変わらなければ何もしない。規則を使う間は[RecordingKeymapRules]に従い、
+     * その規則で出せない配列を表示中なら同じ種類の導入前の配列へ移す。Shiftと自動大文字化の状態は変えず、面とキーの表示だけを
+     * 合わせる（記録の開始・終了で入力中の大文字化が変わらないようにする）。IMEは入力欄を開くたびと、記録の開始と終了のたびに呼ぶ。
      */
-    fun setRecordingRules(enabled: Boolean) {
-        if (enabled == recordingRules) return
-        this.recordingRules = enabled
-        val keymap = if (enabled) RecordingKeymapRules.coerce(currentKeymap, isPasswordField) else currentKeymap
+    fun setRecordingRules(enabled: Boolean, romajiAvailable: Boolean) {
+        val keymap = RecordingKeymapRules.keymapAfterNotice(
+            wasEnabled = recordingRules,
+            wasRomaji = this.romajiAvailable,
+            enabled = enabled,
+            romaji = romajiAvailable,
+            current = currentKeymap,
+            password = isPasswordField,
+        ) ?: return
+        recordingRules = enabled
+        this.romajiAvailable = romajiAvailable
         if (keymap != currentKeymap) {
             cancelPendingInput()
             currentKeymap = keymap
+            updateModeVisibility()
         }
         refreshKeymapKeys()
-        applyAutoCaps()
-        updateModeVisibility()
     }
 
     /**
