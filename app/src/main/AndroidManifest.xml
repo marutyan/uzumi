@@ -1,5 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 端末内音声入力のためにマイク録音権限だけを求め、通信権限（INTERNET）は持たない。 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 端末内の既定音声認識サービス（Android System Intelligence等）を照会するために宣言する。 -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -32,6 +41,13 @@
         <activity
             android:name=".KisekaeActivity"
             android:exported="false"
+            android:theme="@style/Theme.Uzumi.Settings" />
+        <!-- IMEから録音権限ダイアログを出すための最小画面。 -->
+        <activity
+            android:name=".voice.VoicePermissionActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
             android:theme="@style/Theme.Uzumi.Settings" />
 
         <service

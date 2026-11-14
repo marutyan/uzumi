@@ -103,6 +103,13 @@ import dev.uzumi.ime.live.RequestIdentity
 import dev.uzumi.ime.neural.NeuralRuntimeConnection
 import dev.uzumi.ime.neural.NeuralSelection
 import dev.uzumi.ime.neural.shouldRecreateNeuralConnection
+import dev.uzumi.ime.voice.OnDeviceVoiceRecognizer
+import dev.uzumi.ime.voice.VoiceInputError
+import dev.uzumi.ime.voice.VoiceInputListener
+import dev.uzumi.ime.voice.VoiceInputServiceBridge
+import dev.uzumi.ime.voice.VoiceInputState
+import dev.uzumi.ime.voice.VoicePermissionActivity
+import dev.uzumi.ime.voice.VoiceStartStatus
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -191,6 +198,13 @@ class UzumiInputMethodService : InputMethodService() {
     // 入力先の欄がUzumi自身の画面か、とその欄のview id。評価用の状態の確認口が、試験欄への入力かを確かめるために読む。
     private var editorInOwnApp = false
     private var editorFieldId = View.NO_ID
+    // 端末内音声入力の認識器と現在の途中経過・状態。UI担当が後から接続できるようlistenerでも通知する。
+    private var voiceRecognizer: OnDeviceVoiceRecognizer? = null
+    internal var voiceInputState: VoiceInputState = VoiceInputState.IDLE
+        private set
+    internal var voicePartialText: String = ""
+        private set
+    internal var voiceInputObserver: VoiceInputListener? = null
 
     /** 変換エンジンを専用の直列threadで読み込み始める。キー入力はこの完了を待たない。 */
     override fun onCreate() {
@@ -248,6 +262,42 @@ class UzumiInputMethodService : InputMethodService() {
         worker.start()
         EvaluationStatusSource.provider = ::evaluationStatus
         EvaluationStatusSource.neuralMemoryRequester = { neuralConnection?.requestMemory() }
+        voiceRecognizer = OnDeviceVoiceRecognizer(
+            context = this,
+            listener = object : VoiceInputListener {
+                override fun onStateChanged(state: VoiceInputState) {
+                    voiceInputState = state
+                    if (state != VoiceInputState.LISTENING && state != VoiceInputState.STOPPING) {
+                        voicePartialText = ""
+                    }
+                    voiceInputObserver?.onStateChanged(state)
+                }
+
+                override fun onPartialResult(text: String) {
+                    voicePartialText = text
+                    voiceInputObserver?.onPartialResult(text)
+                }
+
+                override fun onFinalResult(text: String) {
+                    voicePartialText = ""
+                    if (text.isNotEmpty()) commitVoiceText(text)
+                    voiceInputObserver?.onFinalResult(text)
+                }
+
+                override fun onError(error: VoiceInputError) {
+                    voicePartialText = ""
+                    voiceInputObserver?.onError(error)
+                }
+
+                override fun onCancelled() {
+                    voicePartialText = ""
+                    voiceInputObserver?.onCancelled()
+                }
+            },
+        )
+        VoiceInputServiceBridge.starter = ::startVoiceInput
+        VoiceInputServiceBridge.stopper = ::stopVoiceInput
+        VoiceInputServiceBridge.canceller = ::cancelVoiceInput
         scheduleClipboardHistoryExpiry()
     }
 
@@ -255,6 +305,11 @@ class UzumiInputMethodService : InputMethodService() {
     override fun onDestroy() {
         EvaluationStatusSource.provider = null
         EvaluationStatusSource.neuralMemoryRequester = null
+        VoiceInputServiceBridge.starter = null
+        VoiceInputServiceBridge.stopper = null
+        VoiceInputServiceBridge.canceller = null
+        voiceRecognizer?.destroy()
+        voiceRecognizer = null
         stopClipboardObservation()
         clipboardHistoryExpiry?.let(mainHandler::removeCallbacks)
         clipboardHistoryExpiry = null
@@ -442,6 +497,7 @@ class UzumiInputMethodService : InputMethodService() {
     /** フィールドごとに旧接続を破棄し、新しい編集セッションを開始する。 */
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
+        cancelVoiceInput()
         // 再開始（画面回転などの同じ欄への再接続）ではonFinishInputが呼ばれず、Editorにcomposing spanが残る。
         // 残したまま新しいセッションで入力すると、未確定だった本文全体が新しい文字で置き換わるため、
         // 再開始後に有効な接続（currentInputConnection）で先に確定する。
@@ -557,6 +613,7 @@ class UzumiInputMethodService : InputMethodService() {
     /** 非表示になるキーボードの保留タッチを止める。 */
     override fun onFinishInputView(finishingInput: Boolean) {
         inputViewVisible = false
+        cancelVoiceInput()
         keyboardPanel?.cancelPendingInput()
         hideKeyboardOverlays()
         stopClipboardObservation()
@@ -567,6 +624,7 @@ class UzumiInputMethodService : InputMethodService() {
     /** 入力終了時に接続と一時compositionを無効化する。 */
     override fun onFinishInput() {
         inputViewVisible = false
+        cancelVoiceInput()
         keyboardPanel?.cancelPendingInput()
         hideKeyboardOverlays()
         stopClipboardObservation()
@@ -579,6 +637,7 @@ class UzumiInputMethodService : InputMethodService() {
 
     /** IME windowが隠れたとき、キーボード面に重ねた一覧・パネルと編集パネルの選択モードを解放する。 */
     override fun onWindowHidden() {
+        cancelVoiceInput()
         hideKeyboardOverlays()
         super.onWindowHidden()
     }
@@ -1392,6 +1451,48 @@ class UzumiInputMethodService : InputMethodService() {
         val target = voiceInputMethod ?: return
         hideKeyboardOverlays()
         switchInputMethod(target.first.id, target.second)
+    }
+
+    /**
+     * 端末内の音声入力を開始する。録音権限が無い場合は許可を求めるだけの画面を開く。
+     */
+    internal fun startVoiceInput(): VoiceStartStatus {
+        val recognizer = voiceRecognizer ?: return VoiceStartStatus.DESTROYED
+        val status = recognizer.start()
+        if (status == VoiceStartStatus.PERMISSION_DENIED) {
+            startActivity(
+                Intent(this, VoicePermissionActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }
+        return status
+    }
+
+    /** 実行中の音声入力へ発話の終了を伝え、確定結果の到着を待つ。 */
+    internal fun stopVoiceInput(): Boolean = voiceRecognizer?.stop() == true
+
+    /** 実行中の音声入力を取り消し、途中経過と認識器を破棄する。 */
+    internal fun cancelVoiceInput(): Boolean {
+        voicePartialText = ""
+        return voiceRecognizer?.cancel() == true
+    }
+
+    /**
+     * 確定した音声入力の文を現在の入力欄へ挿入する。
+     * 未確定の変換文字（composing）がある場合は先に確定してから `commitText` で入れる。
+     */
+    internal fun commitVoiceText(text: String): Boolean {
+        if (text.isEmpty()) return false
+        val current = session?.takeIf { it.isActive }
+        if (current != null) {
+            if (!current.pasteText(text)) return false
+            updateAutoCaps()
+            refreshCandidates()
+            return true
+        }
+        val connection = currentInputConnection ?: return false
+        connection.finishComposingText()
+        return connection.commitText(text, 1)
     }
 
     /** 現在の欄・表示・評価の状態で編集パネルを開けるかを返す。 */
