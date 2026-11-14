@@ -60,19 +60,27 @@ object KeymapRules {
     }
 
     /**
-     * 左下の切り替えキーで巡る配列。パスワード欄ではかなの配列を飛ばし（かな入力を使わない）、
-     * 英字の配列が一つも無ければ英字QWERTYを先頭に足して、文字を打てる配列を必ず含める。
+     * 欄で使える配列へ置き換える。文字をその場で確定する欄（[directCommit]。パスワード・数字・互換入力の欄）では、
+     * 押すたびに直前の文字を差し替える英字12キーを使えないため、英字QWERTYにする。
      */
-    fun cycleOrder(order: List<Keymap>, password: Boolean): List<Keymap> {
-        val normalized = normalize(order)
+    fun usable(keymap: Keymap, directCommit: Boolean): Keymap =
+        if (directCommit && keymap == Keymap.EN_TWELVE) Keymap.EN_QWERTY else keymap
+
+    /**
+     * 左下の切り替えキーで巡る配列。文字をその場で確定する欄（[directCommit]）では英字12キーを英字QWERTYに置き換え、
+     * パスワード欄ではかなの配列を飛ばし（かな入力を使わない）、英字の配列が一つも無ければ英字QWERTYを先頭に足して、
+     * 文字を打てる配列を必ず含める。[directCommit]を省いた場合は、パスワード欄（その場で確定する欄の一つ）かどうかで決める。
+     */
+    fun cycleOrder(order: List<Keymap>, password: Boolean, directCommit: Boolean = password): List<Keymap> {
+        val normalized = normalize(order).map { usable(it, directCommit) }.distinct()
         if (!password) return normalized
         val withoutKana = normalized.filter { it.category != KeyboardMode.KANA }
         return if (withoutKana.any { it.category == KeyboardMode.QWERTY }) withoutKana else listOf(Keymap.EN_QWERTY) + withoutKana
     }
 
     /** [current]の左下の切り替えキーで移る配列。選んだ順の次で、最後の次は最初。[current]が順番に無ければ最初へ移る。 */
-    fun next(order: List<Keymap>, current: Keymap, password: Boolean): Keymap {
-        val cycle = cycleOrder(order, password)
+    fun next(order: List<Keymap>, current: Keymap, password: Boolean, directCommit: Boolean = password): Keymap {
+        val cycle = cycleOrder(order, password, directCommit)
         val index = cycle.indexOf(current)
         return if (index < 0) cycle.first() else cycle[(index + 1) % cycle.size]
     }
@@ -82,11 +90,11 @@ object KeymapRules {
      * 選んだ順の中で最初のその種類の配列とし、無ければ英字QWERTY、Simeji型の数字、かなの12キーを使う。
      * パスワード欄でかなを求められた場合は英字にする。
      */
-    fun forCategory(order: List<Keymap>, category: KeyboardMode, password: Boolean): Keymap {
-        val cycle = cycleOrder(order, password)
+    fun forCategory(order: List<Keymap>, category: KeyboardMode, password: Boolean, directCommit: Boolean = password): Keymap {
+        val cycle = cycleOrder(order, password, directCommit)
         return when (category) {
             KeyboardMode.KANA -> if (password) {
-                forCategory(order, KeyboardMode.QWERTY, password = true)
+                forCategory(order, KeyboardMode.QWERTY, password = true, directCommit)
             } else {
                 cycle.firstOrNull { it.category == KeyboardMode.KANA } ?: Keymap.JA_TWELVE
             }
@@ -100,14 +108,21 @@ object KeymapRules {
      * 入力欄を開いたときに出す配列。数字の欄では最初の数字の配列、パスワード欄では最初の英字の配列、
      * それ以外は前回の通常の欄で使っていた配列（[last]。今の選択に無ければ数字以外の最初の配列）にする。
      */
-    fun initial(order: List<Keymap>, numeric: Boolean, password: Boolean, last: Keymap?): Keymap {
+    fun initial(
+        order: List<Keymap>,
+        numeric: Boolean,
+        password: Boolean,
+        last: Keymap?,
+        directCommit: Boolean = numeric || password,
+    ): Keymap {
         val normalized = normalize(order)
-        return when {
-            numeric -> forCategory(normalized, KeyboardMode.NUMERIC, password)
-            password -> forCategory(normalized, KeyboardMode.QWERTY, password = true)
+        val keymap = when {
+            numeric -> forCategory(normalized, KeyboardMode.NUMERIC, password, directCommit)
+            password -> forCategory(normalized, KeyboardMode.QWERTY, password = true, directCommit)
             last != null && last in normalized -> last
             else -> normalized.firstOrNull { it.category != KeyboardMode.NUMERIC } ?: normalized.first()
         }
+        return usable(keymap, directCommit)
     }
 
     /** 次に入力欄を開いたときのために覚える配列か。通常の欄で使った、数字以外の配列だけを覚える（数字の面は覚えない）。 */
@@ -115,8 +130,8 @@ object KeymapRules {
         !numeric && !password && keymap.category != KeyboardMode.NUMERIC
 
     /** [current]の左下に置く切り替えキー。次の配列の短い名前を強調して出し、移る先の種類を読み上げる。 */
-    fun switchKey(order: List<Keymap>, current: Keymap, password: Boolean): KeySpec.ModeSwitch {
-        val target = next(order, current, password)
+    fun switchKey(order: List<Keymap>, current: Keymap, password: Boolean, directCommit: Boolean = password): KeySpec.ModeSwitch {
+        val target = next(order, current, password, directCommit)
         return KeySpec.ModeSwitch(label = target.shortLabel, targetMode = target.category, emphasized = true)
     }
 
@@ -125,12 +140,25 @@ object KeymapRules {
 }
 
 /**
- * 研究の評価の記録中に使う面の切り替えの規則。自動測定の道具（tools/phase2c/run_automated.py のMODE_SWITCH）が前提にする、
- * キーマップを導入する前の面と読み上げ名と電卓型の数字面をそのまま保ち、キーマップの設定には従わない。
- * 英字の面はローマ字かな入力にしない英字QWERTYとする。
+ * 研究の評価の記録中と、評価の課題画面の入力欄で使う面の切り替えの規則。自動測定の道具
+ * （tools/phase2c/run_automated.py のMODE_SWITCH）が前提にする、キーマップを導入する前の面と読み上げ名と電卓型の数字面を
+ * そのまま保ち、キーマップの設定には従わない。英字の面はローマ字かな入力にしない英字QWERTYとする。
  */
 object RecordingKeymapRules {
-    /** 記録中に出してよい配列。かなの12キー、英字QWERTY、電卓型の数字だけ。 */
+    /**
+     * 評価の課題画面の入力欄に付ける目印（EditorInfo.privateImeOptions）。道具は記録していない課題の準備中にも
+     * MODE_SWITCH の表で面を切り替えるため、目印のある欄では記録外でもこの規則を使う。目印は規則の選択にだけ使う。
+     */
+    const val EVALUATION_FIELD_OPTION = "dev.uzumi.ime.evaluationField"
+
+    /** 入力欄の privateImeOptions（カンマ区切り）に評価の課題欄の目印があるか。 */
+    fun isEvaluationField(privateImeOptions: String?): Boolean =
+        privateImeOptions.orEmpty().split(',').any { it.trim() == EVALUATION_FIELD_OPTION }
+
+    /** この規則を使うか。評価の記録中か、評価の課題欄なら使う。 */
+    fun applies(recording: Boolean, evaluationField: Boolean): Boolean = recording || evaluationField
+
+    /** この規則で出してよい配列。かなの12キー、英字QWERTY、電卓型の数字だけ。 */
     val KEYMAPS: Set<Keymap> = setOf(Keymap.JA_TWELVE, Keymap.EN_QWERTY, Keymap.NUMBER_CALCULATOR)
 
     /** QWERTYの空白キーの表示。導入前のローマ字かな入力を使わない英字配列と同じ「space」。 */
@@ -144,16 +172,9 @@ object RecordingKeymapRules {
         KeyboardMode.SYMBOL -> throw IllegalArgumentException("記号面はキーマップではない")
     }
 
-    /** 記録中に出せない配列を表示中なら、同じ種類の記録中の配列へ置き換える。記録を始めた瞬間の面を合わせるために使う。 */
+    /** この規則で出せない配列を表示中なら、同じ種類の導入前の配列へ置き換える。規則を使い始めた瞬間の面を合わせるために使う。 */
     fun coerce(keymap: Keymap, password: Boolean): Keymap =
         if (keymap in KEYMAPS) keymap else keymapFor(keymap.category, password)
-
-    /**
-     * 記録を終えたときに出す配列。自動測定の道具は記録していない間にかなの面へ戻ろうとするため、記録の終わりに
-     * かなの12キーの面へ戻し、道具が切り替えを送らずに済むようにする（キーマップの選択に無くても戻す）。
-     * パスワード欄ではかなを使わないため英字QWERTYにする。
-     */
-    fun afterRecording(password: Boolean): Keymap = keymapFor(KeyboardMode.KANA, password)
 
     /** 入力欄を開いたときに出す配列。数字の欄は電卓型、パスワード欄は英字、それ以外は前回の通常の欄の面（かなか英字）。 */
     fun initial(numeric: Boolean, password: Boolean, last: Keymap?): Keymap = when {

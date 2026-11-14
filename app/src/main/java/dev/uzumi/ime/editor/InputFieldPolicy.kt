@@ -31,6 +31,13 @@ data class InputFieldPolicy(
     val isSensitive: Boolean
         get() = isPassword || noPersonalizedLearning
 
+    /**
+     * 変換しない欄（互換入力・パスワード・数値・電話・日時）か。こうした欄では未確定文字を作らず一文字ずつ確定するため、
+     * 直前の文字を差し替える入力（12キーのトグル入力、英字の大文字・小文字の切り替え）を使えない。
+     */
+    val commitsDirectly: Boolean
+        get() = isTypeNull || isPassword || isNumeric
+
     /** 候補生成を抑止すべき欄かどうか。 */
     val suppressSuggestions: Boolean
         get() = isPassword || isTypeNull

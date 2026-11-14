@@ -34,8 +34,8 @@ class KeyboardPanel(
     // 利用者が設定で選んだキーマップの順番。IMEが入力欄を開くたびに設定から渡す。
     private var keymaps: List<Keymap> = KeymapRules.DEFAULT_ORDER
 
-    // 研究の評価の記録中か。記録中はキーマップの設定によらず、導入前と同じ面と切り替えにする。
-    private var recording = false
+    // 研究の評価の記録中の規則を使うか（記録中か評価の課題欄）。使う間はキーマップの設定によらず、導入前と同じ面と切り替えにする。
+    private var recordingRules = false
 
     // この欄で日本語QWERTYをローマ字かな入力にできるか。パスワード・URLなどの欄ではできず、英字のまま入れる。
     private var romajiAvailable = false
@@ -51,7 +51,7 @@ class KeyboardPanel(
 
     // 日本語QWERTYでローマ字をかなにするか。表示中かどうかによらず、今のキーマップと欄の可否で決める。
     private val usesRomaji: Boolean
-        get() = !recording && romajiAvailable && currentKeymap == Keymap.JA_QWERTY
+        get() = !recordingRules && romajiAvailable && currentKeymap == Keymap.JA_QWERTY
 
     /** 現在表示中の面がローマ字かな入力のQWERTYか。ローマ字変換の対象を英字のQWERTYや他の面から分ける。 */
     val isRomajiQwertyMode: Boolean
@@ -69,6 +69,9 @@ class KeyboardPanel(
     private var actionLabel = "確定"
     private var isNumericField = false
     private var isPasswordField = false
+
+    // 文字をその場で確定する欄（パスワード・数字・互換入力）か。英字12キーのトグル入力を使えないため英字QWERTYに置き換える。
+    private var isDirectCommitField = false
 
     private val allKeyViews = mutableListOf<KeyView>()
 
@@ -142,19 +145,21 @@ class KeyboardPanel(
      *
      * @param numeric 数値入力欄（暗証番号、電話番号、金額など）かどうか
      * @param password パスワード入力欄（予測変換不要・直接英語入力）かどうか
+     * @param directCommit 文字をその場で確定する欄（パスワード・数字・互換入力）かどうか
      */
-    fun setEditorMode(numeric: Boolean, password: Boolean) {
+    fun setEditorMode(numeric: Boolean, password: Boolean, directCommit: Boolean) {
         this.isNumericField = numeric
         this.isPasswordField = password
+        this.isDirectCommitField = directCommit
 
         updateSwitchKeys()
 
         // 数字の欄は数字の配列、パスワード欄は予測不要の英字の配列、それ以外は前回の通常の欄の配列にする
         showKeymap(
-            if (recording) {
+            if (recordingRules) {
                 RecordingKeymapRules.initial(numeric, password, lastNormalKeymap)
             } else {
-                KeymapRules.initial(keymaps, numeric, password, lastNormalKeymap)
+                KeymapRules.initial(keymaps, numeric, password, lastNormalKeymap, directCommit)
             },
         )
     }
@@ -171,21 +176,13 @@ class KeyboardPanel(
     }
 
     /**
-     * 研究の評価の記録中かを受け取る。記録中は[RecordingKeymapRules]に従い、記録中に出せない配列を表示中なら
-     * 同じ種類の導入前の配列へ移す。記録を終えたときは、かなの12キーの面へ戻し、次に開く入力欄でもその面を出す。
-     * 記録の開始と終了のたびにIMEが呼ぶ。
+     * 研究の評価の記録中の規則を使うか（評価の記録中か、評価の課題欄か）を受け取る。使う間は[RecordingKeymapRules]に従い、
+     * その規則で出せない配列を表示中なら同じ種類の導入前の配列へ移す。IMEは入力欄を開くたびと、記録の開始と終了のたびに呼ぶ。
      */
-    fun setRecording(recording: Boolean) {
-        if (recording == this.recording) return
-        this.recording = recording
-        if (!recording) {
-            val keymap = RecordingKeymapRules.afterRecording(isPasswordField)
-            showKeymap(keymap)
-            // 次の課題の入力欄を開いたときも同じ面から始める（数字の欄・パスワード欄は欄の規則に従う）
-            if (!isPasswordField) lastNormalKeymap = keymap
-            return
-        }
-        val keymap = RecordingKeymapRules.coerce(currentKeymap, isPasswordField)
+    fun setRecordingRules(enabled: Boolean) {
+        if (enabled == recordingRules) return
+        this.recordingRules = enabled
+        val keymap = if (enabled) RecordingKeymapRules.coerce(currentKeymap, isPasswordField) else currentKeymap
         if (keymap != currentKeymap) {
             cancelPendingInput()
             currentKeymap = keymap
@@ -329,20 +326,20 @@ class KeyboardPanel(
             return
         }
         showKeymap(
-            if (recording) {
+            if (recordingRules) {
                 RecordingKeymapRules.keymapFor(target, isPasswordField)
             } else {
-                KeymapRules.forCategory(keymaps, target, isPasswordField)
+                KeymapRules.forCategory(keymaps, target, isPasswordField, isDirectCommitField)
             },
         )
     }
 
     /** 左下の切り替えキーを押したときの動き。通常時は選んだ順の次の配列へ、記録中は導入前と同じく表示中の行き先へ移る。 */
     private fun onKeymapSwitchKey(target: KeyboardMode) {
-        if (recording) {
+        if (recordingRules) {
             switchToCategory(target)
         } else {
-            showKeymap(KeymapRules.next(keymaps, currentKeymap, isPasswordField))
+            showKeymap(KeymapRules.next(keymaps, currentKeymap, isPasswordField, isDirectCommitField))
         }
     }
 
@@ -357,16 +354,16 @@ class KeyboardPanel(
     /** 今のキーマップの面の左下の切り替えキーと、QWERTYの空白キーの表示を、今の状態（記録中か、選択、欄）へ合わせる。 */
     private fun refreshKeymapKeys() {
         keymapSwitchKeys[currentKeymap]?.let { key ->
-            val spec = if (recording) {
+            val spec = if (recordingRules) {
                 RecordingKeymapRules.switchKey(currentKeymap, isPasswordField)
             } else {
-                KeymapRules.switchKey(keymaps, currentKeymap, isPasswordField)
+                KeymapRules.switchKey(keymaps, currentKeymap, isPasswordField, isDirectCommitField)
             }
             key.replaceSpec(spec)
-            val hidden = recording && isPasswordField && RecordingKeymapRules.hidesInPassword(spec)
+            val hidden = recordingRules && isPasswordField && RecordingKeymapRules.hidesInPassword(spec)
             key.visibility = if (hidden) View.GONE else View.VISIBLE
         }
-        val spaceLabel = if (recording) RecordingKeymapRules.QWERTY_SPACE_LABEL else KeymapRules.qwertySpaceLabel(usesRomaji)
+        val spaceLabel = if (recordingRules) RecordingKeymapRules.QWERTY_SPACE_LABEL else KeymapRules.qwertySpaceLabel(usesRomaji)
         qwertySpaceKeyView?.replaceSpec(KeySpec.Action(KeyboardAction.Space, spaceLabel))
     }
 

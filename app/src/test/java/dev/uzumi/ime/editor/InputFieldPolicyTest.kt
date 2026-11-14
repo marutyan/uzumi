@@ -50,6 +50,8 @@ class InputFieldPolicyTest {
 
         assertTrue(policy.isTypeNull)
         assertTrue(policy.suppressSuggestions)
+        // 文字をその場で確定する欄として扱う（英字12キーの代わりに英字QWERTYを出す判定にも使う）
+        assertTrue(policy.commitsDirectly)
         assertEquals("改行", policy.actionLabel)
     }
 

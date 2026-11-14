@@ -84,6 +84,7 @@ import dev.uzumi.ime.keyboard.EditPanelView
 import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardAction
 import dev.uzumi.ime.keyboard.Keymap
+import dev.uzumi.ime.keyboard.RecordingKeymapRules
 import dev.uzumi.ime.keyboard.KeyboardBackgroundDrawable
 import dev.uzumi.ime.keyboard.KeyboardBackgroundImage
 import dev.uzumi.ime.keyboard.KeyboardColors
@@ -190,6 +191,9 @@ class UzumiInputMethodService : InputMethodService() {
     private var inlineResponseGeneration = 0L
     private var currentPolicy: InputFieldPolicy? = null
 
+    // 今の入力欄が評価の課題画面の欄（目印付き）か。キーボードの面の切り替えの規則を選ぶことにだけ使う。
+    private var evaluationField = false
+
     // カーソル位置で欄が求める大文字化の種類（TextUtils.CAP_MODE_*、0なら求めない）。キーボードを作り直しても引き継ぐ。
     private var autoCapsMode = 0
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -268,7 +272,7 @@ class UzumiInputMethodService : InputMethodService() {
         EvaluationStatusSource.provider = ::evaluationStatus
         EvaluationStatusSource.neuralMemoryRequester = { neuralConnection?.requestMemory() }
         // 評価の記録を始めた・終えた時点で、キーボードを記録中の面（キーマップを導入する前の面）へ合わせる
-        EvaluationStatusSource.recordingChanged = { keyboardPanel?.setRecording(evaluation.isRecording) }
+        EvaluationStatusSource.recordingChanged = ::applyKeymapRulesToKeyboard
         scheduleClipboardHistoryExpiry()
     }
 
@@ -489,9 +493,11 @@ class UzumiInputMethodService : InputMethodService() {
         clearInlineSuggestions()
         hideKeyboardOverlays()
         currentPolicy = null
+        evaluationField = false
         autoCapsMode = 0
         refreshCandidates()
         val info = attribute ?: return
+        evaluationField = RecordingKeymapRules.isEvaluationField(info.privateImeOptions)
         editorInOwnApp = info.packageName == packageName
         editorFieldId = info.fieldId
         val connection = currentInputConnection ?: return
@@ -501,8 +507,9 @@ class UzumiInputMethodService : InputMethodService() {
             .copy(learningDisabledBySetting = LearningStores.peek()?.isEnabled != true)
         currentPolicy = policy
         // 日本語QWERTYを選んだときだけローマ字かな入力を用意する。自動大文字化を使わない判断はキーボード側が配列ごとに行う。
-        // 評価の記録中は導入前と同じく英字配列を英字のまま使うため、ローマ字かな入力を用意しない。
-        val romaji = !evaluation.isRecording && policy.usesRomajiInput(Keymap.JA_QWERTY in UzumiSettings.keymaps(this))
+        // 評価の記録中は、キーボードが導入前の規則で英字配列を英字のまま使うため、用意した組み立て器は使われない。
+        // 記録の有無で用意を変えないことで、記録の後に日本語QWERTYへ切り替えてもローマ字かな入力になる。
+        val romaji = policy.usesRomajiInput(Keymap.JA_QWERTY in UzumiSettings.keymaps(this))
         autoCapsMode = info.initialCapsMode and policy.capsModeFlags
         // ライブ変換の設定は入力開始ごとに読み、設定画面での変更を次の入力欄から反映する。
         val live = policy.usesLiveConversion(UzumiSettings.isLiveConversionEnabled(this))
@@ -867,12 +874,20 @@ class UzumiInputMethodService : InputMethodService() {
     /** EditorInfo由来の表示モードとアクション名、設定で選んだキーマップ、評価の記録中かをキーボードへ反映する。 */
     private fun applyPolicyToKeyboard() {
         val policy = currentPolicy ?: return
-        // 日本語QWERTYは、ローマ字かな入力を使える欄でだけかなにする。キーマップの順番は設定画面で選ぶ。
-        keyboardPanel?.setKeymaps(UzumiSettings.keymaps(this), romajiAvailable = session?.isRomajiInputEnabled == true)
-        keyboardPanel?.setRecording(evaluation.isRecording)
-        keyboardPanel?.setEditorMode(policy.isNumeric, policy.isPassword)
+        applyKeymapRulesToKeyboard()
+        keyboardPanel?.setEditorMode(policy.isNumeric, policy.isPassword, policy.commitsDirectly)
         keyboardPanel?.setActionLabel(policy.actionLabel)
         keyboardPanel?.setAutoCapsMode(autoCapsMode)
+    }
+
+    /**
+     * キーマップの選択、今の編集セッションでローマ字かな入力を使えるか、導入前の規則を使うか（評価の記録中か評価の課題欄）を
+     * キーボードへ渡す。入力欄を開くたびと、評価の記録の開始・終了のたびに呼び、セッションとキーボードの状態をそろえる。
+     */
+    private fun applyKeymapRulesToKeyboard() {
+        // 日本語QWERTYは、ローマ字かな入力を使える欄でだけかなにする。キーマップの順番は設定画面で選ぶ。
+        keyboardPanel?.setKeymaps(UzumiSettings.keymaps(this), romajiAvailable = session?.isRomajiInputEnabled == true)
+        keyboardPanel?.setRecordingRules(RecordingKeymapRules.applies(evaluation.isRecording, evaluationField))
     }
 
     /** IME表示中だけクリップボード変更を監視し、貼り付け提案と履歴を更新する。 */

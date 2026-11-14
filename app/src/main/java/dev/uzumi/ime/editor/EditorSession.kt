@@ -149,7 +149,7 @@ class EditorSession(
      * 変換しない欄（互換入力・パスワード・数値・電話・日時）では、compositionを作らず一文字ずつ確定する。
      * 未確定が残らないため、「完了」「次へ」などのEnterが一回で欄へ届く（標準のキーボードと同じ）。
      */
-    private val commitsDirectly: Boolean = policy.isTypeNull || policy.isPassword || policy.isNumeric
+    private val commitsDirectly: Boolean = policy.commitsDirectly
 
     /** セッションがまだ編集を受け付けるかを返す。 */
     val isActive: Boolean
