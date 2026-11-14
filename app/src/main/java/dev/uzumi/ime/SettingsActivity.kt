@@ -2,32 +2,20 @@ package dev.uzumi.ime
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.content.Context
 import android.content.Intent
-import android.graphics.Typeface
+import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
-import android.view.inputmethod.EditorInfo
-import android.text.Editable
-import android.text.InputType
-import android.text.TextWatcher
 import android.widget.Button
 import android.widget.CheckBox
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.RadioButton
-import android.widget.RadioGroup
-import android.widget.SeekBar
 import android.widget.ScrollView
-import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import dev.uzumi.ime.conversion.NeuralModelSpec
 import dev.uzumi.ime.keyboard.EmojiRecentStore
-import dev.uzumi.ime.keyboard.KeyboardPreferences
-import dev.uzumi.ime.keyboard.ToolbarAction
-import dev.uzumi.ime.keyboard.ToolbarPreferences
 import dev.uzumi.ime.dictionary.TsvParseResult
 import dev.uzumi.ime.dictionary.UserDictionaries
 import dev.uzumi.ime.dictionary.UserDictionaryEntry
@@ -39,110 +27,68 @@ import dev.uzumi.ime.neural.NeuralRuntimeConnection
 import dev.uzumi.ime.neural.NeuralSelection
 import java.io.ByteArrayOutputStream
 import java.io.IOException
-import java.util.Locale
-import kotlin.math.roundToInt
 
 /**
- * Uzumiの設定画面。入力・表示・操作の反応・学習と辞書に分けて並べ、値はUzumiSettingsだけに保存する。
- * 候補バーの⚙と、導入画面の「Uzumiの設定」から開く。変更は次にキーボードを表示したときから反映される。
+ * Uzumiの設定画面。設定トップ（入力／キーボード／キーの操作と音、変換の学習／ユーザー辞書／クリップボード、
+ * バックアップ／第三者ライセンス／開発用）と、その下層の画面を、画面の種類（[SettingsPage]）つきでこのActivityを開き直して見せる。
+ * 「キーボード」だけは見本と並べ替えを持つため[KeyboardSettingsActivity]で見せる。値はUzumiSettingsだけに保存する。
+ * 候補バーの⚙と、起動画面の「Uzumiの設定」から開く。変更は次にキーボードを表示したときから反映される。
  */
 class SettingsActivity : Activity() {
     private var pendingDictionaryExport = false
+    private lateinit var ui: SettingsUi
+    private lateinit var page: SettingsPage
+    private lateinit var scroll: ScrollView
 
-    // 押したキーの拡大表示の行。きせかえの画面でも同じ設定を切り替えるため、戻ったときに表示を合わせる。
-    private var keyPreviewRow: View? = null
+    // 変換の学習の画面の「表示しない候補」の件数。一覧で解除したときに書き換える。
+    private var hiddenCountView: TextView? = null
 
     private val density: Float
         get() = resources.displayMetrics.density
 
-    /** 設定項目を追加UI依存なしで組み立てる。 */
+    /** 開く画面の種類を読み、見出しの帯とスクロールする中身の入れ物を作る。中身は[onResume]で作る。 */
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pendingDictionaryExport = savedInstanceState?.getBoolean(STATE_BACKUP_INCLUDE_DICTIONARY) ?: false
-        title = getString(R.string.settings_title)
-        val content = LinearLayout(this).apply {
+        page = intent.getStringExtra(EXTRA_PAGE)?.let { name -> SettingsPage.entries.firstOrNull { it.name == name } } ?: SettingsPage.TOP
+        // 変換エンジンの選択は、選択を使えるビルド（debug）だけに出す。releaseでは常にMozcだけで、画面も開かない。
+        if (page == SettingsPage.DEVELOPER && !NeuralSelection.isEnabled(this)) {
+            finish()
+            return
+        }
+        ui = SettingsUi(this)
+        title = getString(page.titleId)
+        scroll = ScrollView(this)
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(px(16), px(8), px(16), px(24))
+            addView(ui.appBar(getString(page.titleId)) { finish() })
+            addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         }
-
-        content.addView(section(R.string.settings_section_input))
-        content.addView(switchRow(R.string.live_conversion_switch, R.string.live_conversion_description,
-            UzumiSettings.isLiveConversionEnabled(this)) { UzumiSettings.setLiveConversionEnabled(this, it) })
-        content.addView(switchRow(R.string.settings_romaji_input, R.string.settings_romaji_input_description,
-            UzumiSettings.isRomajiInputEnabled(this)) { UzumiSettings.setRomajiInputEnabled(this, it) })
-        content.addView(switchRow(R.string.settings_romaji_english_qwerty, R.string.settings_romaji_english_qwerty_description,
-            UzumiSettings.isRomajiEnglishQwertyIncluded(this)) { UzumiSettings.setRomajiEnglishQwertyIncluded(this, it) })
-        content.addView(switchRow(R.string.settings_delete_drag, R.string.settings_delete_drag_description,
-            UzumiSettings.keyboardPreferences(this).deleteDrag) { UzumiSettings.setDeleteDrag(this, it) })
-
-        content.addView(section(R.string.settings_section_display))
-        content.addView(linkRow(R.string.settings_kisekae) {
-            startActivity(Intent(this, KisekaeActivity::class.java))
-        })
-        content.addView(label(R.string.settings_height, R.string.settings_height_description))
-        content.addView(heightControl())
-        content.addView(switchRow(R.string.settings_key_preview, R.string.settings_key_preview_description,
-            UzumiSettings.keyboardPreferences(this).keyPreview) { UzumiSettings.setKeyPreview(this, it) }
-            .also { keyPreviewRow = it })
-
-        content.addView(section(R.string.settings_section_toolbar))
-        content.addView(label(R.string.settings_toolbar_tiles, R.string.settings_toolbar_tiles_description))
-        content.addView(toolbarActionControl())
-        content.addView(rowCountControl(
-            R.string.settings_toolbar_rows,
-            UzumiSettings.toolbarPreferences(this).toolbarRows,
-            UzumiSettings::setToolbarRows,
-        ))
-        content.addView(rowCountControl(
-            R.string.settings_candidate_rows,
-            UzumiSettings.toolbarPreferences(this).candidateRows,
-            UzumiSettings::setCandidateRows,
-        ))
-        content.addView(switchRow(R.string.settings_candidate_dividers, R.string.settings_candidate_dividers_description,
-            UzumiSettings.toolbarPreferences(this).candidateDividers) { UzumiSettings.setCandidateDividers(this, it) })
-        content.addView(switchRow(R.string.settings_toolbar_on_top, R.string.settings_toolbar_on_top_description,
-            UzumiSettings.toolbarPreferences(this).toolbarOnTop) { UzumiSettings.setToolbarOnTop(this, it) })
-        content.addView(switchRow(
-            R.string.settings_clipboard_history,
-            R.string.settings_clipboard_history_description,
-            UzumiSettings.isClipboardHistoryEnabled(this),
-        ) { UzumiSettings.setClipboardHistoryEnabled(this, it) })
-
-        content.addView(section(R.string.settings_section_feedback))
-        content.addView(switchRow(R.string.settings_vibration, null,
-            UzumiSettings.keyboardPreferences(this).vibration) { UzumiSettings.setVibration(this, it) })
-        content.addView(switchRow(R.string.settings_key_sound, null,
-            UzumiSettings.keyboardPreferences(this).keySound) { UzumiSettings.setKeySound(this, it) })
-
-        content.addView(section(R.string.settings_section_learning))
-        content.addView(learningRow())
-        content.addView(linkRow(R.string.settings_hidden_candidates) { showHiddenCandidates() })
-        content.addView(linkRow(R.string.settings_clear_learning) { confirmClearLearning() })
-        content.addView(linkRow(R.string.settings_backup_export) { chooseBackupExport() })
-        content.addView(linkRow(R.string.settings_backup_import) { openBackupFile() })
-        content.addView(linkRow(R.string.open_user_dictionary) {
-            startActivity(Intent(this, UserDictionaryActivity::class.java))
-        })
-        content.addView(linkRow(R.string.open_licenses) {
-            startActivity(Intent(this, LicenseActivity::class.java))
-        })
-
-        // 変換エンジンの選択は、選択を使えるビルド（debug）だけに出す。releaseでは常にMozcだけで、項目も出さない。
-        if (NeuralSelection.isEnabled(this)) {
-            content.addView(section(R.string.settings_section_developer))
-            content.addView(label(R.string.settings_neural_engine, R.string.settings_neural_engine_description))
-            content.addView(engineChoices())
-        }
-
-        val scrollView = ScrollView(this).apply { addView(content) }
-        applySystemInsets(scrollView)
-        setContentView(scrollView)
+        applySystemInsets(root)
+        setContentView(root)
     }
 
-    /** きせかえの画面で変えた拡大表示の設定を、戻ったときにスイッチへ反映する。 */
+    /**
+     * 画面の中身を今の設定値から作り直す。下層の画面やきせかえの画面で変えた値を、戻ったときに説明行とスイッチへ反映するため。
+     * スクロール位置は保つ。
+     */
     override fun onResume() {
         super.onResume()
-        keyPreviewRow?.findSwitch()?.isChecked = UzumiSettings.keyboardPreferences(this).keyPreview
+        val scrollY = scroll.scrollY
+        val content = ui.page()
+        hiddenCountView = null
+        when (page) {
+            SettingsPage.TOP -> buildTop(content)
+            SettingsPage.INPUT -> buildInput(content)
+            SettingsPage.KEYS -> buildKeys(content)
+            SettingsPage.LEARNING -> buildLearning(content)
+            SettingsPage.CLIPBOARD -> buildClipboard(content)
+            SettingsPage.BACKUP -> buildBackup(content)
+            SettingsPage.DEVELOPER -> buildDeveloper(content)
+        }
+        scroll.removeAllViews()
+        scroll.addView(content)
+        scroll.post { scroll.scrollTo(0, scrollY) }
     }
 
     /** ファイル選択中に画面が再生成されても、辞書を含める指定を保つ。 */
@@ -166,70 +112,174 @@ class SettingsActivity : Activity() {
         }
     }
 
-    /** 分類の見出し。 */
-    private fun section(titleId: Int): TextView = TextView(this).apply {
-        text = getString(titleId)
-        textSize = 13f
-        setTypeface(typeface, Typeface.BOLD)
-        setTextColor(getColor(R.color.kb_accent))
-        setPadding(0, px(20), 0, px(4))
-    }
-
-    /** 項目名と補足の説明。 */
-    private fun label(titleId: Int, descriptionId: Int?): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(0, px(10), 0, px(4))
-        addView(TextView(this@SettingsActivity).apply {
-            text = getString(titleId)
-            textSize = 16f
-        })
-        if (descriptionId != null) {
-            addView(TextView(this@SettingsActivity).apply {
-                text = getString(descriptionId)
-                textSize = 13f
-                alpha = DESCRIPTION_ALPHA
-            })
-        }
-    }
-
-    /** ON/OFFの項目。切り替えるとすぐ保存する。 */
-    private fun switchRow(titleId: Int, descriptionId: Int?, checked: Boolean, onChange: (Boolean) -> Unit): View {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            minimumHeight = px(56)
-            val switch = Switch(this@SettingsActivity).apply {
-                isChecked = checked
-                contentDescription = getString(titleId)
-                setOnCheckedChangeListener { _, value -> onChange(value) }
+    /** 設定トップ。3つの群に行を並べ、各行の説明行に今の値を短く出す。 */
+    private fun buildTop(content: LinearLayout) {
+        val summaries = summaryText()
+        val keyboard = UzumiSettings.keyboardPreferences(this)
+        val learning = ui.row(getString(R.string.settings_learning), "", R.drawable.ic_school) { open(SettingsPage.LEARNING) }
+        // 学習の設定は保存ファイルから読むため、UI thread外で読んでから説明行へ出す。
+        learning.summary.visibility = View.INVISIBLE
+        background {
+            val enabled = LearningStores.get(this).isEnabled
+            runOnUiThread {
+                learning.summary.text = summaries.learning(enabled)
+                learning.summary.visibility = View.VISIBLE
             }
-            addView(label(titleId, descriptionId), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            addView(switch)
-            // 行のどこを押しても切り替わるようにし、小さなスイッチだけを狙わなくてよくする
-            setOnClickListener { switch.toggle() }
         }
+        ui.addBlock(content, ui.group(listOf(
+            ui.row(getString(R.string.settings_input), summaries.input(UzumiSettings.isLiveConversionEnabled(this)),
+                R.drawable.ic_language_japanese_kana) { open(SettingsPage.INPUT) }.view,
+            ui.row(getString(R.string.settings_keyboard),
+                summaries.keyboard(getString(keyboardThemeName(keyboard.appearance.preset)), keyboard.rowHeightDp.toInt()),
+                R.drawable.ic_keyboard) { startActivity(Intent(this, KeyboardSettingsActivity::class.java)) }.view,
+            ui.row(getString(R.string.settings_keys), summaries.keys(keyboard.keyPreview, keyboard.vibration, keyboard.keySound),
+                R.drawable.ic_touch_app) { open(SettingsPage.KEYS) }.view,
+        )))
+        ui.addBlock(content, ui.group(listOf(
+            learning.view,
+            ui.row(getString(R.string.open_user_dictionary), getString(R.string.user_dictionary_summary), R.drawable.ic_menu_book) {
+                startActivity(Intent(this, UserDictionaryActivity::class.java))
+            }.view,
+            ui.row(getString(R.string.settings_clipboard), summaries.clipboard(UzumiSettings.isClipboardHistoryEnabled(this)),
+                R.drawable.ic_content_paste) { open(SettingsPage.CLIPBOARD) }.view,
+        )))
+        val lastGroup = mutableListOf<View>(
+            ui.row(getString(R.string.settings_backup), getString(R.string.settings_backup_summary), R.drawable.ic_settings_backup_restore) {
+                open(SettingsPage.BACKUP)
+            }.view,
+            ui.row(getString(R.string.open_licenses), iconRes = R.drawable.ic_description) {
+                startActivity(Intent(this, LicenseActivity::class.java))
+            }.view,
+        )
+        // 変換エンジンの選択は、選択を使えるビルド（debug）だけに出す。
+        if (NeuralSelection.isEnabled(this)) {
+            lastGroup += ui.row(getString(R.string.settings_section_developer), summaries.developer(NeuralSelection.current(this)),
+                R.drawable.ic_code) { open(SettingsPage.DEVELOPER) }.view
+        }
+        ui.addBlock(content, ui.group(lastGroup))
     }
+
+    /** 設定トップの説明行の文言の型を、resourceから読んで渡す。 */
+    private fun summaryText(): SettingsSummaryText = SettingsSummaryText(
+        on = getString(R.string.settings_on),
+        off = getString(R.string.settings_off),
+        inputFormat = getString(R.string.settings_summary_input),
+        keyboardFormat = getString(R.string.settings_summary_keyboard),
+        keysFormat = getString(R.string.settings_summary_keys),
+        clipboardFormat = getString(R.string.settings_summary_clipboard),
+        developerFormat = getString(R.string.settings_summary_developer),
+        mozcName = getString(R.string.settings_neural_engine_mozc),
+    )
+
+    /** 下層の画面を、このActivityを画面の種類つきで開き直して見せる。 */
+    private fun open(target: SettingsPage) {
+        startActivity(Intent(this, SettingsActivity::class.java).putExtra(EXTRA_PAGE, target.name))
+    }
+
+    /**
+     * 「入力」の画面。ライブ変換を置く。英字配列でのローマ字かな入力の2項目は、キーマップの選択へ置き換えるまでの間ここに残す。
+     */
+    private fun buildInput(content: LinearLayout) {
+        ui.addBlock(content, ui.section(getString(R.string.settings_section_conversion), ui.group(listOf(
+            switchRow(R.string.live_conversion_switch, R.string.live_conversion_description,
+                UzumiSettings.isLiveConversionEnabled(this)) { UzumiSettings.setLiveConversionEnabled(this, it) },
+        ))))
+        ui.addBlock(content, ui.group(listOf(
+            switchRow(R.string.settings_romaji_input, R.string.settings_romaji_input_description,
+                UzumiSettings.isRomajiInputEnabled(this)) { UzumiSettings.setRomajiInputEnabled(this, it) },
+            switchRow(R.string.settings_romaji_english_qwerty, R.string.settings_romaji_english_qwerty_description,
+                UzumiSettings.isRomajiEnglishQwertyIncluded(this)) { UzumiSettings.setRomajiEnglishQwertyIncluded(this, it) },
+        )))
+    }
+
+    /** 「キーの操作と音」の画面。押したキーの拡大表示と削除キーのなぞり、振動とキー音。 */
+    private fun buildKeys(content: LinearLayout) {
+        val preferences = UzumiSettings.keyboardPreferences(this)
+        ui.addBlock(content, ui.section(getString(R.string.settings_section_keys), ui.group(listOf(
+            switchRow(R.string.settings_key_preview, null, preferences.keyPreview) { UzumiSettings.setKeyPreview(this, it) },
+            switchRow(R.string.settings_delete_drag, null, preferences.deleteDrag) { UzumiSettings.setDeleteDrag(this, it) },
+        ))))
+        ui.addBlock(content, ui.section(getString(R.string.settings_section_sound), ui.group(listOf(
+            switchRow(R.string.settings_vibration, null, preferences.vibration) { UzumiSettings.setVibration(this, it) },
+            switchRow(R.string.settings_key_sound, null, preferences.keySound) { UzumiSettings.setKeySound(this, it) },
+        ))))
+    }
+
+    /** 「変換の学習」の画面。学習のON/OFFと、表示しない候補の一覧、学習履歴の消去。 */
+    private fun buildLearning(content: LinearLayout) {
+        ui.addBlock(content, ui.group(listOf(learningRow())))
+        val hidden = ui.row(getString(R.string.settings_hidden_candidates), "", R.drawable.ic_visibility_off) { showHiddenCandidates() }
+        hidden.summary.visibility = View.INVISIBLE
+        hiddenCountView = hidden.summary
+        background {
+            val count = HiddenCandidateStores.get(this).all().size
+            runOnUiThread { showHiddenCount(count) }
+        }
+        ui.addBlock(content, ui.group(listOf(
+            hidden.view,
+            ui.row(getString(R.string.settings_clear_learning), iconRes = R.drawable.ic_delete, danger = true) { confirmClearLearning() }.view,
+        )))
+    }
+
+    /** 「表示しない候補」の行の説明に件数を出す。 */
+    private fun showHiddenCount(count: Int) {
+        val view = hiddenCountView ?: return
+        view.text = if (count > 0) getString(R.string.settings_hidden_count, count) else getString(R.string.settings_hidden_none)
+        view.visibility = View.VISIBLE
+    }
+
+    /** 「クリップボード」の画面。履歴のON/OFFと、OFFにすると消えることの注記。 */
+    private fun buildClipboard(content: LinearLayout) {
+        ui.addBlock(content, ui.group(listOf(
+            switchRow(R.string.settings_clipboard_history, R.string.settings_clipboard_history_description,
+                UzumiSettings.isClipboardHistoryEnabled(this)) { enabled ->
+                UzumiSettings.setClipboardHistoryEnabled(this, enabled)
+                if (!enabled) Toast.makeText(this, R.string.settings_clipboard_history_cleared, Toast.LENGTH_SHORT).show()
+            },
+        )))
+        ui.addBlock(content, ui.note(R.drawable.ic_warning, getString(R.string.settings_clipboard_history_note)))
+    }
+
+    /** 「バックアップ」の画面。設定の書き出しと読み込み。 */
+    private fun buildBackup(content: LinearLayout) {
+        ui.addBlock(content, ui.group(listOf(
+            ui.row(getString(R.string.settings_backup_export), iconRes = R.drawable.ic_upload_file) { chooseBackupExport() }.view,
+            ui.row(getString(R.string.settings_backup_import), iconRes = R.drawable.ic_file_open) { openBackupFile() }.view,
+        )))
+        ui.addBlock(content, ui.note(R.drawable.ic_info, getString(R.string.settings_backup_note)))
+    }
+
+    /** 「開発用」の画面。debugビルドだけにある変換エンジンの選択。 */
+    private fun buildDeveloper(content: LinearLayout) {
+        ui.addBlock(content, ui.banner(R.drawable.ic_code, getString(R.string.settings_developer_banner)))
+        ui.addBlock(content, ui.section(getString(R.string.settings_section_engine), engineChoices()))
+        ui.addBlock(content, ui.note(R.drawable.ic_info, getString(R.string.settings_neural_engine_note)))
+    }
+
+    /** ON/OFFの行。切り替えるとすぐ保存する。 */
+    private fun switchRow(titleId: Int, descriptionId: Int?, checked: Boolean, onChange: (Boolean) -> Unit): View =
+        ui.switchRow(getString(titleId), descriptionId?.let(::getString), checked, onChange).first.view
 
     /**
      * 変換の学習のON/OFF。学習の保存ファイルはUI thread外で読み、読み終わるまでスイッチを押せなくする。
      */
     private fun learningRow(): View {
         var ready = false
-        val row = switchRow(R.string.settings_learning, R.string.settings_learning_description, true) { enabled ->
+        val (row, switch) = ui.switchRow(getString(R.string.settings_learning), getString(R.string.settings_learning_description), true) { enabled ->
             if (ready) background { LearningStores.get(this).setEnabled(enabled) }
         }
-        row.isEnabled = false
+        row.view.isEnabled = false
+        switch.isEnabled = false
         background {
             val enabled = LearningStores.get(this).isEnabled
             runOnUiThread {
-                row.findSwitch()?.isChecked = enabled
+                switch.isChecked = enabled
                 ready = true
-                row.isEnabled = true
-                row.findSwitch()?.isEnabled = true
+                row.view.isEnabled = true
+                switch.isEnabled = true
             }
         }
-        row.findSwitch()?.isEnabled = false
-        return row
+        return row.view
     }
 
     /** 学習履歴を消す前に確認する。消去はファイルを書き換えるためUI thread外で行う。 */
@@ -418,6 +468,7 @@ class SettingsActivity : Activity() {
         background {
             val surfaces = HiddenCandidateStores.get(this).all().sorted()
             runOnUiThread {
+                showHiddenCount(surfaces.size)
                 if (surfaces.isEmpty()) {
                     AlertDialog.Builder(this)
                         .setTitle(R.string.settings_hidden_candidates)
@@ -469,285 +520,42 @@ class SettingsActivity : Activity() {
         Thread(work, "uzumi-settings").start()
     }
 
-    /** 行の中のスイッチを探す。 */
-    private fun View.findSwitch(): Switch? = (this as? LinearLayout)?.let { row ->
-        (0 until row.childCount).map(row::getChildAt).filterIsInstance<Switch>().firstOrNull()
-    }
-
-    /** キー1段の高さをスライダーとdp入力のどちらからも変更できるようにする。 */
-    private fun heightControl(): LinearLayout {
-        val minimum = KeyboardPreferences.MIN_ROW_HEIGHT_DP
-        val maximum = KeyboardPreferences.MAX_ROW_HEIGHT_DP
-        var selectedHeight = UzumiSettings.keyboardHeightDp(this)
-        var updatingInput = false
-
-        val valueLabel = TextView(this).apply { textSize = 14f }
-        val heightInput = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER
-            imeOptions = EditorInfo.IME_ACTION_DONE
-            setSingleLine(true)
-            setSelectAllOnFocus(true)
-            gravity = android.view.Gravity.CENTER
-            contentDescription = getString(R.string.settings_height_input_description)
-        }
-        val seekBar = SeekBar(this).apply {
-            max = maximum - minimum
-            contentDescription = getString(R.string.settings_height)
-        }
-
-        fun showHeight(value: Int, updateInput: Boolean, save: Boolean) {
-            selectedHeight = KeyboardPreferences.normalizeRowHeightDp(value)
-            valueLabel.text = getString(R.string.settings_height_value, selectedHeight)
-            val progress = selectedHeight - minimum
-            if (seekBar.progress != progress) seekBar.progress = progress
-            if (updateInput && heightInput.text.toString() != selectedHeight.toString()) {
-                updatingInput = true
-                // 数値入力と保存値の読み取りを一致させるため、入力欄はASCIIの数字にそろえる。
-                heightInput.setText(String.format(Locale.ROOT, "%d", selectedHeight))
-                heightInput.setSelection(heightInput.text.length)
-                updatingInput = false
-            }
-            if (save) UzumiSettings.setKeyboardHeightDp(this, selectedHeight)
-        }
-
-        seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (fromUser) showHeight(minimum + progress, updateInput = true, save = true)
-            }
-
-            override fun onStartTrackingTouch(bar: SeekBar?) = Unit
-            override fun onStopTrackingTouch(bar: SeekBar?) = Unit
-        })
-
-        heightInput.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) = Unit
-
-            override fun afterTextChanged(text: Editable?) {
-                if (updatingInput) return
-                val value = text?.toString()?.toIntOrNull() ?: return
-                if (value in minimum..maximum) showHeight(value, updateInput = false, save = true)
-            }
-        })
-        heightInput.setOnFocusChangeListener { _, hasFocus ->
-            if (!hasFocus) {
-                val value = heightInput.text.toString().toIntOrNull() ?: selectedHeight
-                showHeight(value, updateInput = true, save = true)
-            }
-        }
-        heightInput.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == EditorInfo.IME_ACTION_DONE) {
-                heightInput.clearFocus()
-                true
-            } else {
-                false
-            }
-        }
-
-        val inputRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            addView(heightInput, LinearLayout.LayoutParams(px(88), px(48)))
-            addView(TextView(this@SettingsActivity).apply {
-                text = getString(R.string.settings_height_unit)
-                setPadding(px(8), 0, 0, 0)
-            })
-        }
-        val reset = Button(this).apply {
-            text = getString(R.string.settings_height_reset)
-            setOnClickListener {
-                heightInput.clearFocus()
-                showHeight(KeyboardPreferences().rowHeightDp.roundToInt(), updateInput = true, save = true)
-            }
-        }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, px(4), 0, px(8))
-            addView(valueLabel)
-            addView(seekBar)
-            addView(inputRow)
-            addView(reset)
-            showHeight(selectedHeight, updateInput = true, save = false)
-        }
-    }
-
-    /** 機能バーへ常時表示するタイルを選び、上下ボタンで順序を変える。 */
-    private fun toolbarActionControl(): View {
-        val selected = UzumiSettings.toolbarPreferences(this).selectedActions
-        return Button(this).apply {
-            text = toolbarActionSummary(selected)
-            contentDescription = getString(R.string.settings_toolbar_tiles)
-            setOnClickListener { showToolbarActionDialog(this) }
-        }
-    }
-
-    /** 選択可能な機能の一覧をチェック欄と上下ボタンで編集する。 */
-    private fun showToolbarActionDialog(summaryButton: Button) {
-        val preferences = UzumiSettings.toolbarPreferences(this)
-        val ordered = (preferences.selectedActions + ToolbarPreferences.AVAILABLE_ACTIONS)
-            .distinct()
-            .toMutableList()
-        val selected = preferences.selectedActions.toMutableSet()
-        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-
-        fun redraw() {
-            rows.removeAllViews()
-            ordered.forEachIndexed { index, action ->
-                val check = CheckBox(this).apply {
-                    text = toolbarActionLabel(action)
-                    isChecked = action in selected
-                    minimumHeight = px(48)
-                    setOnCheckedChangeListener { button, checked ->
-                        when {
-                            !checked -> selected.remove(action)
-                            selected.size >= ToolbarPreferences.BAR_MAX && action !in selected -> {
-                                // バーに置ける数を超える選択は取り消し、理由を知らせる。
-                                button.isChecked = false
-                                Toast.makeText(
-                                    this@SettingsActivity,
-                                    getString(R.string.settings_toolbar_tiles_limit, ToolbarPreferences.BAR_MAX),
-                                    Toast.LENGTH_SHORT,
-                                ).show()
-                            }
-                            else -> selected.add(action)
-                        }
-                    }
-                }
-                val up = Button(this).apply {
-                    text = "↑"
-                    contentDescription = getString(R.string.settings_toolbar_move_up, toolbarActionLabel(action))
-                    minimumWidth = px(48)
-                    minimumHeight = px(48)
-                    isEnabled = index > 0
-                    setOnClickListener {
-                        if (index > 0) {
-                            val item = ordered.removeAt(index)
-                            ordered.add(index - 1, item)
-                            redraw()
-                        }
-                    }
-                }
-                val down = Button(this).apply {
-                    text = "↓"
-                    contentDescription = getString(R.string.settings_toolbar_move_down, toolbarActionLabel(action))
-                    minimumWidth = px(48)
-                    minimumHeight = px(48)
-                    isEnabled = index < ordered.lastIndex
-                    setOnClickListener {
-                        if (index < ordered.lastIndex) {
-                            val item = ordered.removeAt(index)
-                            ordered.add(index + 1, item)
-                            redraw()
-                        }
-                    }
-                }
-                rows.addView(LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    addView(check, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                    addView(up)
-                    addView(down)
-                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, px(52)))
-            }
-        }
-        redraw()
-        val scroll = ScrollView(this).apply {
-            addView(rows)
-            isFillViewport = true
-        }
-        AlertDialog.Builder(this)
-            .setTitle(R.string.settings_toolbar_tiles)
-            .setView(scroll)
-            .setNegativeButton(android.R.string.cancel, null)
-            .setPositiveButton(android.R.string.ok) { _, _ ->
-                UzumiSettings.setToolbarActions(this, ordered.filter { it in selected })
-                summaryButton.text = toolbarActionSummary(UzumiSettings.toolbarPreferences(this).selectedActions)
-            }
-            .show()
-    }
-
-    /** 機能バーまたは候補バーの段数を1〜3段から選ぶ。 */
-    private fun rowCountControl(titleId: Int, selectedRows: Int, save: (Context, Int) -> Unit): View {
-        val title = TextView(this).apply {
-            text = getString(titleId)
-            textSize = 14f
-            setPadding(0, px(8), 0, px(2))
-        }
-        val choices = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            (ToolbarPreferences.MIN_ROWS..ToolbarPreferences.MAX_ROWS).forEach { count ->
-                addView(RadioButton(this@SettingsActivity).apply {
-                    id = View.generateViewId()
-                    text = getString(R.string.settings_rows_value, count)
-                    minimumHeight = px(48)
-                    isChecked = count == selectedRows
-                    setOnCheckedChangeListener { _, checked -> if (checked) save(this@SettingsActivity, count) }
-                })
-            }
-        }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, px(4), 0, px(4))
-            addView(title)
-            addView(choices)
-        }
-    }
-
-    /** 選択中の機能名を設定画面へ表示する共通文言に変換する。 */
-    private fun toolbarActionLabel(action: ToolbarAction): String = when (action) {
-        ToolbarAction.PASTE -> getString(R.string.toolbar_paste)
-        ToolbarAction.CLIPBOARD_HISTORY -> getString(R.string.toolbar_clipboard_history)
-        ToolbarAction.EDIT -> getString(R.string.toolbar_edit)
-        ToolbarAction.MICROPHONE -> getString(R.string.toolbar_microphone)
-        ToolbarAction.UNDO -> getString(R.string.toolbar_undo)
-        ToolbarAction.USER_DICTIONARY -> getString(R.string.open_user_dictionary)
-        ToolbarAction.TEMPLATES -> getString(R.string.toolbar_templates)
-        ToolbarAction.SETTINGS -> getString(R.string.open_settings)
-        ToolbarAction.CLOSE_KEYBOARD -> getString(R.string.close_keyboard)
-        ToolbarAction.EMOJI -> getString(R.string.toolbar_emoji)
-        ToolbarAction.KISEKAE -> getString(R.string.toolbar_kisekae)
-        ToolbarAction.HEIGHT -> getString(R.string.toolbar_height)
-    }
-
-    private fun toolbarActionSummary(actions: List<ToolbarAction>): String =
-        actions.joinToString("・") { toolbarActionLabel(it) }
-            .ifEmpty { getString(R.string.settings_toolbar_tiles_none) }
-
     /**
      * 変換エンジン（開発用）の「Mozc／ZS／ZX／JS／JX」。ユーザーが実機でモデルを試すための項目で、選ぶとadbの
      * `NEURAL_SELECT`と同じ[NeuralSelection.select]で保存する。モデルのファイルが端末に無い項目は選べなくする。
+     * 行のどこを押しても選べるよう、丸いボタンは行の左に置いて行ごと押させる。
      */
-    private fun engineChoices(): RadioGroup {
+    private fun engineChoices(): View {
         val current = NeuralSelection.current(this)
         val modelDirectory = NeuralRuntimeConnection.modelDirectory(this)
-        return RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            (listOf<NeuralModelSpec?>(null) + NeuralModelSpec.entries).forEach { spec ->
-                // モデルを置いたか。ファイルの中身（SHA-256）は読み込み時に`:neural`が確かめるため、ここでは有無だけを見る。
-                val available = spec == null || modelDirectory.resolve(spec.fileName).isFile
-                val name = spec?.let { "${it.key}（${it.fileName.removeSuffix(".gguf")}）" }
-                    ?: getString(R.string.settings_neural_engine_mozc)
-                addView(RadioButton(this@SettingsActivity).apply {
-                    id = View.generateViewId()
-                    text = if (available) name else getString(R.string.settings_neural_engine_missing, name)
-                    minimumHeight = px(48)
-                    isEnabled = available
-                    isChecked = spec == current
-                    setOnCheckedChangeListener { _, checked -> if (checked) NeuralSelection.select(this@SettingsActivity, spec) }
-                })
+        val radios = mutableListOf<RadioButton>()
+        val rows = (listOf<NeuralModelSpec?>(null) + NeuralModelSpec.entries).map { spec ->
+            // モデルを置いたか。ファイルの中身（SHA-256）は読み込み時に`:neural`が確かめるため、ここでは有無だけを見る。
+            val available = spec == null || modelDirectory.resolve(spec.fileName).isFile
+            val name = spec?.let { "${it.key}（${it.fileName.removeSuffix(".gguf")}）" }
+                ?: getString(R.string.settings_neural_engine_mozc)
+            val radio = RadioButton(this).apply {
+                id = View.generateViewId()
+                isChecked = spec == current
+                isEnabled = available
+                isClickable = false
+                isFocusable = false
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                buttonTintList = ColorStateList.valueOf(ui.accent)
+                setOnCheckedChangeListener { _, checked -> if (checked) NeuralSelection.select(this@SettingsActivity, spec) }
+            }
+            radios += radio
+            val label = if (available) name else getString(R.string.settings_neural_engine_missing, name)
+            ui.row(label, leading = radio, onClick = if (available) {
+                { radios.forEach { it.isChecked = it === radio } }
+            } else {
+                null
+            }).view.apply {
+                if (!available) alpha = SettingsUi.DISABLED_ALPHA
+                accessibilityDelegate = ui.checkedRole(RadioButton::class.java.name) { radio.isChecked }
             }
         }
-    }
-
-    /** 別の画面を開く項目。 */
-    private fun linkRow(titleId: Int, onClick: () -> Unit): TextView = TextView(this).apply {
-        text = getString(titleId)
-        textSize = 16f
-        minimumHeight = px(56)
-        gravity = android.view.Gravity.CENTER_VERTICAL
-        isClickable = true
-        isFocusable = true
-        setOnClickListener { onClick() }
+        return ui.group(rows)
     }
 
     private fun px(dp: Int): Int = (dp * density).toInt()
@@ -761,26 +569,37 @@ class SettingsActivity : Activity() {
     /** 読み込み処理の完了と、辞書の上限により一部追加できなかった状態を返す。 */
     private data class ImportApplicationResult(val dictionaryWasLimited: Boolean)
 
-    private companion object {
-        /** 補足の説明を項目名より控えめに見せる不透明度。 */
-        const val DESCRIPTION_ALPHA = 0.7f
+    companion object {
+        /** 開く画面の種類（[SettingsPage]の名前）を渡すIntentのextra。 */
+        private const val EXTRA_PAGE = "dev.uzumi.ime.settings_page"
 
         /** バックアップ用のStorage Access Framework request code。 */
-        const val REQUEST_BACKUP_IMPORT = 34
+        private const val REQUEST_BACKUP_IMPORT = 34
 
         /** バックアップ用のStorage Access Framework request code。 */
-        const val REQUEST_BACKUP_EXPORT = 35
+        private const val REQUEST_BACKUP_EXPORT = 35
 
         /** バックアップJSONのMIME type。 */
-        const val BACKUP_MIME_TYPE = "application/json"
+        private const val BACKUP_MIME_TYPE = "application/json"
 
         /** 初期ファイル名。 */
-        const val BACKUP_FILE_NAME = "uzumi-settings.json"
+        private const val BACKUP_FILE_NAME = "uzumi-settings.json"
 
         /** 1ファイルの読み込み上限。辞書を含む設定バックアップを扱い、異常に大きな入力を避ける。 */
-        const val MAX_BACKUP_BYTES = 16 * 1024 * 1024
+        private const val MAX_BACKUP_BYTES = 16 * 1024 * 1024
 
         /** SAF選択中の画面再生成で辞書を含める選択を引き継ぐstate key。 */
-        const val STATE_BACKUP_INCLUDE_DICTIONARY = "backup_include_dictionary"
+        private const val STATE_BACKUP_INCLUDE_DICTIONARY = "backup_include_dictionary"
     }
+}
+
+/** 設定の画面の種類と、見出しの帯に出す題名。「キーボード」は[KeyboardSettingsActivity]で見せるため含めない。 */
+enum class SettingsPage(val titleId: Int) {
+    TOP(R.string.settings_title),
+    INPUT(R.string.settings_input),
+    KEYS(R.string.settings_keys),
+    LEARNING(R.string.settings_learning),
+    CLIPBOARD(R.string.settings_clipboard),
+    BACKUP(R.string.settings_backup),
+    DEVELOPER(R.string.settings_section_developer),
 }

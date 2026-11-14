@@ -12,6 +12,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:theme="@style/Theme.Uzumi.SettingsPage"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -28,7 +29,11 @@
         <activity
             android:name=".SettingsActivity"
             android:exported="false"
-            android:theme="@style/Theme.Uzumi.Settings" />
+            android:theme="@style/Theme.Uzumi.SettingsPage" />
+        <activity
+            android:name=".KeyboardSettingsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Uzumi.SettingsPage" />
         <activity
             android:name=".KisekaeActivity"
             android:exported="false"

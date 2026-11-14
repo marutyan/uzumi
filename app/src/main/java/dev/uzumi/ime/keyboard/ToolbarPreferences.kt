@@ -235,12 +235,34 @@ data class ToolbarLayout(
 
     /**
      * バーの帯の上へ指があるときの移し先を決める。バーの幅を「置いた後の個数」で等分し、指のある帯の番号を入る位置にする。
+     * バーを[rows]段に分けて描くときは、置いた後の並びを同じ規則で段に分け、指のある段（[rowIndex]）の中で帯を数える。
      * 動かした機能が他の場所から来て、バーがすでに[ToolbarPreferences.BAR_MAX]個なら満杯とする。
      */
-    fun barTarget(action: ToolbarAction, touchX: Float, barLeft: Float, barWidth: Float): DropTarget {
+    fun barTarget(
+        action: ToolbarAction,
+        touchX: Float,
+        barLeft: Float,
+        barWidth: Float,
+        rowIndex: Int = 0,
+        rows: Int = 1,
+    ): DropTarget {
         val others = bar.count { it != action }
         if (action !in bar && others >= ToolbarPreferences.BAR_MAX) return DropTarget.BarFull
-        return DropTarget.Bar(barDropIndex(touchX, barLeft, barWidth, others))
+        val rowSizes = ToolbarPreferences.splitAcrossRows(List(others + 1) { it }, rows).map { it.size }
+        val row = rowIndex.coerceIn(0, rowSizes.lastIndex)
+        val rowStart = rowSizes.take(row).sum()
+        val inRow = barDropIndex(touchX, barLeft, barWidth, rowSizes[row] - 1)
+        return DropTarget.Bar((rowStart + inRow).coerceIn(0, others))
+    }
+
+    /**
+     * 押しただけで動かさなかったときの移し先。置き場の機能はバーの末尾へ（満杯なら入れない）、
+     * バーと右端の機能は置き場の先頭へ移す。
+     */
+    fun tapTarget(action: ToolbarAction): DropTarget = when {
+        action !in tray -> DropTarget.Tray(0)
+        bar.size >= ToolbarPreferences.BAR_MAX -> DropTarget.BarFull
+        else -> DropTarget.Bar(bar.size)
     }
 
     /** 置き場の面の上へ指があるときの移し先を決める。[contentX]と[contentY]は置き場の内容の左上を原点にしたdp。 */

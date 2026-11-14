@@ -57,7 +57,7 @@ import kotlin.math.roundToInt
 /**
  * きせかえの設定画面。上に実際のキーボードの部品（候補バーと12キー）でプレビューを置き、下に背景画像、テーマと色、キー、
  * フリックの表示、入力の操作の項目を並べる。値は変えるとすぐUzumiSettingsへ保存し、プレビューを作り直す。
- * 設定画面の「きせかえ」から開く。キーボードには次に表示したときから反映される。
+ * 設定の「キーボード」の画面の「細かい調整」と、機能タイルの「きせかえ」から開く。キーボードには次に表示したときから反映される。
  */
 class KisekaeActivity : Activity() {
     private val density: Float
@@ -128,25 +128,7 @@ class KisekaeActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQUEST_BACKGROUND_IMAGE || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
-        val width = resources.displayMetrics.widthPixels
-        val height = (estimatedKeyboardHeightDp() * density).roundToInt()
-        Thread({
-            val saved = KeyboardBackgroundImage.save(applicationContext, uri, width, height)
-            if (saved) UzumiSettings.setBackgroundStamp(applicationContext, System.currentTimeMillis())
-            runOnUiThread {
-                if (isDestroyed) return@runOnUiThread
-                if (!saved) Toast.makeText(this, R.string.kisekae_background_failed, Toast.LENGTH_LONG).show()
-                reload()
-            }
-        }, "uzumi-kisekae-image").start()
-    }
-
-    /** 背景画像を切り抜く大きさの目安。候補バー・機能バーの段数とキーの高さの設定から、キーボード全体の高さを見積もる。 */
-    private fun estimatedKeyboardHeightDp(): Float {
-        val toolbar = UzumiSettings.toolbarPreferences(this)
-        // 機能バーと候補バーは同じ領域に出るため、段数の大きい方が高さになる。
-        val bars = maxOf(toolbar.toolbarRows, toolbar.candidateRows) * CandidateBarViews.BAR_HEIGHT_DP
-        return bars + KANA_ROWS * UzumiSettings.keyboardHeightDp(this) + PANEL_PADDING_DP
+        KeyboardBackgroundPicker.save(this, uri, ::reload)
     }
 
     /** 保存し直した設定を読み直し、プレビューと設定項目を作り直す。スクロール位置は保つ。 */
@@ -258,12 +240,7 @@ class KisekaeActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(button(R.string.kisekae_background_pick) {
-                // 写真の読み取り権限を増やさず、利用者が選んだ1枚だけを受け取る
-                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "image/*"
-                }
-                startActivityForResult(intent, REQUEST_BACKGROUND_IMAGE)
+                KeyboardBackgroundPicker.open(this@KisekaeActivity, REQUEST_BACKGROUND_IMAGE)
             })
             addView(button(R.string.kisekae_background_remove) {
                 KeyboardBackgroundImage.remove(this@KisekaeActivity)
@@ -517,7 +494,7 @@ class KisekaeActivity : Activity() {
     /** プリセットのテーマを選ぶ札。ライトの地色・キー・機能キーと、ダークのキー、強調色の見本を並べる。 */
     private fun themeTile(preset: ThemePreset): View {
         val selected = appearance.preset == preset
-        val name = getString(themeName(preset))
+        val name = getString(keyboardThemeName(preset))
         val light = preset.light
         val dark = preset.dark
         val custom = appearance.customLight
@@ -570,17 +547,6 @@ class KisekaeActivity : Activity() {
                 bottomMargin = px(4)
             }
         }
-    }
-
-    /** テーマの表示名。 */
-    private fun themeName(preset: ThemePreset): Int = when (preset) {
-        ThemePreset.STANDARD -> R.string.kisekae_theme_standard
-        ThemePreset.WASHI -> R.string.kisekae_theme_washi
-        ThemePreset.AI -> R.string.kisekae_theme_ai
-        ThemePreset.WAKATAKE -> R.string.kisekae_theme_wakatake
-        ThemePreset.SAKURA -> R.string.kisekae_theme_sakura
-        ThemePreset.SUMI -> R.string.kisekae_theme_sumi
-        ThemePreset.CUSTOM -> R.string.kisekae_theme_custom
     }
 
     /** 「テーマの色」と15色のパレットから色を選ぶ丸い札の列。[selected]がnullならテーマの色を選択中として示す。 */
@@ -760,10 +726,6 @@ class KisekaeActivity : Activity() {
 
         /** 色の面の高さ（dp）。 */
         const val COLOR_MAP_HEIGHT_DP = 140
-
-        /** 背景画像の切り抜きの見積もりに使う、12キーの行数とキーボードの外周の余白（dp）。 */
-        const val KANA_ROWS = 4
-        const val PANEL_PADDING_DP = 4f
 
         /** 背景画像があるとき、候補バーの地に残す最小の不透明度（キーボードと同じ55%）。 */
         const val MIN_BAR_ALPHA_WITH_IMAGE = 0.55f

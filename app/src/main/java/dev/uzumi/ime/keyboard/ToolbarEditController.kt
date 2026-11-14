@@ -42,23 +42,45 @@ class KeyboardRootLayout(context: Context) : FrameLayout(context) {
 }
 
 /**
+ * 並べ替えでタイルを並べる置き場。キーボードの上に重ねる面（[ToolbarEditPanel]）と、設定画面のキーボードの画面が持つ。
+ * 描画だけを受け持ち、ドラッグの判定は[ToolbarEditController]が行う。
+ */
+interface ToolbarTrayArea {
+    /** タイルを並べた面。ドラッグ中の位置の判定に使う。内容の上の余白と行の間隔は[ToolbarLayout.trayDropIndex]に合わせる。 */
+    val area: View
+
+    /** 並べ替えを始めるときに置き場を見せる。 */
+    fun show()
+
+    /** 置き場のタイルを[entries]の順に2列で並べる。nullは見えない空きマス。 */
+    fun render(entries: List<ToolbarItem?>)
+
+    /** ドラッグ中に置き場の端へ近づいたとき、置き場を[deltaPx]だけ送る。 */
+    fun scrollAreaBy(deltaPx: Int)
+}
+
+/**
  * 機能タイルの並べ替え。バーの中央と右端の丸、置き場のタイルを、押して動かして並べ替える。
  * 押した機能を持ち上げ、バーの上では丸いアイコンに縮め、離したところへ入れる。結果は[onCommit]で保存し、
  * 入る位置の判定は[ToolbarLayout]の計算に任せる。
  *
  * @param itemFor 機能から表示の名前を作る
- * @param onDone 左端の✓を押したとき（タイル一覧へ戻る）
+ * @param onDone 左端の✓を押したとき（タイル一覧へ戻る）。nullなら左端は通常のボタンの見た目で置くだけにする（設定画面の見本）
  * @param onCommit 離して確定した並びを保存し、保存後の（整えた）並びを返す
+ * @param barRows バーの中央を何段に分けて描くか（機能バーの段数）
+ * @param movesOnTap 押しただけで動かさなかったときも[ToolbarLayout.tapTarget]の位置へ移すか（設定画面の見本）
  */
 class ToolbarEditController(
     private val context: Context,
     private val views: ToolbarBarViews,
     private val rootLayout: KeyboardRootLayout,
     private val barHost: ViewGroup,
-    private val panel: ToolbarEditPanel,
+    private val panel: ToolbarTrayArea,
     private val itemFor: (ToolbarAction) -> ToolbarItem,
-    private val onDone: () -> Unit,
+    private val onDone: (() -> Unit)?,
     private val onCommit: (ToolbarLayout) -> ToolbarLayout,
+    private val barRows: Int = 1,
+    private val movesOnTap: Boolean = false,
 ) : KeyboardRootLayout.EditTouchHandler {
     private val density = context.resources.displayMetrics.density
     private val handler = Handler(Looper.getMainLooper())
@@ -70,6 +92,16 @@ class ToolbarEditController(
     private var drag: Drag? = null
     private var ghost: View? = null
     private var ghostAsIcon = false
+
+    // 今のバーの中央に描いている段の数。指のある段を決めるために使う。
+    private var shownBarLines = 1
+
+    // 満杯のバーへ押して入れようとしたとき、枠を少しの間だけ赤くしている間か。
+    private var flashingFull = false
+    private val endFullFlash = Runnable {
+        flashingFull = false
+        render(animate = false)
+    }
 
     /** 押してから離すまでの一回のドラッグ。[active]は動かし始めて持ち上げた後か。 */
     private class Drag(
@@ -104,6 +136,7 @@ class ToolbarEditController(
     /** 並べ替えを終え、ドラッグ中の表示とタッチの受け取りをやめる。 */
     fun stop() {
         handler.removeCallbacksAndMessages(null)
+        flashingFull = false
         rootLayout.touchHandler = null
         drag = null
         removeGhost()
@@ -167,12 +200,30 @@ class ToolbarEditController(
     private fun finish(current: Drag, cancelled: Boolean) {
         drag = null
         handler.removeCallbacksAndMessages(null)
+        flashingFull = false
         removeGhost()
         if (!current.active) {
-            render(animate = false)
+            if (movesOnTap && !cancelled) tap(current.action) else render(animate = false)
             return
         }
         layout = onCommit(layout.drop(current.action, current.over.takeUnless { cancelled }))
+        render(animate = true)
+    }
+
+    /**
+     * 押しただけの機能を[ToolbarLayout.tapTarget]の位置へ移して保存する。満杯のバーへは入れず、枠を少しの間だけ赤くする。
+     * TalkBackでの選択（タイルのクリック）からも呼ぶ。
+     */
+    fun tap(action: ToolbarAction) {
+        val target = layout.tapTarget(action)
+        if (target == ToolbarLayout.DropTarget.BarFull) {
+            flashingFull = true
+            handler.removeCallbacks(endFullFlash)
+            handler.postDelayed(endFullFlash, FULL_FLASH_MILLIS)
+            render(animate = false)
+            return
+        }
+        layout = onCommit(layout.drop(action, target))
         render(animate = true)
     }
 
@@ -188,7 +239,11 @@ class ToolbarEditController(
         if (frame != null) {
             val inBand = x >= frame.left - BAR_LEFT_MARGIN_DP * density && x <= frame.right + BAR_RIGHT_MARGIN_DP * density &&
                 y >= frame.top - BAR_TOP_MARGIN_DP * density && y <= frame.bottom + BAR_BOTTOM_MARGIN_DP * density
-            if (inBand) return layout.barTarget(current.action, x, frame.left.toFloat(), frame.width().toFloat())
+            if (inBand) {
+                val lineHeight = frame.height().toFloat() / shownBarLines
+                val row = ((y - frame.top) / lineHeight).toInt().coerceIn(0, shownBarLines - 1)
+                return layout.barTarget(current.action, x, frame.left.toFloat(), frame.width().toFloat(), row, barRows)
+            }
         }
         val area = panel.area.screenRect()
         if (area.expandedBy(TRAY_MARGIN_DP).contains(x.toInt(), y.toInt())) {
@@ -248,7 +303,7 @@ class ToolbarEditController(
     /** ドラッグ中に離したときの並びを先に見せるための、見せる並びを計算する。 */
     private fun display(): Display {
         val current = drag?.takeIf { it.active }
-            ?: return Display(layout.bar, layout.tray, layout.right, rightHole = false, rightHighlighted = false, barFull = false)
+            ?: return Display(layout.bar, layout.tray, layout.right, rightHole = false, rightHighlighted = false, barFull = flashingFull)
         val action = current.action
         val over = current.over
         val fromBar = layout.bar.indexOf(action)
@@ -281,7 +336,8 @@ class ToolbarEditController(
         val before = if (animate) capturePositions() else emptyMap()
         val shown = display()
         val slots = shown.bar.map { views.editSlot(it, it?.let { action -> itemFor(action).label }.orEmpty()) }
-        val newCenter = views.editCenter(slots, shown.barFull)
+        shownBarLines = ToolbarPreferences.splitAcrossRows(slots, barRows).size.coerceAtLeast(1)
+        val newCenter = views.editCenter(slots, shown.barFull, barRows)
         val newRight = views.editRight(
             action = shown.right,
             label = shown.right?.let { itemFor(it).label }.orEmpty(),
@@ -290,9 +346,21 @@ class ToolbarEditController(
         )
         center = newCenter
         right = newRight
+        // 押しただけで移す見本では、TalkBackで選んだ（クリックした）ときも同じく移す。指の操作は根が先に受け取る。
+        if (movesOnTap) {
+            (collectTagged(newCenter.frame) + collectTagged(newRight.ring)).forEach { view ->
+                val action = view.tag as ToolbarAction
+                view.setOnClickListener { tap(action) }
+            }
+        }
+        val left = onDone?.let { views.leftButton(ToolbarMode.EDIT, it) }
+            ?: views.leftButton(ToolbarMode.NONE) {}.apply {
+                // 見本の左端は形を見せるだけで押しても何も起きないため、TalkBackには読ませない。
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            }
         barHost.removeAllViews()
         barHost.addView(
-            views.assemble(views.leftButton(ToolbarMode.EDIT, onDone), newCenter.host, newRight.host),
+            views.assemble(left, newCenter.host, newRight.host),
             ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
         )
         panel.render(shown.tray.map { it?.let(itemFor) })
@@ -312,8 +380,10 @@ class ToolbarEditController(
                 draggableViews().forEach { view ->
                     val old = before[view.tag as ToolbarAction] ?: return@forEach
                     val now = view.screenRect()
-                    val dx = (old.left - now.left).toFloat()
-                    val dy = (old.top - now.top).toFloat()
+                    // 画面上のずれを、縮小して描いている親の中のずれへ直す。
+                    val (scaleX, scaleY) = view.screenScale()
+                    val dx = (old.left - now.left) / scaleX
+                    val dy = (old.top - now.top) / scaleY
                     if (dx == 0f && dy == 0f) return@forEach
                     view.translationX = dx
                     view.translationY = dy
@@ -338,10 +408,24 @@ class ToolbarEditController(
         return (0 until group.childCount).flatMap { collectTagged(group.getChildAt(it)) }
     }
 
-    /** Viewの画面上の位置と大きさ。 */
+    /** Viewの画面上の位置と大きさ。設定画面の見本のように親ごと縮小して描いている場合は、縮小後の大きさにする。 */
     private fun View.screenRect(): Rect {
         val location = IntArray(2).also { getLocationOnScreen(it) }
-        return Rect(location[0], location[1], location[0] + width, location[1] + height)
+        val (scaleX, scaleY) = screenScale()
+        return Rect(location[0], location[1], location[0] + (width * scaleX).toInt(), location[1] + (height * scaleY).toInt())
+    }
+
+    /** 親をたどって掛け合わせた、画面上での縮小率（横、縦）。キーボードの上では常に1。 */
+    private fun View.screenScale(): Pair<Float, Float> {
+        var scaleX = 1f
+        var scaleY = 1f
+        var view: View? = this
+        while (view != null) {
+            scaleX *= view.scaleX
+            scaleY *= view.scaleY
+            view = view.parent as? View
+        }
+        return scaleX to scaleY
     }
 
     /** 矩形を上下左右へ[marginDp]だけ広げた矩形。 */
@@ -369,5 +453,8 @@ class ToolbarEditController(
 
         /** 位置の変化を見せる時間（ミリ秒）。 */
         const val MOVE_MILLIS = 180L
+
+        /** 満杯のバーへ押して入れようとしたとき、枠を赤くしておく時間（ミリ秒）。試作と同じ0.9秒。 */
+        const val FULL_FLASH_MILLIS = 900L
     }
 }

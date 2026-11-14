@@ -12,4 +12,17 @@
     <style name="Theme.Uzumi.Settings" parent="android:style/Theme.DeviceDefault.DayNight">
         <item name="android:colorAccent">@color/kb_accent</item>
     </style>
+    <!--
+      起動画面と設定画面。端末のライト／ダーク設定に従い、見出しの帯（戻るボタンと題名）は画面の中で描くため、Activityの帯は出さない。
+      ステータスバーとナビゲーションバーのアイコンの明暗は、地の色に合わせて values-night で切り替える。
+    -->
+    <style name="Theme.Uzumi.SettingsPage" parent="android:style/Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@color/settings_background</item>
+        <item name="android:colorBackground">@color/settings_background</item>
+        <item name="android:colorAccent">@color/settings_accent</item>
+        <item name="android:windowLightStatusBar">@bool/settings_light_system_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/settings_light_system_bars</item>
+    </style>
 </resources>
