@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- 端末内音声入力のためにマイク録音権限だけを求め、通信権限（INTERNET）は持たない。 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 音声翻訳のML Kitが足す通信の権限を外す。翻訳は端末内で行い、モデルの取得は端末のAICoreが行うため通信は要らない。 -->
+    <uses-permission
+        android:name="android.permission.INTERNET"
+        tools:node="remove" />
     <!-- 端末内の既定音声認識サービス（Android System Intelligence等）を照会するために宣言する。 -->
     <queries>
         <intent>

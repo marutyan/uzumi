@@ -362,6 +362,10 @@ dependencies {
     implementation("com.google.protobuf:protobuf-javalite:$mozcProtobufVersion")
     // Inline Autofillの候補の見た目（style）をOSの描画側へ渡す形式を作る。
     implementation("androidx.autofill:autofill:1.3.0")
+    // 話した音声を端末内で翻訳する（日本語と英語の相互）。通信はせず、モデルの取得は端末のAICoreが行う。
+    implementation("com.google.mlkit:genai-speech-translation:1.0.0-alpha1")
+    // 翻訳モデルの状態（FeatureStatus）と取得の進み具合（DownloadStatus）の型を直接使うため、版を明示する。
+    implementation("com.google.mlkit:genai-common:1.0.0-beta5")
     protocExecutable("com.google.protobuf:protoc:$mozcProtobufVersion:${protocClassifier()}@exe")
     testImplementation("junit:junit:4.13.2")
 }
