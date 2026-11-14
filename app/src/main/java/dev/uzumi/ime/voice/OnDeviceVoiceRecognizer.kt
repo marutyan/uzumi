@@ -116,7 +116,6 @@ private class AndroidVoiceRecognizerBackend(
         val created = runCatching { SpeechRecognizer.createOnDeviceSpeechRecognizer(context) }.getOrNull()
             ?: return false
         recognizer = created
-        created.setRecognitionListener(createRecognitionListener(callbacks))
         val pipeCapture = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             runCatching { PcmPipeCapture.open() }.getOrNull() ?: run {
                 destroy()
@@ -125,6 +124,7 @@ private class AndroidVoiceRecognizerBackend(
         } else {
             null
         }
+        created.setRecognitionListener(createRecognitionListener(callbacks, pipeCapture))
         capture = pipeCapture
         val started = runCatching { created.startListening(createRecognitionIntent(pipeCapture)) }.isSuccess
         if (!started) {
@@ -209,12 +209,19 @@ private class AndroidVoiceRecognizerBackend(
             }
         }
 
-    private fun createRecognitionListener(callbacks: VoiceRecognizerCallbacks): RecognitionListener =
+    /**
+     * 認識器の通知を受ける。[pipeCapture]はこのセッションのpipeで、取り消し直後に次のセッションが始まっても、
+     * 遅れて届いた古い通知が新しいpipeを閉じないよう、現在のpipeではなくこの値を使う。
+     */
+    private fun createRecognitionListener(
+        callbacks: VoiceRecognizerCallbacks,
+        pipeCapture: PcmPipeCapture?,
+    ): RecognitionListener =
         object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
                 // 認識器が読み口を受け取った後なので、こちらの複製を閉じる。持ち続けると、認識器が読み口を閉じても
                 // 書き込み側がエラーにならず、pipeの詰まりに気づけない。
-                capture?.releaseReadSide()
+                pipeCapture?.releaseReadSide()
             }
             override fun onBeginningOfSpeech() = Unit
             override fun onRmsChanged(rmsdB: Float) = Unit
