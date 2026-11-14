@@ -90,7 +90,19 @@ object VoiceFillerRemover {
     }
 
     /**
+     * フィラーの直前に来てもよいひらがな。認識結果で「え」の前に現れる助詞と語尾に限る。
+     * これ以外のひらがなの後ろの「え」は、「いえ」「まえ」「さえ」「ねえ」「へえ」のように語の一部とみなして残す。
+     */
+    private val HIRAGANA_BEFORE_FILLER = setOf(
+        'と', 'は', 'が', 'を', 'に', 'で', 'も', 'の', 'ん', 'す', 'て', 'た', 'よ', 'ど', 'ば',
+    )
+
+    /** ひらがなで終わり、後ろのひらがなと続けて一語になりうるフィラー（「まえに」「えとく」「あのうどん」）。 */
+    private val OPEN_ENDED_FILLERS = setOf("え", "えと", "あのう")
+
+    /**
      * [start]から始まる[filler]が、語の一部や相づちではなくフィラーの境界にあるかを判定する。
+     * 判別できない並びは残す（誤って消すと、利用者が気づかないまま文が壊れて入力されるため）。
      */
     private fun isValidFillerBoundary(text: String, start: Int, filler: String): Boolean {
         val end = start + filler.length
@@ -98,31 +110,15 @@ object VoiceFillerRemover {
         val next = if (end < text.length) text[end] else null
         // 長音や促音が続く場合は語の一部とみなし切り取らない。
         if (next == 'ー' || next == 'っ') return false
-
-        return when (filler) {
-            "え" -> {
-                // 後ろがひらがななら「まえに」「かえる」「ええ」など語の一部または相づちとして残す。
-                if (next != null && isHiragana(next)) return false
-                // 直前が漢字なら「考え」「見えた」「変えた」などの送り仮名として残す。
-                if (prev != null && isKanji(prev)) return false
-                // 「ええ」の2文字目、呼びかけの「ねえ」、感心の「へえ」の「え」を消さない。
-                if (prev == 'え' || prev == 'ね' || prev == 'へ') return false
-                // 文頭や句読点直後の「いいえ」の末尾「え」を残す（「新しいえ、」は語境界でないため消す）。
-                if (start >= 2 && text[start - 2] == 'い' && text[start - 1] == 'い') {
-                    val beforeIie = if (start > 2) text[start - 3] else null
-                    if (beforeIie == null || (!isHiragana(beforeIie) && !isKanji(beforeIie))) return false
-                }
-                true
-            }
-            "えと" -> {
-                // 「考えとく」「まえとあと」のように前後が語とつながる場合は残す。
-                if (next != null && isHiragana(next) && prev != null && (isKanji(prev) || isHiragana(prev))) {
-                    return false
-                }
-                true
-            }
-            else -> true
+        // 「「えっと」を消す」のように括弧で囲まれた語は、言葉そのものを書いている。
+        if (next == '」' || next == '』') return false
+        if (filler in OPEN_ENDED_FILLERS && next != null && isHiragana(next)) return false
+        if (filler.startsWith('え') && prev != null) {
+            // 直前が漢字なら「考え」「答えと」などの送り仮名として残す。
+            if (isKanji(prev)) return false
+            if (isHiragana(prev) && prev !in HIRAGANA_BEFORE_FILLER) return false
         }
+        return true
     }
 
     /**
