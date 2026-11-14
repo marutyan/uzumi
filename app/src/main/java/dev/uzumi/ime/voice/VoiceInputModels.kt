@@ -116,6 +116,13 @@ interface VoiceInputListener {
     /** 取り消しで終了したときに呼ばれる。 */
     fun onCancelled() {}
 
-    /** 音声翻訳のモデルの取得状態が変わったときに呼ばれる。 */
-    fun onModelDownloadStateChanged(direction: VoiceTranslationDirection, state: VoiceModelDownloadState) {}
+    /**
+     * 音声翻訳のモデルの取得状態が変わったとき、または取得が進んだときに呼ばれる。
+     * [progress]は取得済みの割合（0〜1）で、全体の大きさが分からない間と失敗したときはnull。取得中は1%進むごとに呼ばれる。
+     */
+    fun onModelDownloadStateChanged(
+        direction: VoiceTranslationDirection,
+        state: VoiceModelDownloadState,
+        progress: Float?,
+    ) {}
 }

@@ -1,12 +1,8 @@
 package dev.uzumi.ime.voice
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -181,11 +177,13 @@ class OnDeviceVoiceTranslator(
             val raw = joinSegments(segments, direction)
             // 英語のフィラーは訳先が英語のときだけ消す。日本語の訳文には英語のフィラーの規則を当てない。
             val text = if (direction.targetTag.startsWith("en")) EnglishFillerRemover.removeFillers(raw) else raw
+            // 聞き取れなかった（またはフィラーだけだった）ときは、空の確定ではなくNO_MATCHとして知らせ、UIが出し分けられるようにする。
+            // 翻訳器が誤りを返していた場合は、聞き取れなかったのではなく処理の失敗として知らせる。
             postToMain {
-                if (text.isEmpty() && errorResponses > 0) {
-                    fail(generation, VoiceInputError.RECOGNIZER_ERROR)
-                } else {
-                    complete(generation, text)
+                when {
+                    text.isNotBlank() -> complete(generation, text)
+                    errorResponses > 0 -> fail(generation, VoiceInputError.RECOGNIZER_ERROR)
+                    else -> fail(generation, VoiceInputError.NO_MATCH)
                 }
             }
         } catch (error: CancellationException) {
@@ -212,7 +210,7 @@ class OnDeviceVoiceTranslator(
             startDownload(direction)
         } else if (direction !in downloadingDirections) {
             // 端末側ですでに取得が進んでいる。取得中であることだけを知らせる。
-            listener.onModelDownloadStateChanged(direction, VoiceModelDownloadState.DOWNLOADING)
+            listener.onModelDownloadStateChanged(direction, VoiceModelDownloadState.DOWNLOADING, null)
         }
         fail(generation, VoiceInputError.MODEL_DOWNLOADING)
     }
@@ -220,16 +218,29 @@ class OnDeviceVoiceTranslator(
     /** [direction]のモデルの取得を始め、終わったら結果を知らせる。同じ向きの取得が進行中なら何もしない。 */
     private fun startDownload(direction: VoiceTranslationDirection) {
         if (state == VoiceInputState.DESTROYED || !downloadingDirections.add(direction)) return
-        listener.onModelDownloadStateChanged(direction, VoiceModelDownloadState.DOWNLOADING)
+        listener.onModelDownloadStateChanged(direction, VoiceModelDownloadState.DOWNLOADING, null)
         scope.launch {
             var completed = false
+            // 取得の開始で知らされる全体の大きさと、最後に知らせた百分率。進み具合の通知を1%刻みに抑えるために持つ。
+            var bytesToDownload = 0L
+            var lastPercent = -1
             val translator = createTranslator(direction)
             try {
                 translator.download().collect { status ->
                     when (status) {
+                        is DownloadStatus.DownloadStarted -> bytesToDownload = status.bytesToDownload
+                        is DownloadStatus.DownloadProgress -> {
+                            if (bytesToDownload <= 0) return@collect
+                            val fraction = (status.totalBytesDownloaded.toDouble() / bytesToDownload).coerceIn(0.0, 1.0)
+                            val percent = (fraction * 100).toInt()
+                            if (percent == lastPercent) return@collect
+                            lastPercent = percent
+                            postToMain {
+                                listener.onModelDownloadStateChanged(direction, VoiceModelDownloadState.DOWNLOADING, fraction.toFloat())
+                            }
+                        }
                         is DownloadStatus.DownloadCompleted -> completed = true
                         is DownloadStatus.DownloadFailed -> Log.w(TAG, "model download failed: direction=${direction.id}", status.e)
-                        else -> Unit
                     }
                 }
             } catch (error: CancellationException) {
@@ -239,11 +250,14 @@ class OnDeviceVoiceTranslator(
             } finally {
                 translator.close()
             }
-            Log.i(TAG, "model download finished: direction=${direction.id} completed=$completed")
+            Log.i(TAG, "model download finished: direction=${direction.id} completed=$completed bytes_to_download=$bytesToDownload")
             postToMain {
                 downloadingDirections.remove(direction)
-                val result = if (completed) VoiceModelDownloadState.COMPLETED else VoiceModelDownloadState.FAILED
-                listener.onModelDownloadStateChanged(direction, result)
+                if (completed) {
+                    listener.onModelDownloadStateChanged(direction, VoiceModelDownloadState.COMPLETED, 1f)
+                } else {
+                    listener.onModelDownloadStateChanged(direction, VoiceModelDownloadState.FAILED, null)
+                }
             }
         }
     }
@@ -306,48 +320,24 @@ class OnDeviceVoiceTranslator(
     /**
      * マイクの音声を100ミリ秒ずつ翻訳器へ渡す流れ。[stopSignal]が立ったらマイクを閉じ、
      * 最後の文を確定させるための無音を実時間の速さで流してから流れを閉じる。
-     * 録音権限は[start]で確かめた後にだけ呼ばれるため、権限の確認漏れの警告を抑える。
+     * 録音権限は[start]で確かめた後にだけ呼ばれる。
      */
-    @SuppressLint("MissingPermission")
     private fun microphoneAudio(
         source: Locale,
         stopSignal: AtomicBoolean,
         stats: MicrophoneStats,
     ): Flow<TranslationAudio> = flow {
-        val minBuffer = AudioRecord.getMinBufferSize(PCM_SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        // 端末内認識と同じく音声認識向けの経路で録り、通話向けの加工（エコー消去など）を避ける。
-        val audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
-            PCM_SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            maxOf(minBuffer, PCM_CHUNK_BYTES * 4),
-        )
-        try {
-            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) throw MicrophoneException("AudioRecord not initialized")
-            audioRecord.startRecording()
-            val chunk = ByteArray(PCM_CHUNK_BYTES)
-            while (!stopSignal.get()) {
-                val read = audioRecord.read(chunk, 0, chunk.size)
-                if (read < 0) throw MicrophoneException("AudioRecord.read returned $read")
-                if (read == 0) continue
-                stats.recordAudio(chunk, read)
-                emit(TranslationAudio(source, chunk.copyOf(read)))
-            }
-        } finally {
-            runCatching { audioRecord.stop() }
-            audioRecord.release()
+        MicrophonePcm.read(stopSignal) { chunk ->
+            stats.recordAudio(chunk)
+            emit(TranslationAudio(source, chunk))
         }
         stats.recordMicrophoneClosed()
-        val silence = ByteArray(PCM_CHUNK_BYTES)
+        val silence = ByteArray(MicrophonePcm.CHUNK_BYTES)
         repeat(TAIL_SILENCE_CHUNKS) {
             emit(TranslationAudio(source, silence))
-            delay(PCM_CHUNK_MS)
+            delay(MicrophonePcm.CHUNK_MS)
         }
     }.flowOn(Dispatchers.IO)
-
-    /** マイクを開けない、または読めないことを表す。[VoiceInputError.AUDIO]として知らせる。 */
-    private class MicrophoneException(message: String) : Exception(message)
 
     /**
      * 録った音の大きさ（最大値とRMS）と、マイクを閉じてから最後の訳文が届くまでの時間を数える。
@@ -361,11 +351,11 @@ class OnDeviceVoiceTranslator(
         private var microphoneClosedAt = -1L
         private var lastSegmentAt = -1L
 
-        /** PCM 16bit little endianの[length]バイト分を数える。 */
+        /** PCM 16bit little endianの[pcm]を数える。 */
         @Synchronized
-        fun recordAudio(pcm: ByteArray, length: Int) {
+        fun recordAudio(pcm: ByteArray) {
             var index = 0
-            while (index + 1 < length) {
+            while (index + 1 < pcm.size) {
                 val sample = (pcm[index].toInt() and 0xFF) or (pcm[index + 1].toInt() shl 8)
                 val magnitude = kotlin.math.abs(sample)
                 if (magnitude > peak) peak = magnitude
@@ -391,7 +381,7 @@ class OnDeviceVoiceTranslator(
             val rms = if (samples == 0L) 0.0 else kotlin.math.sqrt(sumSquares / samples)
             val lastSegmentAfterCloseMs =
                 if (microphoneClosedAt < 0 || lastSegmentAt < 0) "none" else (lastSegmentAt - microphoneClosedAt).toString()
-            return "audio_ms=${samples * 1000 / PCM_SAMPLE_RATE} peak=$peak rms=${"%.1f".format(Locale.ROOT, rms)} " +
+            return "audio_ms=${samples * 1000 / MicrophonePcm.SAMPLE_RATE} peak=$peak rms=${"%.1f".format(Locale.ROOT, rms)} " +
                 "last_segment_after_mic_close_ms=$lastSegmentAfterCloseMs"
         }
     }
@@ -399,15 +389,11 @@ class OnDeviceVoiceTranslator(
     private companion object {
         const val TAG = "UzumiVoiceTranslate"
 
-        // 翻訳器へ渡す音声の形式（PCM 16bit・16kHz・mono）と、1回に渡す長さ（100ミリ秒分）。
-        const val PCM_SAMPLE_RATE = 16_000
-        const val PCM_CHUNK_MS = 100L
-        const val PCM_CHUNK_BYTES = (PCM_SAMPLE_RATE * 2 * PCM_CHUNK_MS / 1000).toInt()
-
         /**
-         * 停止後に流す無音の長さ（2.5秒）を100ミリ秒の個数で表したもの。
+         * 停止後に流す無音の長さ（2.5秒）を[MicrophonePcm.CHUNK_MS]（100ミリ秒）の個数で表したもの。
          * 試作の実機計測（Pixel 10 Pro、16件）で、最後の文は録音の末尾から0.6〜2.2秒後に確定し、
          * 末尾の無音が0秒では7件、1.5秒では10件、4秒では16件で最後の文まで出た。最大の2.2秒に余裕を足して2.5秒とする。
+         * 本体での実機確認（2026-11-14、V09）でも、最後の文はマイクを閉じてから0.5秒後に届き、この無音の間に確定した。
          */
         const val TAIL_SILENCE_CHUNKS = 25
     }

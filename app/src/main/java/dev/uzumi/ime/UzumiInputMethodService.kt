@@ -302,8 +302,9 @@ class UzumiInputMethodService : InputMethodService() {
             override fun onModelDownloadStateChanged(
                 direction: VoiceTranslationDirection,
                 state: VoiceModelDownloadState,
+                progress: Float?,
             ) {
-                voiceInputObserver?.onModelDownloadStateChanged(direction, state)
+                voiceInputObserver?.onModelDownloadStateChanged(direction, state, progress)
             }
         }
         voiceRecognizer = OnDeviceVoiceRecognizer(context = this, listener = voiceListener)
