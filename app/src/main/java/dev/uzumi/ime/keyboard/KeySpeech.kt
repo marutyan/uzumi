@@ -27,6 +27,7 @@ object KeySpeech {
         "\\" to "バックスラッシュ", "|" to "縦線", "~" to "チルダ", "'" to "アポストロフィ", "\"" to "二重引用符",
         ":" to "コロン", ";" to "セミコロン", "<" to "小なり", ">" to "大なり", "[" to "角かっこ開き",
         "]" to "角かっこ閉じ", "{" to "波かっこ開き", "}" to "波かっこ閉じ", "," to "カンマ", "." to "ピリオド",
+        "^" to "キャレット",
     )
 
     /**
@@ -66,8 +67,12 @@ object KeySpeech {
     /**
      * かなキーの補足説明を返す。フリック先の文字を方向とともに並べ、操作メニューでも選べることを伝える。
      */
-    fun kanaHint(type: KanaKeyType): String {
-        val map = KeyboardLayoutData.getKanaDirections(type)
+    fun kanaHint(type: KanaKeyType): String = flickHint(KeyboardLayoutData.getKanaDirections(type))
+
+    /**
+     * フリックキーの補足説明を返す。方向ごとの文字[map]を方向とともに並べ、操作メニューでも選べることを伝える。
+     */
+    fun flickHint(map: Map<FlickDirection, String>): String {
         val parts = listOf(
             FlickDirection.LEFT to "左",
             FlickDirection.UP to "上",
@@ -111,6 +116,9 @@ object KeySpeech {
     fun actionDescription(action: KeyboardAction): String = when (action) {
         is KeyboardAction.Text -> spokenText(action.value)
         is KeyboardAction.KanaTap -> spokenText(KeyboardLayoutData.getKanaChar(action.type, FlickDirection.CENTER))
+        is KeyboardAction.ToggleTap -> spokenText(action.values.firstOrNull().orEmpty())
+        KeyboardAction.ToggleCase -> "大文字と小文字を切り替え"
+        KeyboardAction.Undo -> "元に戻す"
         is KeyboardAction.Delete -> "削除"
         is KeyboardAction.Enter -> "確定"
         is KeyboardAction.Space -> "空白"

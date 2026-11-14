@@ -158,10 +158,39 @@ class UserDictionaryTsvTest {
         val decoded = SettingsBackupCodec.decode(SettingsBackupCodec.encode(document))
 
         assertEquals(document, decoded)
-        assertEquals(document.values, UzumiSettings.normalizeBackupSettings(decoded.values))
+        // キーマップの選択が無い古い形式なので、旧設定（ローマ字かな入力オン、英字を含めない）から選択を作る
+        val migratedKeymaps = "keymaps" to BackupJsonValue.StringValue("JA_TWELVE,JA_QWERTY,NUMBER_SIMEJI")
+        assertEquals(document.values + migratedKeymaps, UzumiSettings.normalizeBackupSettings(decoded.values))
         assertEquals(TsvParseResult(entries, emptyList()), UserDictionaryTsv.parse(decoded.userDictionaryTsv!!))
         val withoutDictionary = document.copy(userDictionaryTsv = null)
         assertEquals(withoutDictionary, SettingsBackupCodec.decode(SettingsBackupCodec.encode(withoutDictionary)))
+    }
+
+    /** キーマップの選択は正規化して読み、旧設定より優先する。旧設定の片方だけなら、もう片方は旧設定の既定値で移行する。 */
+    @Test
+    fun settingsBackupNormalizesKeymapsAndMigratesLegacyRomajiSettings() {
+        val keymaps = UzumiSettings.normalizeBackupSettings(
+            mapOf(
+                "romajiInput" to BackupJsonValue.BooleanValue(true),
+                "keymaps" to BackupJsonValue.StringValue("NUMBER_SIMEJI,UNKNOWN,EN_TWELVE,NUMBER_SIMEJI"),
+            ),
+        )["keymaps"]
+        assertEquals(BackupJsonValue.StringValue("NUMBER_SIMEJI,EN_TWELVE"), keymaps)
+        // 何も選ばれていない値は既定の選択にする（少なくとも1つ残す）
+        assertEquals(
+            BackupJsonValue.StringValue("JA_TWELVE,EN_QWERTY,NUMBER_SIMEJI"),
+            UzumiSettings.normalizeBackupSettings(mapOf("keymaps" to BackupJsonValue.StringValue("")))["keymaps"],
+        )
+        // 旧設定のローマ字かな入力だけがオンなら、英字を含める既定値（オン）で移行する
+        assertEquals(
+            BackupJsonValue.StringValue("JA_TWELVE,JA_QWERTY,EN_QWERTY,NUMBER_SIMEJI"),
+            UzumiSettings.normalizeBackupSettings(mapOf("romajiInput" to BackupJsonValue.BooleanValue(true)))["keymaps"],
+        )
+        // どちらも無ければキーマップの選択を足さない（今の設定を変えない）
+        assertNull(UzumiSettings.normalizeBackupSettings(mapOf("liveConversion" to BackupJsonValue.BooleanValue(true)))["keymaps"])
+        assertThrows(SettingsBackupException::class.java) {
+            UzumiSettings.normalizeBackupSettings(mapOf("keymaps" to BackupJsonValue.BooleanValue(true)))
+        }
     }
 
     /** 未知項目はネストした値ごと無視し、不正JSONや未対応versionは設定へ進む前に拒否する。 */

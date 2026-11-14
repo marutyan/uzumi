@@ -24,6 +24,17 @@ class KanaModifierTest {
         assertNull(KanaModifier.transform("A"))
     }
 
+    /** 英字12キーの「a/A」は英字一文字の大文字と小文字を入れ替え、英字以外と複数の文字は対象外にする。 */
+    @Test
+    fun toggleLetterCaseSwapsOnlySingleLatinLetters() {
+        assertEquals("A", KanaModifier.toggleLetterCase("a"))
+        assertEquals("z", KanaModifier.toggleLetterCase("Z"))
+        assertNull(KanaModifier.toggleLetterCase("あ"))
+        assertNull(KanaModifier.toggleLetterCase("1"))
+        assertNull(KanaModifier.toggleLetterCase("ab"))
+        assertNull(KanaModifier.toggleLetterCase("é"))
+    }
+
     /** 小書き・濁点・半濁点を清音の大きいかなへ揃え、対象外の文字はそのまま残す。 */
     @Test
     fun stripModifiersUnifiesKanaVariants() {

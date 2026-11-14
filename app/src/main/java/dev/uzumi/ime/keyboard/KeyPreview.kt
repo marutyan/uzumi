@@ -145,11 +145,18 @@ private val CROSS_DIRECTIONS = listOf(FlickDirection.UP, FlickDirection.RIGHT, F
  * 中央の拡大表示はキーの真上に出るため、上の吹き出しと重ならないよう、吹き出しの方式では中央にいる間だけ出し、
  * 四方向の吹き出しを常に出す十字のガイドでは出さない。
  */
-fun flickPreview(type: KanaKeyType, direction: FlickDirection, mode: FlickDisplayMode): FlickPreview {
-    val center = KeyboardLayoutData.getKanaChar(type, FlickDirection.CENTER)
-    val current = KeyboardLayoutData.getKanaChar(type, direction).ifEmpty { center }
+fun flickPreview(type: KanaKeyType, direction: FlickDirection, mode: FlickDisplayMode): FlickPreview =
+    flickPreview(KeyboardLayoutData.getKanaDirections(type), direction, mode)
+
+/**
+ * 方向ごとの文字[chars]を持つフリックキー（かなキーと英字12キーなど）を押して[direction]へ動かしている間の表示を決める。
+ * 決め方はかなキーの[flickPreview]と同じで、文字の無い方向には吹き出しを出さない。
+ */
+fun flickPreview(chars: Map<FlickDirection, String>, direction: FlickDirection, mode: FlickDisplayMode): FlickPreview {
+    val center = chars[FlickDirection.CENTER].orEmpty()
+    val current = chars[direction].orEmpty().ifEmpty { center }
     fun label(at: FlickDirection): FlickBubbleLabel? =
-        KeyboardLayoutData.getKanaChar(type, at).takeIf { it.isNotEmpty() }?.let { FlickBubbleLabel(at, it) }
+        chars[at]?.takeIf { it.isNotEmpty() }?.let { FlickBubbleLabel(at, it) }
     return when (mode) {
         FlickDisplayMode.IN_KEY -> FlickPreview(current, emptyList())
         FlickDisplayMode.BUBBLE -> if (direction == FlickDirection.CENTER) {

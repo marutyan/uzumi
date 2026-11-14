@@ -28,15 +28,20 @@ sealed interface KeySpec {
     /** 12キーかなフリックキー */
     data class Kana(val type: KanaKeyType) : KeySpec
 
+    /** かな以外のフリックキー（英字12キーと、数字Simeji型の下の段）。文字と動きは[FlickKey]が決める。 */
+    data class Flick(val key: FlickKey) : KeySpec
+
     /**
      * 単純な文字キー（QWERTYや数字、記号など）。
      *
      * @property longPressText 長押しで入力する文字。長押しを持たないキーではnull
+     * @property functionStyle 機能キーと同じ地と文字の色で描くか。数字Simeji型の左右の列の「:」「-」に使う
      */
     data class SimpleText(
         val text: String,
         val shiftText: String? = null,
         val longPressText: String? = null,
+        val functionStyle: Boolean = false,
     ) : KeySpec
 
     /**
@@ -57,12 +62,14 @@ sealed interface KeySpec {
      *
      * @property longPressTarget 長押しで切り替える先のモード。長押しを持たないキーではnull
      * @property longPressLabel 長押し先を示す小さな表示
+     * @property emphasized 表示を強調色で描くか。キーマップを選んだ順に切り替える左下のキーに使う
      */
     data class ModeSwitch(
         val label: String,
         val targetMode: KeyboardMode,
         val longPressTarget: KeyboardMode? = null,
         val longPressLabel: String? = null,
+        val emphasized: Boolean = false,
     ) : KeySpec
 
     /** 英語配列のShiftキー */
@@ -250,18 +257,6 @@ class KeyView(context: Context) : View(context) {
         invalidate()
     }
 
-    /**
-     * モード切替キーのラベルと遷移先モードを動的に更新する。
-     */
-    fun updateModeSwitch(label: String, targetMode: KeyboardMode) {
-        val currentSpec = spec
-        if (currentSpec is KeySpec.ModeSwitch) {
-            this.spec = currentSpec.copy(label = label, targetMode = targetMode)
-            updateContentDescription()
-            invalidate()
-        }
-    }
-
     /** キーボード全体で共有する押下順を設定する。設定しなければキーごとに離した順で確定する。 */
     fun setPressOrder(order: KeyPressOrder<KeyView>) {
         pressOrder = order
@@ -362,8 +357,8 @@ class KeyView(context: Context) : View(context) {
     private fun updatePreview() {
         if (!gesture.isPressed) return
         when (val currentSpec = spec) {
-            is KeySpec.Kana -> {
-                val preview = flickPreview(currentSpec.type, currentDirection, appearance.flickMode)
+            is KeySpec.Kana, is KeySpec.Flick -> {
+                val preview = flickPreview(flickChars(currentSpec).orEmpty(), currentDirection, appearance.flickMode)
                 onPreview?.invoke(this, preview.centerText)
                 onFlickBubbles?.invoke(this, preview.bubbles, currentDirection)
             }
@@ -378,7 +373,27 @@ class KeyView(context: Context) : View(context) {
     /** 拡大表示とフリックの吹き出しを消す。 */
     private fun hidePreviews() {
         onPreview?.invoke(this, null)
-        if (spec is KeySpec.Kana) onFlickBubbles?.invoke(this, emptyList(), FlickDirection.CENTER)
+        if (flickChars(spec) != null) onFlickBubbles?.invoke(this, emptyList(), FlickDirection.CENTER)
+    }
+
+    /** フリックで文字を選ぶキー（かなキーと[KeySpec.Flick]）の、方向ごとの文字。フリックしないキーではnull。 */
+    private fun flickChars(currentSpec: KeySpec?): Map<FlickDirection, String>? = when (currentSpec) {
+        is KeySpec.Kana -> KeyboardLayoutData.getKanaDirections(currentSpec.type)
+        is KeySpec.Flick -> currentSpec.key.chars
+        else -> null
+    }
+
+    /**
+     * フリックキーを中央で押して離したときの操作。かなキーと順に切り替わるキーは同じキーの連続タップを続きとして扱う操作、
+     * それ以外のキーは中央の文字の入力とする。中央に文字が無ければnull。
+     */
+    private fun flickCenterAction(currentSpec: KeySpec): KeyboardAction? = when (currentSpec) {
+        is KeySpec.Kana -> KeyboardAction.KanaTap(currentSpec.type)
+            .takeIf { KeyboardLayoutData.getKanaChar(currentSpec.type, FlickDirection.CENTER).isNotEmpty() }
+        is KeySpec.Flick -> currentSpec.key.chars[FlickDirection.CENTER]?.let { center ->
+            if (currentSpec.key.toggles) KeyboardAction.ToggleTap(currentSpec.key.toggleChars) else KeyboardAction.Text(center)
+        }
+        else -> null
     }
 
     /**
@@ -495,7 +510,7 @@ class KeyView(context: Context) : View(context) {
                     removeCallbacks(longPressRunnable)
                 }
 
-                if (spec is KeySpec.Kana) {
+                if (flickChars(spec) != null) {
                     val newDirection = determineFlickDirection(curX - gesture.startX, curY - gesture.startY, thresholdPx, flickJudge)
                     if (newDirection != currentDirection) {
                         currentDirection = newDirection
@@ -556,7 +571,7 @@ class KeyView(context: Context) : View(context) {
 
     /** 文字を入力するキー（文字・かな）が押下中かどうか。後から押したキーより先に確定する対象を選ぶ。 */
     private fun isTextKeyPressed(): Boolean =
-        gesture.isPressed && (spec is KeySpec.SimpleText || spec is KeySpec.Kana)
+        gesture.isPressed && (spec is KeySpec.SimpleText || spec is KeySpec.Kana || spec is KeySpec.Flick)
 
     /**
      * 後から別のキーが押されたため、指を離す前に最後の指の位置で文字を確定する。フリック中のかなキーは
@@ -616,13 +631,13 @@ class KeyView(context: Context) : View(context) {
         val isInside = upX in 0f..width.toFloat() && upY in 0f..height.toFloat()
 
         when (finalSpec) {
-            is KeySpec.Kana -> {
+            is KeySpec.Kana, is KeySpec.Flick -> {
                 // MOVEが届かない速いフリックでもUP座標から正確にフリック方向を再計算する
                 val finalDirection = determineFlickDirection(upX - startX, upY - startY, thresholdPx, flickJudge)
-                val char = KeyboardLayoutData.getKanaChar(finalSpec.type, finalDirection)
+                val char = flickChars(finalSpec)?.get(finalDirection).orEmpty()
                 if (char.isNotEmpty()) {
                     onAction?.invoke(if (finalDirection == FlickDirection.CENTER) {
-                        KeyboardAction.KanaTap(finalSpec.type)
+                        flickCenterAction(finalSpec) ?: KeyboardAction.Text(char)
                     } else {
                         KeyboardAction.Text(char)
                     })
@@ -707,10 +722,9 @@ class KeyView(context: Context) : View(context) {
     override fun performClick(): Boolean {
         super.performClick()
         when (val currentSpec = spec) {
-            is KeySpec.Kana -> {
-                val char = KeyboardLayoutData.getKanaChar(currentSpec.type, FlickDirection.CENTER)
-                if (char.isNotEmpty()) {
-                    onAction?.invoke(KeyboardAction.KanaTap(currentSpec.type))
+            is KeySpec.Kana, is KeySpec.Flick -> {
+                flickCenterAction(currentSpec)?.let { action ->
+                    onAction?.invoke(action)
                     haptic(HapticFeedbackConstants.KEYBOARD_TAP)
                 }
             }
@@ -752,9 +766,9 @@ class KeyView(context: Context) : View(context) {
         val currentSpec = spec ?: return
         info.hintText = accessibilityHint(currentSpec)
         when (currentSpec) {
-            is KeySpec.Kana -> {
+            is KeySpec.Kana, is KeySpec.Flick -> {
                 // TalkBackの操作メニューから全フリック文字にアクセス可能にする
-                val map = KeyboardLayoutData.getKanaDirections(currentSpec.type)
+                val map = flickChars(currentSpec).orEmpty()
                 FLICK_ACTION_IDS.forEach { (direction, actionId) ->
                     map[direction]?.takeIf { it.isNotEmpty() }?.let { char ->
                         info.addAction(
@@ -807,10 +821,10 @@ class KeyView(context: Context) : View(context) {
 
     override fun performAccessibilityAction(action: Int, arguments: Bundle?): Boolean {
         when (val currentSpec = spec) {
-            is KeySpec.Kana -> {
+            is KeySpec.Kana, is KeySpec.Flick -> {
                 val direction = FLICK_ACTION_IDS.firstOrNull { it.second == action }?.first
                 if (direction != null) {
-                    val char = KeyboardLayoutData.getKanaChar(currentSpec.type, direction)
+                    val char = flickChars(currentSpec)?.get(direction).orEmpty()
                     if (char.isNotEmpty()) {
                         onAction?.invoke(KeyboardAction.Text(char))
                         haptic(HapticFeedbackConstants.KEYBOARD_TAP)
@@ -890,6 +904,7 @@ class KeyView(context: Context) : View(context) {
         }
         val isFunctionKey = when (currentSpec) {
             is KeySpec.Action -> !currentSpec.isAccent
+            is KeySpec.SimpleText -> currentSpec.functionStyle
             is KeySpec.ModeSwitch, is KeySpec.Shift, is KeySpec.PageSwitch -> true
             else -> false
         }
@@ -935,7 +950,14 @@ class KeyView(context: Context) : View(context) {
 
         when (currentSpec) {
             is KeySpec.Kana -> {
-                drawKanaKey(canvas, currentSpec.type, centerX, centerY, rectF)
+                val map = KeyboardLayoutData.getKanaDirections(currentSpec.type)
+                drawFlickKey(canvas, map, map[FlickDirection.CENTER].orEmpty(), KANA_LABEL_DP, false, centerX, centerY, rectF)
+            }
+
+            is KeySpec.Flick -> {
+                val key = currentSpec.key
+                val sizeDp = if (key.label.length > 1) FLICK_LONG_LABEL_DP else FLICK_LABEL_DP
+                drawFlickKey(canvas, key.chars, key.label, sizeDp, key.showsGuide, centerX, centerY, rectF)
             }
 
             is KeySpec.SimpleText -> {
@@ -963,7 +985,8 @@ class KeyView(context: Context) : View(context) {
                 } else if (isLongPressed && longLabel != null) {
                     drawCenteredText(canvas, longLabel, centerX, centerY, colors.accent, 14f, boldTypeface)
                 } else {
-                    drawCenteredText(canvas, currentSpec.label, centerX, centerY, textColor, 14f, baseTypeface)
+                    val labelColor = if (currentSpec.emphasized) colors.accent else textColor
+                    drawCenteredText(canvas, currentSpec.label, centerX, centerY, labelColor, 14f, baseTypeface)
                     longLabel?.let { drawCornerHint(canvas, it, rectF) }
                 }
             }
@@ -989,6 +1012,7 @@ class KeyView(context: Context) : View(context) {
      */
     private fun actionIconRes(action: KeySpec.Action, label: String): Int? = when (val key = action.action) {
         KeyboardAction.Delete -> R.drawable.ic_backspace
+        KeyboardAction.Undo -> R.drawable.ic_undo
         is KeyboardAction.MoveCursor -> if (key.delta < 0) R.drawable.ic_arrow_left_filled else R.drawable.ic_arrow_right_filled
         KeyboardAction.Space -> R.drawable.ic_space_bar.takeIf { label == SPACE_LABEL }
         KeyboardAction.Enter -> R.drawable.ic_keyboard_return.takeIf { label in ENTER_ICON_LABELS }
@@ -1048,32 +1072,35 @@ class KeyView(context: Context) : View(context) {
     }
 
     /**
-     * 12キーかなキーのメイン文字およびフリックガイドを描画する。「キーの中の文字」の方式では押している方向の文字を
-     * キーの中に大きく出し、四方向の案内を押している間だけ出す（これまでの見た目）。ほかの方式ではキーの文字を変えない。
-     * 「方向の文字を常に表示」がONなら、押していない間も四方向の案内を小さく出す。
+     * フリックキー（かなキーと[KeySpec.Flick]）の表示[label]とフリックガイドを描画する。「キーの中の文字」の方式では
+     * 押している方向の文字をキーの中に大きく出し、四方向の案内を押している間だけ出す（これまでの見た目）。ほかの方式では
+     * キーの文字を変えない。「方向の文字を常に表示」がONか、キー自体が常に案内を出す[alwaysGuide]なら、押していない間も
+     * 四方向の案内を小さく出す。
      */
-    private fun drawKanaKey(
+    private fun drawFlickKey(
         canvas: Canvas,
-        type: KanaKeyType,
+        map: Map<FlickDirection, String>,
+        label: String,
+        labelSizeDp: Float,
+        alwaysGuide: Boolean,
         centerX: Float,
         centerY: Float,
         rect: RectF,
     ) {
-        val map = KeyboardLayoutData.getKanaDirections(type)
         val inKey = appearance.flickMode == FlickDisplayMode.IN_KEY
         val flickingInKey = inKey && currentDirection != FlickDirection.CENTER
-        val selectedChar = (if (inKey) map[currentDirection] else null) ?: map[FlickDirection.CENTER] ?: ""
+        val selectedChar = (if (flickingInKey) map[currentDirection] else null) ?: label
 
         // メイン文字の描画（キーの中の文字の方式でフリック中は選択中文字を表示）
         mainTextPaint.color = if (flickingInKey) colors.accent else colors.text
-        mainTextPaint.textSize = (if (flickingInKey) 26f else KANA_LABEL_DP) * textScale * density
+        mainTextPaint.textSize = (if (flickingInKey) 26f else labelSizeDp) * textScale * density
         mainTextPaint.typeface = if (flickingInKey) boldTypeface else baseTypeface
         val textY = centerY - (mainTextPaint.descent() + mainTextPaint.ascent()) / 2f
         canvas.drawText(selectedChar, centerX, textY, mainTextPaint)
 
         // 案内文字は、キーの中の方式で押している間か、常に表示する設定のときだけ出す（普段はSimejiと同じ見た目）
         val pressedInKey = inKey && gesture.isPressed
-        if (!pressedInKey && !appearance.flickGuide) return
+        if (!pressedInKey && !appearance.flickGuide && !alwaysGuide) return
         // 方向を強調するのはキーの中の方式で押している間だけ。ほかの方式では吹き出しが方向を示す。
         val highlighted = if (pressedInKey) currentDirection else null
         guideTextPaint.textSize = 11f * density
@@ -1113,6 +1140,7 @@ class KeyView(context: Context) : View(context) {
      */
     private fun accessibilityHint(currentSpec: KeySpec): String? = when (currentSpec) {
         is KeySpec.Kana -> KeySpeech.kanaHint(currentSpec.type)
+        is KeySpec.Flick -> KeySpeech.flickHint(currentSpec.key.chars)
         is KeySpec.SimpleText -> currentSpec.longPressText?.let(KeySpeech::longPressHint)
         is KeySpec.ModeSwitch -> currentSpec.longPressTarget?.let { "長押しで" + KeySpeech.modeSwitchDescription(it) }
         is KeySpec.Action -> when {
@@ -1132,6 +1160,8 @@ class KeyView(context: Context) : View(context) {
             is KeySpec.Kana -> {
                 KeySpeech.spokenText(KeyboardLayoutData.getKanaChar(currentSpec.type, FlickDirection.CENTER))
             }
+
+            is KeySpec.Flick -> KeySpeech.spokenText(currentSpec.key.chars[FlickDirection.CENTER].orEmpty())
 
             is KeySpec.SimpleText -> KeySpeech.spokenText(shiftedText(currentSpec))
 
@@ -1191,6 +1221,10 @@ class KeyView(context: Context) : View(context) {
 
         /** かなキーの文字の大きさ（dp）。Simejiの実測（約23〜24dp）に合わせる。 */
         private const val KANA_LABEL_DP = 23f
+
+        /** かな以外のフリックキーの文字の大きさ（dp）。1文字は文字キーと同じ20dp、「ABC」など複数の文字は5列の幅に収まる16dp。 */
+        private const val FLICK_LABEL_DP = 20f
+        private const val FLICK_LONG_LABEL_DP = 16f
 
         /** 連続実行中に、指がキーの外へこの距離（dp）以上出たら止める。これまでのフリック閾値と同じ20dp。 */
         private const val REPEAT_CANCEL_MARGIN_DP = 20f

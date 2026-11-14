@@ -19,6 +19,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import dev.uzumi.ime.R
 import dev.uzumi.ime.applySystemInsets
+import dev.uzumi.ime.keyboard.RecordingKeymapRules
 
 /**
  * 互換試験用に、inputTypeとeditor actionの異なるEditTextを一画面に並べる。debugビルドだけに入り、
@@ -153,6 +154,8 @@ class Phase2cTaskActivity : Activity() {
             id = R.id.phase2c_task_field
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
             imeOptions = EditorInfo.IME_ACTION_NONE
+            // 評価の課題欄の目印。IMEは記録していない準備中も、自動測定の道具が前提にする導入前の面の切り替えを使う
+            privateImeOptions = RecordingKeymapRules.EVALUATION_FIELD_OPTION
             minLines = 3
         }
         val reset = Button(this).apply {
