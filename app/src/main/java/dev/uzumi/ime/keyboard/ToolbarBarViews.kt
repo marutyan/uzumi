@@ -140,25 +140,35 @@ class ToolbarBarViews(private val context: Context) {
     /** 並べ替え中の右端。[host]が右端の枠の領域、[ring]が強調色の輪。 */
     class EditRight(val host: View, val ring: View)
 
-    /** 並べ替え中の中央の枠。強調色の2dpの線で囲み、満杯で入れられないときは赤くする。 */
-    fun editCenter(slots: List<View>, full: Boolean): EditCenter {
+    /**
+     * 並べ替え中の中央の枠。強調色の2dpの線で囲み、満杯で入れられないときは赤くする。
+     * [rows]が2以上なら、アイコンを機能バーと同じ規則で段に分け、段の数だけ枠を高くする（1段の高さ48dpから上下の空きを除く）。
+     */
+    fun editCenter(slots: List<View>, full: Boolean, rows: Int = 1): EditCenter {
+        val lines = ToolbarPreferences.splitAcrossRows(slots, rows).ifEmpty { listOf(emptyList()) }
         val frame = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply {
                 cornerRadius = px(EDIT_FRAME_HEIGHT_DP / 2f).toFloat()
                 setColor(Color.TRANSPARENT)
                 setStroke(px(OUTLINE_DP), if (full) palette.danger else palette.accent)
             }
-            // アイコンの周りの空きを均等にするため、両端と各アイコンの間に同じ重みの空きを置く。
-            slots.forEach { slot ->
-                addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
-                addView(slot)
+            lines.forEach { line ->
+                addView(LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    // アイコンの周りの空きを均等にするため、両端と各アイコンの間に同じ重みの空きを置く。
+                    line.forEach { slot ->
+                        addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+                        addView(slot)
+                    }
+                    addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
             }
-            addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
         }
+        val frameHeightDp = lines.size * CandidateBarViews.BAR_HEIGHT_DP - (CandidateBarViews.BAR_HEIGHT_DP - EDIT_FRAME_HEIGHT_DP)
         val host = FrameLayout(context).apply {
-            addView(frame, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, px(EDIT_FRAME_HEIGHT_DP), Gravity.CENTER_VERTICAL))
+            addView(frame, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, px(frameHeightDp), Gravity.CENTER_VERTICAL))
         }
         return EditCenter(host, frame)
     }
@@ -566,7 +576,7 @@ class ToolbarTilePanel(context: Context) : FrameLayout(context) {
  * 並べ替え中にキーボード面の位置へ出す面。案内文と、強調色の線で囲んだ縦スクロールの2列のタイル置き場を持つ。
  * 描画だけを受け持ち、ドラッグの判定は[ToolbarEditController]が行う。
  */
-class ToolbarEditPanel(context: Context) : FrameLayout(context) {
+class ToolbarEditPanel(context: Context) : FrameLayout(context), ToolbarTrayArea {
     private val views = ToolbarBarViews(context)
     private val density = context.resources.displayMetrics.density
     private val rows = LinearLayout(context).apply {
@@ -575,7 +585,7 @@ class ToolbarEditPanel(context: Context) : FrameLayout(context) {
     }
 
     /** タイル置き場のスクロール領域。ドラッグ中の位置の判定に使う。 */
-    val area = ScrollView(context).apply {
+    override val area = ScrollView(context).apply {
         isVerticalScrollBarEnabled = false
         background = GradientDrawable().apply {
             // 上の角だけ丸め、下は面の外へ出して線を見せない。
@@ -607,7 +617,7 @@ class ToolbarEditPanel(context: Context) : FrameLayout(context) {
     }
 
     /** 置き場のタイルを[entries]の順に2列で並べる。nullは見えない空きマス（持ち上げたタイルの元の位置など）。 */
-    fun render(entries: List<ToolbarItem?>) {
+    override fun render(entries: List<ToolbarItem?>) {
         rows.removeAllViews()
         entries.chunked(COLUMNS).forEachIndexed { rowIndex, row ->
             rows.addView(LinearLayout(context).apply {
@@ -627,7 +637,7 @@ class ToolbarEditPanel(context: Context) : FrameLayout(context) {
     }
 
     /** 面を開く。 */
-    fun show() {
+    override fun show() {
         visibility = View.VISIBLE
         area.scrollTo(0, 0)
     }
@@ -642,7 +652,7 @@ class ToolbarEditPanel(context: Context) : FrameLayout(context) {
         get() = visibility == View.VISIBLE
 
     /** ドラッグ中に面の端へ近づいたとき、置き場を[deltaPx]だけ送る。 */
-    fun scrollAreaBy(deltaPx: Int) {
+    override fun scrollAreaBy(deltaPx: Int) {
         area.scrollBy(0, deltaPx)
     }
 

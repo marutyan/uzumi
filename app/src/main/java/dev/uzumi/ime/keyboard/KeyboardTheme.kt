@@ -43,15 +43,18 @@ data class KeyboardColors(
             context: Context,
             appearance: KeyboardAppearance = UzumiSettings.keyboardAppearance(context),
         ): KeyboardColors {
-            val dark = when (appearance.mode) {
-                ThemeMode.SYSTEM -> isNightMode(context.resources.configuration)
-                ThemeMode.LIGHT -> false
-                ThemeMode.DARK -> true
-            }
+            val dark = isDark(context, appearance)
             val standard = resourceColors(context, dark)
             val palette = themePalette(appearance, dark)
             val base = palette?.let { deriveKeyboardColors(it, standard.danger, standard.onDanger) } ?: standard
             return base.withOverrides(appearance.textColor, appearance.flickColor)
+        }
+
+        /** きせかえの明るさの選び方（端末に合わせる／ライト／ダーク）と端末の設定から、ダークの配色で描くかを決める。 */
+        fun isDark(context: Context, appearance: KeyboardAppearance): Boolean = when (appearance.mode) {
+            ThemeMode.SYSTEM -> isNightMode(context.resources.configuration)
+            ThemeMode.LIGHT -> false
+            ThemeMode.DARK -> true
         }
 
         /** 構成がダークモードか。 */

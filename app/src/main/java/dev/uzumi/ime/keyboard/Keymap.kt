@@ -45,6 +45,19 @@ object KeymapRules {
         return normalize(stored.split(',').mapNotNull { name -> Keymap.entries.firstOrNull { it.name == name.trim() } })
     }
 
+    /**
+     * 設定画面のカードで[keymap]を押したときの選択。選んでいなければ順番の最後へ足し、選んでいれば外す。
+     * 少なくとも1つは残すため、最後の1つは外さずにそのまま返す。
+     */
+    fun toggled(order: List<Keymap>, keymap: Keymap): List<Keymap> {
+        val current = normalize(order)
+        return when {
+            keymap !in current -> current + keymap
+            current.size == 1 -> current
+            else -> current - keymap
+        }
+    }
+
     /** 重複を除き、空なら既定の選択にする。少なくとも1つの配列を必ず残すための正規化。 */
     fun normalize(order: List<Keymap>): List<Keymap> = order.distinct().ifEmpty { DEFAULT_ORDER }
 

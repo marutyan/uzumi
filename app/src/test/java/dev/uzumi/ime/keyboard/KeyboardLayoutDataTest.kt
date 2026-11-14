@@ -409,6 +409,15 @@ class KeyboardLayoutDataTest {
         assertEquals(listOf(Keymap.JA_TWELVE, Keymap.EN_QWERTY, Keymap.NUMBER_SIMEJI), KeymapRules.DEFAULT_ORDER)
     }
 
+    /** 設定画面のカードを押したとき、選んでいない配列は最後へ足し、選んでいる配列は外す。最後の1つは外さない。 */
+    @Test
+    fun keymapToggleAppendsRemovesAndKeepsOne() {
+        val order = listOf(Keymap.JA_TWELVE, Keymap.EN_QWERTY)
+        assertEquals(listOf(Keymap.JA_TWELVE, Keymap.EN_QWERTY, Keymap.EN_TWELVE), KeymapRules.toggled(order, Keymap.EN_TWELVE))
+        assertEquals(listOf(Keymap.EN_QWERTY), KeymapRules.toggled(order, Keymap.JA_TWELVE))
+        assertEquals(listOf(Keymap.EN_QWERTY), KeymapRules.toggled(listOf(Keymap.EN_QWERTY), Keymap.EN_QWERTY))
+    }
+
     /** 旧設定からの移行。かなの12キーを先頭に、ローマ字かな入力と英字の扱いに応じてQWERTYを足し、最後にSimeji型の数字。 */
     @Test
     fun keymapsMigrateFromLegacyRomajiSettings() {

@@ -21,4 +21,8 @@
     <color name="kb_divider">#FF444746</color>
     <!-- フリックの吹き出しの地色 -->
     <color name="kb_flick">#FF6B7078</color>
+    <!-- 設定画面と起動画面のダーク配色。行の地はキーの色より暗い、地とキーの間の明るさにする（画面全体が明るくなりすぎないため）。 -->
+    <color name="settings_surface">#FF2D2F31</color>
+    <color name="settings_on_accent_container">#FFD3E3FD</color>
+    <color name="settings_outline">#FF8E918F</color>
 </resources>

@@ -213,6 +213,35 @@ class ToolbarPreferencesTest {
         assertEquals(ToolbarLayout.DropTarget.Bar(3), layout.barTarget(ToolbarAction.PASTE, 399f, 0f, 400f))
     }
 
+    /** バーを段に分けて描くときは、置いた後の並びを段に分け、指のある段の中で帯を数える。 */
+    @Test
+    fun barTargetCountsBandsWithinTheTouchedRow() {
+        // 置き場から来た機能を入れると4個になり、2段では2個・2個に分かれる。
+        assertEquals(ToolbarLayout.DropTarget.Bar(0), layout.barTarget(ToolbarAction.PASTE, 10f, 0f, 400f, rowIndex = 0, rows = 2))
+        assertEquals(ToolbarLayout.DropTarget.Bar(1), layout.barTarget(ToolbarAction.PASTE, 399f, 0f, 400f, rowIndex = 0, rows = 2))
+        assertEquals(ToolbarLayout.DropTarget.Bar(2), layout.barTarget(ToolbarAction.PASTE, 10f, 0f, 400f, rowIndex = 1, rows = 2))
+        assertEquals(ToolbarLayout.DropTarget.Bar(3), layout.barTarget(ToolbarAction.PASTE, 399f, 0f, 400f, rowIndex = 1, rows = 2))
+        // 段の数より並びが短いときや、描いている段より下を指したときは、最後の段として数える。
+        assertEquals(ToolbarLayout.DropTarget.Bar(3), layout.barTarget(ToolbarAction.PASTE, 399f, 0f, 400f, rowIndex = 5, rows = 3))
+        // 1段なら、段を指定しない場合と同じ結果になる。
+        assertEquals(layout.barTarget(ToolbarAction.PASTE, 250f, 0f, 400f), layout.barTarget(ToolbarAction.PASTE, 250f, 0f, 400f, 0, 1))
+    }
+
+    /** 押しただけのときは、置き場の機能はバーの末尾へ、バーと右端の機能は置き場の先頭へ移す。満杯のバーへは入れない。 */
+    @Test
+    fun tapTargetMovesBetweenBarAndTray() {
+        assertEquals(ToolbarLayout.DropTarget.Bar(3), layout.tapTarget(ToolbarAction.EMOJI))
+        assertEquals(ToolbarLayout.DropTarget.Tray(0), layout.tapTarget(ToolbarAction.UNDO))
+        assertEquals(ToolbarLayout.DropTarget.Tray(0), layout.tapTarget(ToolbarAction.MICROPHONE))
+        val full = layout.copy(bar = layout.bar + listOf(ToolbarAction.SETTINGS, ToolbarAction.HEIGHT))
+        assertEquals(ToolbarLayout.DropTarget.BarFull, full.tapTarget(ToolbarAction.EMOJI))
+
+        val moved = layout.drop(ToolbarAction.EMOJI, layout.tapTarget(ToolbarAction.EMOJI))
+        assertEquals(ToolbarAction.EMOJI, moved.bar.last())
+        val back = moved.drop(ToolbarAction.EMOJI, moved.tapTarget(ToolbarAction.EMOJI))
+        assertEquals(ToolbarAction.EMOJI, back.tray.first())
+    }
+
     /** 置き場からバーへ入れると、置き場から消えてバーの指定位置へ入る。 */
     @Test
     fun dropFromTrayIntoBar() {

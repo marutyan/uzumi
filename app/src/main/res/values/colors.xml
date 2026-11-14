@@ -24,4 +24,20 @@
     <color name="kb_divider">#FFC4C7C5</color>
     <!-- フリックの吹き出しの地色（Simejiと同じ灰色） -->
     <color name="kb_flick">#FF8A8A8A</color>
+    <!--
+      設定画面と起動画面の配色。キーボードの標準テーマの色を元にし、同じ値の役割はキーボードの色を参照する。
+      行の地・選択中の地の上の文字・部品の枠だけはキーボードに無い色のため、ここで値を持つ。本文と説明文は行の地と画面の地の両方に対して4.5:1以上。
+    -->
+    <color name="settings_background">@color/kb_background</color>
+    <color name="settings_surface">#FFFFFFFF</color>
+    <color name="settings_surface_high">@color/kb_function</color>
+    <color name="settings_text">@color/kb_text</color>
+    <color name="settings_text_secondary">@color/kb_text_secondary</color>
+    <color name="settings_accent">@color/kb_accent</color>
+    <color name="settings_on_accent">@color/kb_on_accent</color>
+    <color name="settings_accent_container">@color/kb_key_active</color>
+    <color name="settings_on_accent_container">#FF0842A0</color>
+    <color name="settings_outline">#FF747775</color>
+    <color name="settings_divider">@color/kb_divider</color>
+    <color name="settings_danger">@color/kb_danger</color>
 </resources>

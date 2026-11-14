@@ -175,6 +175,19 @@ class KeyboardPanel(
         refreshKeymapKeys()
     }
 
+    /** 表示中のキーマップ。設定画面の見本を作り直すとき、同じ配列を出し直すために読む。 */
+    val shownKeymap: Keymap
+        get() = currentKeymap
+
+    /** 表示中の面の左下の切り替えキー。設定画面の見本で、このキーだけを押せるようにするために使う。記号面ではnull。 */
+    val keymapSwitchKey: View?
+        get() = if (symbolShown) null else keymapSwitchKeys[currentKeymap]
+
+    /** 設定画面の見本で、作り直した見本に前と同じ[keymap]の面を出す。左下のキーで切り替えるときと同じ手順で出す。 */
+    fun selectKeymap(keymap: Keymap) {
+        showKeymap(KeymapRules.usable(keymap, isDirectCommitField))
+    }
+
     /**
      * 研究の評価の記録中の規則を使うか（評価の記録中か、評価の課題欄か）と、この欄で日本語QWERTYをローマ字かな入力に
      * できるか（[romajiAvailable]）を受け取る。どちらも変わらなければ何もしない。規則を使う間は[RecordingKeymapRules]に従い、
