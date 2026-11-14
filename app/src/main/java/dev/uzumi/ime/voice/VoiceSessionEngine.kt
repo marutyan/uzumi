@@ -171,6 +171,13 @@ class VoiceSessionEngine(
 
             override fun onError(error: VoiceInputError) {
                 if (!isActiveGeneration(generation) || finalized) return
+                // Pixel 10 Pro（Android 17）の端末内認識器は、途中結果で本文を返した後でも、確定の段で
+                // 「no speech」としてERROR_NO_MATCHを返すことがある（2026-11-14に実機のログで確認）。
+                // そのときは、受け取っていた途中結果を確定文として扱う。
+                if (error == VoiceInputError.NO_MATCH && (lastPartialText != null || completedSegments.isNotEmpty())) {
+                    completeWith(emptyList())
+                    return
+                }
                 finalized = true
                 sessionGeneration++
                 resetBuffers()
@@ -190,7 +197,12 @@ class VoiceSessionEngine(
         setState(VoiceInputState.IDLE)
         backend.destroy()
         val cleaned = VoiceFillerRemover.removeFillers(rawCombined)
-        listener.onFinalResult(cleaned)
+        // 聞き取れなかった（またはフィラーだけだった）ときは、空の確定ではなくNO_MATCHとして知らせ、UIが出し分けられるようにする。
+        if (cleaned.isBlank()) {
+            listener.onError(VoiceInputError.NO_MATCH)
+        } else {
+            listener.onFinalResult(cleaned)
+        }
     }
 
     private fun isActiveGeneration(generation: Long): Boolean =

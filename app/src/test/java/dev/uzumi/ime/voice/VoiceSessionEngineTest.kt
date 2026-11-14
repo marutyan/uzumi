@@ -80,6 +80,51 @@ class VoiceSessionEngineTest {
         assertEquals(1, backend.destroyCalls)
     }
 
+    /** 途中結果で本文を受け取った後のNO_MATCHは、実機の認識器の終わり方なので、途中結果で確定する。 */
+    @Test
+    fun completesWithPartialWhenNoMatchArrivesAfterPartials() {
+        val backend = FakeBackend()
+        val listener = RecordingListener()
+        val engine = VoiceSessionEngine(backend, listener)
+
+        assertEquals(VoiceStartStatus.STARTED, engine.start())
+        backend.callbacks!!.onPartialResults(listOf("えっと明日の会議"))
+        backend.callbacks!!.onError(VoiceInputError.NO_MATCH)
+
+        assertEquals(listOf("明日の会議"), listener.finals)
+        assertEquals(emptyList<VoiceInputError>(), listener.errors)
+        assertEquals(VoiceInputState.IDLE, engine.state)
+    }
+
+    /** 途中結果が無いままのNO_MATCHは、そのままエラーとして伝える。 */
+    @Test
+    fun reportsNoMatchWithoutPartials() {
+        val backend = FakeBackend()
+        val listener = RecordingListener()
+        val engine = VoiceSessionEngine(backend, listener)
+
+        assertEquals(VoiceStartStatus.STARTED, engine.start())
+        backend.callbacks!!.onError(VoiceInputError.NO_MATCH)
+
+        assertEquals(emptyList<String>(), listener.finals)
+        assertEquals(listOf(VoiceInputError.NO_MATCH), listener.errors)
+    }
+
+    /** フィラーだけで確定した場合は、空の確定ではなくNO_MATCHを知らせる。 */
+    @Test
+    fun reportsNoMatchWhenOnlyFillersWereHeard() {
+        val backend = FakeBackend()
+        val listener = RecordingListener()
+        val engine = VoiceSessionEngine(backend, listener)
+
+        assertEquals(VoiceStartStatus.STARTED, engine.start())
+        backend.callbacks!!.onPartialResults(listOf("えっと"))
+        backend.callbacks!!.onResults(emptyList())
+
+        assertEquals(emptyList<String>(), listener.finals)
+        assertEquals(listOf(VoiceInputError.NO_MATCH), listener.errors)
+    }
+
     /** 仮名→漢字の書き換わりで途中結果が短くなっても前の仮名を二重に残さない。 */
     @Test
     fun doesNotDuplicateShrinkingJapaneseKanjiConversionPartial() {
