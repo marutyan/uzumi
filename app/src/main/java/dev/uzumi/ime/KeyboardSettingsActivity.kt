@@ -212,6 +212,7 @@ class KeyboardSettingsActivity : Activity() {
                 onCommit = ::saveToolbarLayout,
                 barRows = toolbar.toolbarRows,
                 movesOnTap = true,
+                touchesVisibleOnly = true,
             ).also { it.start(toolbar.layout) }
         }
     }

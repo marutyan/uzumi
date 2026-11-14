@@ -69,6 +69,8 @@ interface ToolbarTrayArea {
  * @param onCommit 離して確定した並びを保存し、保存後の（整えた）並びを返す
  * @param barRows バーの中央を何段に分けて描くか（機能バーの段数）
  * @param movesOnTap 押しただけで動かさなかったときも[ToolbarLayout.tapTarget]の位置へ移すか（設定画面の見本）
+ * @param touchesVisibleOnly 押した位置と置き場の判定を、画面に見えている範囲に限るか。設定画面では置き場がスクロールの中にあり、
+ *   スクロールの外へ隠れたタイルを、上に固定した見本ごしに選ばないようにする（キーボードの上では使わず、今の判定のまま）
  */
 class ToolbarEditController(
     private val context: Context,
@@ -81,6 +83,7 @@ class ToolbarEditController(
     private val onCommit: (ToolbarLayout) -> ToolbarLayout,
     private val barRows: Int = 1,
     private val movesOnTap: Boolean = false,
+    private val touchesVisibleOnly: Boolean = false,
 ) : KeyboardRootLayout.EditTouchHandler {
     private val density = context.resources.displayMetrics.density
     private val handler = Handler(Looper.getMainLooper())
@@ -148,7 +151,9 @@ class ToolbarEditController(
     override fun capturesDown(event: MotionEvent): Boolean {
         val x = event.rawX
         val y = event.rawY
-        val action = draggableViews().firstOrNull { it.screenRect().contains(x.toInt(), y.toInt()) }
+        val action = draggableViews().firstOrNull {
+            it.screenRect().contains(x.toInt(), y.toInt()) && it.isVisibleAt(x.toInt(), y.toInt())
+        }
             ?.tag as? ToolbarAction ?: return false
         drag = Drag(action, event.getPointerId(0), x, y)
         return true
@@ -246,7 +251,7 @@ class ToolbarEditController(
             }
         }
         val area = panel.area.screenRect()
-        if (area.expandedBy(TRAY_MARGIN_DP).contains(x.toInt(), y.toInt())) {
+        if (area.expandedBy(TRAY_MARGIN_DP).contains(x.toInt(), y.toInt()) && panel.area.isVisibleAt(x.toInt(), y.toInt())) {
             val contentX = (x - area.left) / density
             val contentY = (y - area.top + panel.area.scrollY) / density
             return layout.trayTarget(current.action, contentX, contentY, panel.area.width / density)
@@ -413,6 +418,19 @@ class ToolbarEditController(
         val location = IntArray(2).also { getLocationOnScreen(it) }
         val (scaleX, scaleY) = screenScale()
         return Rect(location[0], location[1], location[0] + (width * scaleX).toInt(), location[1] + (height * scaleY).toInt())
+    }
+
+    /**
+     * 画面上の([x], [y])で、このViewが実際に見えているか。[touchesVisibleOnly]でなければ常にtrue（キーボードの上の判定は変えない）。
+     * 見えている範囲は親のクリッピング（スクロールの外など）を除いたもので、窓の位置を足して画面の座標にする。
+     */
+    private fun View.isVisibleAt(x: Int, y: Int): Boolean {
+        if (!touchesVisibleOnly) return true
+        val visible = Rect()
+        if (!getGlobalVisibleRect(visible)) return false
+        val window = IntArray(2).also { rootView.getLocationOnScreen(it) }
+        visible.offset(window[0], window[1])
+        return visible.contains(x, y)
     }
 
     /** 親をたどって掛け合わせた、画面上での縮小率（横、縦）。キーボードの上では常に1。 */
