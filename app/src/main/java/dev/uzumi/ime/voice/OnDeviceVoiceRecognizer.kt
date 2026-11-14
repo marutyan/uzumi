@@ -14,8 +14,10 @@ import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
-import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -97,6 +99,8 @@ private class AndroidVoiceRecognizerBackend(
     private var recognizer: SpeechRecognizer? = null
     // Uzumiが自分で録った音を認識器へ渡す経路（API 33以上）。録音threadと、認識器へ渡したpipeの読み口を持つ。
     private var capture: PcmPipeCapture? = null
+    // 停止の後、認識器が確定を返さないまま止まった場合に備える見張り。[STOP_TIMEOUT_MILLIS]後に途中結果で確定させる。
+    private var stopWatchdog: Runnable? = null
 
     override fun isOnDeviceAvailable(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
@@ -128,6 +132,7 @@ private class AndroidVoiceRecognizerBackend(
             return false
         }
         pipeCapture?.start(onMicrophoneError = { runOnMain { callbacks.onError(VoiceInputError.AUDIO) } })
+        activeCallbacks = callbacks
         return true
     }
 
@@ -139,9 +144,25 @@ private class AndroidVoiceRecognizerBackend(
         } else {
             runCatching { recognizer?.stopListening() }
         }
+        val callbacks = activeCallbacks ?: return
+        cancelStopWatchdog()
+        // 確定が届けば、セッションの終わりでdestroyが呼ばれて見張りは外れる。届かなければNO_MATCHとして扱い、
+        // セッション側が受け取り済みの途中結果で確定する（途中結果が無ければ「聞き取れなかった」になる）。
+        val watchdog = Runnable { callbacks.onError(VoiceInputError.NO_MATCH) }
+        stopWatchdog = watchdog
+        mainHandler.postAtTime(watchdog, handlerToken, SystemClock.uptimeMillis() + STOP_TIMEOUT_MILLIS)
+    }
+
+    private var activeCallbacks: VoiceRecognizerCallbacks? = null
+
+    private fun cancelStopWatchdog() {
+        stopWatchdog?.let(mainHandler::removeCallbacks)
+        stopWatchdog = null
     }
 
     override fun cancel() {
+        cancelStopWatchdog()
+        activeCallbacks = null
         capture?.abort()
         capture = null
         val current = recognizer ?: return
@@ -151,6 +172,8 @@ private class AndroidVoiceRecognizerBackend(
     }
 
     override fun destroy() {
+        cancelStopWatchdog()
+        activeCallbacks = null
         capture?.abort()
         capture = null
         val current = recognizer ?: return
@@ -188,7 +211,11 @@ private class AndroidVoiceRecognizerBackend(
 
     private fun createRecognitionListener(callbacks: VoiceRecognizerCallbacks): RecognitionListener =
         object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) = Unit
+            override fun onReadyForSpeech(params: Bundle?) {
+                // 認識器が読み口を受け取った後なので、こちらの複製を閉じる。持ち続けると、認識器が読み口を閉じても
+                // 書き込み側がエラーにならず、pipeの詰まりに気づけない。
+                capture?.releaseReadSide()
+            }
             override fun onBeginningOfSpeech() = Unit
             override fun onRmsChanged(rmsdB: Float) = Unit
             override fun onBufferReceived(buffer: ByteArray?) = Unit
@@ -250,6 +277,12 @@ private class AndroidVoiceRecognizerBackend(
 
     private companion object {
         const val LANGUAGE_JAPANESE = "ja-JP"
+
+        /**
+         * 停止から確定を待つ上限（ミリ秒）。実機では、末尾に1.5秒の無音を足して閉じてから0.2秒以内に確定した。
+         * 認識器が止まった場合でも停止待ちの表示が残り続けないよう、余裕を持たせて打ち切る。
+         */
+        const val STOP_TIMEOUT_MILLIS = 8_000L
     }
 }
 
@@ -257,9 +290,11 @@ private class AndroidVoiceRecognizerBackend(
  * マイクの音を録音threadで読み、認識器へ渡したpipeへ書き込む。
  * 停止の操作では、マイクを閉じた後に無音を足してからpipeを閉じる。試作で、音の末尾ですぐ閉じると最後の語が欠け、
  * 1.5秒の無音を足すと戻ったためである（docs/research/voice-input.md）。
+ * pipeへの書き込みは待たずに戻る形にし、待つ時間に上限を置く。認識器が読まなくなっても録音threadが止まらず、
+ * マイクを必ず閉じられるようにするためである。
  */
 private class PcmPipeCapture private constructor(
-    /** 認識器へ渡す読み口。認識器のprocessへ複製されるので、こちらの複製は終了時に閉じる。 */
+    /** 認識器へ渡す読み口。認識器のprocessへ複製されるので、こちらの複製は受け渡しの後に閉じる。 */
     val readSide: ParcelFileDescriptor,
     private val writeSide: ParcelFileDescriptor,
 ) {
@@ -267,7 +302,7 @@ private class PcmPipeCapture private constructor(
     private val aborted = AtomicBoolean(false)
     private var thread: Thread? = null
 
-    /** 録音threadを始める。マイクを開けない・読めないときは[onMicrophoneError]を録音threadから呼ぶ。 */
+    /** 録音threadを始める。マイクを開けない・読めない、またはpipeが詰まったときは[onMicrophoneError]を録音threadから呼ぶ。 */
     fun start(onMicrophoneError: () -> Unit) {
         thread = Thread({ pump(onMicrophoneError) }, "UzumiVoicePcm").also { it.start() }
     }
@@ -277,36 +312,82 @@ private class PcmPipeCapture private constructor(
         stopSignal.set(true)
     }
 
-    /** マイクを閉じ、無音を書かずにpipeをすぐ閉じる（認識の取り消し・破棄用）。 */
-    fun abort() {
-        aborted.set(true)
-        stopSignal.set(true)
-        closeQuietly(writeSide)
+    /** こちらが持つ読み口の複製を閉じる。認識器が受け取った後に呼ぶ。 */
+    fun releaseReadSide() {
         closeQuietly(readSide)
     }
 
+    /** マイクを閉じ、無音を書かずにpipeを閉じる（認識の取り消し・破棄用）。書き込み側は録音threadが閉じる。 */
+    fun abort() {
+        aborted.set(true)
+        stopSignal.set(true)
+        closeQuietly(readSide)
+        // 録音threadを始める前（認識の開始に失敗したとき）は、書き込み側を閉じる者がいないのでここで閉じる。
+        if (thread == null) closeQuietly(writeSide)
+    }
+
     private fun pump(onMicrophoneError: () -> Unit) {
+        val fd = writeSide.fileDescriptor
         try {
-            ParcelFileDescriptor.AutoCloseOutputStream(writeSide).use { output ->
-                MicrophonePcm.read(stopSignal) { chunk -> output.write(chunk) }
-                if (!aborted.get()) output.write(ByteArray(TAIL_SILENCE_BYTES))
+            Os.fcntlInt(fd, OsConstants.F_SETFL, OsConstants.O_NONBLOCK)
+            MicrophonePcm.read(stopSignal) { chunk ->
+                if (!writeWithin(fd, chunk, WRITE_TIMEOUT_MILLIS)) throw PipeStalledException()
             }
+            if (!aborted.get()) writeWithin(fd, ByteArray(TAIL_SILENCE_BYTES), WRITE_TIMEOUT_MILLIS)
         } catch (error: MicrophoneException) {
             Log.w(TAG, "microphone failed", error)
             if (!aborted.get()) onMicrophoneError()
-        } catch (error: IOException) {
-            // 取り消しでpipeを先に閉じた場合や、認識器が読み口を閉じた場合に起きる。どちらも認識側の通知で扱う。
-            if (!aborted.get()) Log.w(TAG, "pipe closed while writing", error)
+        } catch (error: PipeStalledException) {
+            // 認識器が読み口を閉じた、または読まなくなった。マイクは閉じ済みなので、エラーとして知らせて終える。
+            if (!aborted.get()) {
+                Log.w(TAG, "recognizer stopped reading audio")
+                onMicrophoneError()
+            }
+        } catch (error: ErrnoException) {
+            Log.w(TAG, "pipe setup failed", error)
+            if (!aborted.get()) onMicrophoneError()
         } finally {
+            closeQuietly(writeSide)
             closeQuietly(readSide)
         }
     }
+
+    /**
+     * [data]を全部書く。pipeが満杯なら少し待って書き直し、[timeoutMillis]を超えるか取り消されたらfalseを返す。
+     * 読み口が閉じられた（EPIPE）などの書き込みエラーもfalseとする。
+     */
+    private fun writeWithin(fd: java.io.FileDescriptor, data: ByteArray, timeoutMillis: Long): Boolean {
+        val deadline = SystemClock.uptimeMillis() + timeoutMillis
+        var offset = 0
+        while (offset < data.size) {
+            if (aborted.get()) return false
+            try {
+                offset += Os.write(fd, data, offset, data.size - offset)
+            } catch (error: ErrnoException) {
+                if (error.errno != OsConstants.EAGAIN) return false
+                if (SystemClock.uptimeMillis() >= deadline) return false
+                SystemClock.sleep(WRITE_RETRY_MILLIS)
+            } catch (error: java.io.InterruptedIOException) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /** 認識器がpipeを読まなくなったことを表す。 */
+    private class PipeStalledException : Exception()
 
     companion object {
         private const val TAG = "UzumiVoiceInput"
 
         /** 停止後に足す無音の長さ（1.5秒分のバイト数）。 */
         private const val TAIL_SILENCE_BYTES = MicrophonePcm.SAMPLE_RATE * 2 * 3 / 2
+
+        /** pipeが満杯のまま待つ上限（ミリ秒）。認識器は実時間より速く読むので、これを超えたら読んでいないとみなす。 */
+        private const val WRITE_TIMEOUT_MILLIS = 2_000L
+
+        /** pipeが満杯のときに書き直すまでの間隔（ミリ秒）。 */
+        private const val WRITE_RETRY_MILLIS = 10L
 
         /** 認識器へ渡すpipeを作る。 */
         fun open(): PcmPipeCapture {
