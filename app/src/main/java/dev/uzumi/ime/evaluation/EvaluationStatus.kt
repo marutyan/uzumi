@@ -76,4 +76,10 @@ object EvaluationStatusSource {
 
     /** `:neural`へPSSを問い合わせる関数（結果は後から[NeuralRuntimeStatus.lastNeuralPssKb]へ入る）。IMEが起動していなければnull。 */
     var neuralMemoryRequester: (() -> Unit)? = null
+
+    /**
+     * 評価の記録を始めた・終えたことをIMEへ知らせる関数。キーボードを記録中の面（キーマップを導入する前の面）へ
+     * 合わせるために受信口が呼ぶ。計数には関わらない。IMEが起動していなければnull。
+     */
+    var recordingChanged: (() -> Unit)? = null
 }

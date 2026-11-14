@@ -26,6 +26,7 @@ import android.widget.Toast
 import dev.uzumi.ime.conversion.NeuralModelSpec
 import dev.uzumi.ime.keyboard.EmojiRecentStore
 import dev.uzumi.ime.keyboard.KeyboardPreferences
+import dev.uzumi.ime.keyboard.Keymap
 import dev.uzumi.ime.keyboard.ToolbarAction
 import dev.uzumi.ime.keyboard.ToolbarPreferences
 import dev.uzumi.ime.dictionary.TsvParseResult
@@ -68,10 +69,8 @@ class SettingsActivity : Activity() {
         content.addView(section(R.string.settings_section_input))
         content.addView(switchRow(R.string.live_conversion_switch, R.string.live_conversion_description,
             UzumiSettings.isLiveConversionEnabled(this)) { UzumiSettings.setLiveConversionEnabled(this, it) })
-        content.addView(switchRow(R.string.settings_romaji_input, R.string.settings_romaji_input_description,
-            UzumiSettings.isRomajiInputEnabled(this)) { UzumiSettings.setRomajiInputEnabled(this, it) })
-        content.addView(switchRow(R.string.settings_romaji_english_qwerty, R.string.settings_romaji_english_qwerty_description,
-            UzumiSettings.isRomajiEnglishQwertyIncluded(this)) { UzumiSettings.setRomajiEnglishQwertyIncluded(this, it) })
+        content.addView(label(R.string.settings_keymaps, R.string.settings_keymaps_description))
+        content.addView(keymapControl())
         content.addView(switchRow(R.string.settings_delete_drag, R.string.settings_delete_drag_description,
             UzumiSettings.keyboardPreferences(this).deleteDrag) { UzumiSettings.setDeleteDrag(this, it) })
 
@@ -208,6 +207,45 @@ class SettingsActivity : Activity() {
             // 行のどこを押しても切り替わるようにし、小さなスイッチだけを狙わなくてよくする
             setOnClickListener { switch.toggle() }
         }
+    }
+
+    /**
+     * キーマップの選択。各配列のチェック欄に選んだ順の番号を付け、チェックした配列を順番の最後へ足す。
+     * 少なくとも1つは残すため、最後の1つは外せない。変えるたびに保存する。
+     */
+    private fun keymapControl(): View {
+        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val selected = UzumiSettings.keymaps(this).toMutableList()
+
+        fun redraw() {
+            rows.removeAllViews()
+            Keymap.entries.forEach { keymap ->
+                val order = selected.indexOf(keymap)
+                rows.addView(CheckBox(this).apply {
+                    text = if (order >= 0) getString(R.string.settings_keymap_selected, order + 1, keymap.displayName) else keymap.displayName
+                    isChecked = order >= 0
+                    minimumHeight = px(48)
+                    setOnCheckedChangeListener { button, checked ->
+                        when {
+                            // 最後の1つを外そうとして戻したときにも呼ばれるため、選択済みなら何もしない
+                            checked -> if (keymap in selected) return@setOnCheckedChangeListener else selected.add(keymap)
+                            selected.size > 1 -> selected.remove(keymap)
+                            else -> {
+                                // 最後の1つは外さず、理由を知らせる
+                                button.isChecked = true
+                                Toast.makeText(this@SettingsActivity, R.string.settings_keymaps_keep_one, Toast.LENGTH_SHORT).show()
+                                return@setOnCheckedChangeListener
+                            }
+                        }
+                        UzumiSettings.setKeymaps(this@SettingsActivity, selected)
+                        // 番号を付け直すため、リスナーの外で並べ直す
+                        rows.post { redraw() }
+                    }
+                })
+            }
+        }
+        redraw()
+        return rows
     }
 
     /**

@@ -7,6 +7,8 @@ import dev.uzumi.ime.keyboard.InputTuning
 import dev.uzumi.ime.keyboard.KeyboardAppearance
 import dev.uzumi.ime.keyboard.KeyboardBackgroundImage
 import dev.uzumi.ime.keyboard.KeyboardPreferences
+import dev.uzumi.ime.keyboard.Keymap
+import dev.uzumi.ime.keyboard.KeymapRules
 import dev.uzumi.ime.keyboard.ToolbarAction
 import dev.uzumi.ime.keyboard.ToolbarLayout
 import dev.uzumi.ime.keyboard.ToolbarPreferences
@@ -24,20 +26,25 @@ object UzumiSettings {
     // ライブ変換のON/OFFを保存するキー。
     private const val KEY_LIVE_CONVERSION = "live_conversion_enabled"
 
-    // QWERTYでローマ字をかなへ変換する設定を保存するキー。
+    // 旧設定「英字配列でローマ字かな入力」と「配列の切替に英字入力を含める」を保存していたキー。キーマップの選択に置き換えたため、
+    // キーマップを保存する前の利用者の選択を移すときにだけ読む。
     private const val KEY_ROMAJI_INPUT = "romaji_input_enabled"
-
-    // ローマ字かな入力がONのとき、配列切替に英字QWERTY（ローマ字変換しない）を含めるかを保存するキー。
     private const val KEY_ROMAJI_ENGLISH_QWERTY = "romaji_english_qwerty"
+
+    // 旧設定の既定値。旧設定を一度も変えていない利用者は、移行で既定のキーマップの選択になる。
+    private const val DEFAULT_ROMAJI_INPUT = false
+    private const val DEFAULT_ROMAJI_ENGLISH_QWERTY = true
+
+    // キーマップの選択（使う配列とその順番）を保存するキー。値は配列名のカンマ区切り（KeymapRules.encode）。
+    private const val KEY_KEYMAPS = "keymaps"
+
+    // バックアップでのキーマップの選択と旧設定の項目名。
+    private const val BACKUP_KEYMAPS = "keymaps"
+    private const val BACKUP_ROMAJI_INPUT = "romajiInput"
+    private const val BACKUP_ROMAJI_ENGLISH_QWERTY = "romajiEnglishQwerty"
 
     /** ライブ変換の既定値。確定操作を省ける入力から始められるようONにする。 */
     const val DEFAULT_LIVE_CONVERSION = true
-
-    /** QWERTYのローマ字入力は、既存の英字入力を保つため既定ではOFFにする。 */
-    const val DEFAULT_ROMAJI_INPUT = false
-
-    /** ローマ字かな入力がONでも小文字の英語を打てるよう、英字QWERTYは既定で切替に含める。 */
-    const val DEFAULT_ROMAJI_ENGLISH_QWERTY = true
 
     /** コピーした文字を履歴へ保存する設定の既定値。 */
     const val DEFAULT_CLIPBOARD_HISTORY_ENABLED = true
@@ -195,17 +202,29 @@ object UzumiSettings {
             normalize = { value -> value as? BackupJsonValue.BooleanValue },
             apply = { context, value -> setToolbarOnTop(context, value.booleanValue()!!) },
         ),
+        // キーマップの選択を導入する前の2項目。古い版のアプリでも読めるよう、今の選択に近い値（日本語QWERTYと英字QWERTYを
+        // 選んでいるか）を書き出す。読み込みでは旧設定として保存し、続く keymaps が無い古いバックアップでは
+        // normalizeBackupSettings が移行の規則で keymaps を作る。
         BackupSettingDescriptor(
-            key = "romajiInput",
-            capture = { BackupJsonValue.BooleanValue(isRomajiInputEnabled(it)) },
+            key = BACKUP_ROMAJI_INPUT,
+            capture = { BackupJsonValue.BooleanValue(Keymap.JA_QWERTY in keymaps(it)) },
             normalize = { value -> value as? BackupJsonValue.BooleanValue },
-            apply = { context, value -> setRomajiInputEnabled(context, value.booleanValue()!!) },
+            apply = { context, value -> putBoolean(context, KEY_ROMAJI_INPUT, value.booleanValue()!!) },
         ),
         BackupSettingDescriptor(
-            key = "romajiEnglishQwerty",
-            capture = { BackupJsonValue.BooleanValue(isRomajiEnglishQwertyIncluded(it)) },
+            key = BACKUP_ROMAJI_ENGLISH_QWERTY,
+            capture = { BackupJsonValue.BooleanValue(Keymap.EN_QWERTY in keymaps(it)) },
             normalize = { value -> value as? BackupJsonValue.BooleanValue },
-            apply = { context, value -> setRomajiEnglishQwertyIncluded(context, value.booleanValue()!!) },
+            apply = { context, value -> putBoolean(context, KEY_ROMAJI_ENGLISH_QWERTY, value.booleanValue()!!) },
+        ),
+        // キーマップの選択。旧設定の2項目より後に置き、両方があればこちらを使う。
+        BackupSettingDescriptor(
+            key = BACKUP_KEYMAPS,
+            capture = { BackupJsonValue.StringValue(KeymapRules.encode(keymaps(it))) },
+            normalize = { value ->
+                (value as? BackupJsonValue.StringValue)?.let { BackupJsonValue.StringValue(KeymapRules.encode(KeymapRules.decode(it.value)!!)) }
+            },
+            apply = { context, value -> setKeymaps(context, KeymapRules.decode(value.stringValue()!!)!!) },
         ),
         BackupSettingDescriptor(
             key = "clipboardHistory",
@@ -441,21 +460,22 @@ object UzumiSettings {
         preferences(context).edit().putBoolean(KEY_LIVE_CONVERSION, enabled).apply()
     }
 
-    /** QWERTYのローマ字入力がONか。 */
-    fun isRomajiInputEnabled(context: Context): Boolean =
-        preferences(context).getBoolean(KEY_ROMAJI_INPUT, DEFAULT_ROMAJI_INPUT)
+    /**
+     * キーマップの選択（使う配列とその順番）を読む。まだ保存していなければ、旧設定「英字配列でローマ字かな入力」と
+     * 「配列の切替に英字入力を含める」から移行の規則で作る。
+     */
+    fun keymaps(context: Context): List<Keymap> {
+        val prefs = preferences(context)
+        return KeymapRules.decode(prefs.getString(KEY_KEYMAPS, null)) ?: KeymapRules.migrate(
+            romajiInput = prefs.getBoolean(KEY_ROMAJI_INPUT, DEFAULT_ROMAJI_INPUT),
+            includesEnglish = prefs.getBoolean(KEY_ROMAJI_ENGLISH_QWERTY, DEFAULT_ROMAJI_ENGLISH_QWERTY),
+        )
+    }
 
-    /** QWERTYのローマ字入力のON/OFFを保存する。 */
-    fun setRomajiInputEnabled(context: Context, enabled: Boolean) =
-        putBoolean(context, KEY_ROMAJI_INPUT, enabled)
-
-    /** ローマ字かな入力がONのとき、配列切替に英字QWERTYを含めるか。 */
-    fun isRomajiEnglishQwertyIncluded(context: Context): Boolean =
-        preferences(context).getBoolean(KEY_ROMAJI_ENGLISH_QWERTY, DEFAULT_ROMAJI_ENGLISH_QWERTY)
-
-    /** 配列切替に英字QWERTYを含めるかを保存する。 */
-    fun setRomajiEnglishQwertyIncluded(context: Context, included: Boolean) =
-        putBoolean(context, KEY_ROMAJI_ENGLISH_QWERTY, included)
+    /** キーマップの選択を保存する。空なら既定の選択にし、少なくとも1つの配列を残す。 */
+    fun setKeymaps(context: Context, order: List<Keymap>) {
+        preferences(context).edit().putString(KEY_KEYMAPS, KeymapRules.encode(order)).apply()
+    }
 
     /** 現在の設定をバックアップへ渡すJSON値の一覧として取り出す。 */
     fun captureBackupSettings(context: Context): Map<String, BackupJsonValue> =
@@ -469,6 +489,16 @@ object UzumiSettings {
                 ?: throw SettingsBackupException("${descriptor.key}の型が正しくありません")
             put(descriptor.key, normalized)
         }
+        // キーマップの選択を導入する前の古いバックアップは、アプリの更新時と同じ移行の規則でキーマップの選択を作る
+        if (BACKUP_KEYMAPS !in this) legacyBackupKeymaps(this)?.let { put(BACKUP_KEYMAPS, BackupJsonValue.StringValue(KeymapRules.encode(it))) }
+    }
+
+    /** 旧設定の2項目の正規化済みの値からキーマップの選択を作る。どちらも無ければnull。片方だけなら、もう片方は旧設定の既定値とする。 */
+    private fun legacyBackupKeymaps(normalized: Map<String, BackupJsonValue>): List<Keymap>? {
+        val romajiInput = normalized[BACKUP_ROMAJI_INPUT]?.booleanValue()
+        val includesEnglish = normalized[BACKUP_ROMAJI_ENGLISH_QWERTY]?.booleanValue()
+        if (romajiInput == null && includesEnglish == null) return null
+        return KeymapRules.migrate(romajiInput ?: DEFAULT_ROMAJI_INPUT, includesEnglish ?: DEFAULT_ROMAJI_ENGLISH_QWERTY)
     }
 
     /** すべての既知設定を先に検証してから保存するため、型不正で既存設定だけが部分更新されるのを防ぐ。 */

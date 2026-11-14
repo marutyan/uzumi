@@ -53,6 +53,10 @@ class EvaluationCounterTest {
         ).mapNotNull { kind(it, live = true) }.fold(OperationCounts()) { total, k -> total + k }
         assertEquals(OperationCounts(keys = 1, corrections = 1), cursorDragCounts)
         assertEquals(OperationKind.CORRECTION, kind(KeyboardAction.ToKatakana))
+        // 英字12キーと数字Simeji型のキー（評価の記録中の面には無い）。タップと「a/A」は入力、「元に戻す」は訂正操作
+        assertEquals(OperationKind.INPUT, kind(KeyboardAction.ToggleTap(listOf("a", "b", "c"))))
+        assertEquals(OperationKind.INPUT, kind(KeyboardAction.ToggleCase))
+        assertEquals(OperationKind.CORRECTION, kind(KeyboardAction.Undo))
         // 第一候補の選択だけが確定操作
         assertEquals(OperationKind.COMMIT, OperationClassifier.candidatePick(0))
         assertEquals(OperationKind.CORRECTION, OperationClassifier.candidatePick(1))

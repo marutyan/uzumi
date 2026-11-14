@@ -10,6 +10,8 @@ import android.widget.LinearLayout
 
 /**
  * 日本語12キーフリック・英語QWERTY・数字・記号・顔文字・絵文字の入力面を提供するメインUIパネル。
+ * 利用者が設定で選んだキーマップ（[Keymap]）を、各面の左下の切り替えキーで選んだ順に切り替える。
+ * 研究の評価の記録中は、キーマップの設定によらず[RecordingKeymapRules]に従う。
  *
  * @param context コンテキスト
  * @param onAction キーボード操作イベントを通知するコールバック
@@ -28,23 +30,40 @@ class KeyboardPanel(
 ) : LinearLayout(context) {
 
     private val density = context.resources.displayMetrics.density
-    private var currentMode = KeyboardMode.KANA
-    private var lastNormalMode = KeyboardMode.KANA
 
-    // 英字配列のローマ字と英字の層。ローマ字かな入力の欄で、英字配列の左下キーの切替先と表示を決める。
-    private val qwertyLayer = QwertyLayerState()
+    // 利用者が設定で選んだキーマップの順番。IMEが入力欄を開くたびに設定から渡す。
+    private var keymaps: List<Keymap> = KeymapRules.DEFAULT_ORDER
 
-    /** 現在表示中の面がローマ字の層の英字QWERTYか。ローマ字変換の対象を英字の層や他の面から分ける。 */
+    // 研究の評価の記録中か。記録中はキーマップの設定によらず、導入前と同じ面と切り替えにする。
+    private var recording = false
+
+    // この欄で日本語QWERTYをローマ字かな入力にできるか。パスワード・URLなどの欄ではできず、英字のまま入れる。
+    private var romajiAvailable = false
+
+    // 表示中のキーマップ。記号面を出している間は、記号面を開く前のキーマップを持つ。
+    private var currentKeymap = Keymap.JA_TWELVE
+
+    // 記号面（顔文字・絵文字の一覧を含む）を表示中か。
+    private var symbolShown = false
+
+    // 次に通常の入力欄を開いたときに出すキーマップ。通常の欄で最後に使った、数字以外のキーマップ。
+    private var lastNormalKeymap: Keymap? = null
+
+    // 日本語QWERTYでローマ字をかなにするか。表示中かどうかによらず、今のキーマップと欄の可否で決める。
+    private val usesRomaji: Boolean
+        get() = !recording && romajiAvailable && currentKeymap == Keymap.JA_QWERTY
+
+    /** 現在表示中の面がローマ字かな入力のQWERTYか。ローマ字変換の対象を英字のQWERTYや他の面から分ける。 */
     val isRomajiQwertyMode: Boolean
-        get() = currentMode == KeyboardMode.QWERTY && qwertyLayer.isRomaji
+        get() = !symbolShown && usesRomaji
 
     /** 12キー（かな配列）を表示中か。小書き・濁点を区別しない変換は、この配列で入れた読みだけに使う。 */
     val isKanaMode: Boolean
-        get() = currentMode == KeyboardMode.KANA
+        get() = !symbolShown && currentKeymap == Keymap.JA_TWELVE
 
     private val shiftState = QwertyShiftState()
 
-    // 入力欄が求める大文字化の種類。ローマ字の層では小文字がかなになるため使わず、英字の層へ移ったときに改めて当てる。
+    // 入力欄が求める大文字化の種類。ローマ字かな入力では小文字がかなになるため使わず、英字の配列へ移ったときに改めて当てる。
     private var requestedAutoCapsMode = 0
 
     private var actionLabel = "確定"
@@ -59,10 +78,10 @@ class KeyboardPanel(
     private val qwertyKeyViews = mutableListOf<KeyView>()
     private val shiftKeyViews = mutableListOf<KeyView>()
 
-    private var numericSwitchKey: KeyView? = null
+    // 各キーマップの面の左下の切り替えキー。日本語QWERTYと英字QWERTYは同じ面のため同じキーを指す。
+    private val keymapSwitchKeys = mutableMapOf<Keymap, KeyView>()
 
-    // 英字配列の左下の切替キー（ローマ字の層では英字の層へ、それ以外はかなへ）と、今の層を示す空白キー。
-    private var qwertyCycleKeyView: KeyView? = null
+    // QWERTYの空白キー。ローマ字かな入力か英字入力かを表示で示す。
     private var qwertySpaceKeyView: KeyView? = null
 
     // 入力中かどうかで役割が変わる12キーのキー。「123」と「カナ」、「空白」と「変換」を切り替える。
@@ -74,7 +93,7 @@ class KeyboardPanel(
     private val arrowKeyViews = mutableListOf<Pair<Int, KeyView>>()
     private var isSegmentResizable = false
 
-    // かな配列へ戻るキー。password欄ではかな入力を使わないため非表示にする。
+    // 記号面と絵文字一覧のかな配列へ戻るキー。password欄ではかな入力を使わないため非表示にする。
     private val kanaSwitchKeyViews = mutableListOf<KeyView>()
 
     // 記号面で表示中のページ番号。KeyboardLayoutData.SYMBOL_PAGESの添字。
@@ -102,6 +121,8 @@ class KeyboardPanel(
     private lateinit var qwertyContainer: LinearLayout
     private lateinit var numericContainer: LinearLayout
     private lateinit var symbolContainer: LinearLayout
+    private lateinit var englishTwelveContainer: LinearLayout
+    private lateinit var simejiNumberContainer: LinearLayout
 
     init {
         orientation = VERTICAL
@@ -112,6 +133,7 @@ class KeyboardPanel(
 
         initLayouts()
         updateSwitchKeys()
+        refreshKeymapKeys()
         updateModeVisibility()
     }
 
@@ -127,23 +149,50 @@ class KeyboardPanel(
 
         updateSwitchKeys()
 
-        if (numeric) {
-            switchMode(KeyboardMode.NUMERIC)
-        } else if (password) {
-            // パスワード入力欄では予測不要の英語表示（QWERTY）へ切り替え
-            switchMode(KeyboardMode.QWERTY)
-        } else {
-            switchMode(lastNormalMode)
-        }
+        // 数字の欄は数字の配列、パスワード欄は予測不要の英字の配列、それ以外は前回の通常の欄の配列にする
+        showKeymap(
+            if (recording) {
+                RecordingKeymapRules.initial(numeric, password, lastNormalKeymap)
+            } else {
+                KeymapRules.initial(keymaps, numeric, password, lastNormalKeymap)
+            },
+        )
     }
 
     /**
-     * この欄で英字配列のローマ字かな入力を使うか（[romajiInput]）と、配列切替に英字の層を含めるか（[includesEnglish]）を
-     * 受け取り、英字配列の切替キーと空白キーの表示を合わせる。IMEは入力欄の開始と表示のたびに呼ぶ。
+     * 設定で選んだキーマップの順番[order]と、この欄で日本語QWERTYをローマ字かな入力にできるか（[romajiAvailable]）を受け取り、
+     * 左下の切り替えキーと空白キーの表示を合わせる。IMEは入力欄の開始と表示のたびに、[setEditorMode]より先に呼ぶ。
      */
-    fun setRomajiInput(romajiInput: Boolean, includesEnglish: Boolean) {
-        qwertyLayer.configure(romajiInput, includesEnglish)
-        updateQwertyLayerKeys()
+    fun setKeymaps(order: List<Keymap>, romajiAvailable: Boolean) {
+        keymaps = KeymapRules.normalize(order)
+        this.romajiAvailable = romajiAvailable
+        refreshKeymapKeys()
+        applyAutoCaps()
+    }
+
+    /**
+     * 研究の評価の記録中かを受け取る。記録中は[RecordingKeymapRules]に従い、記録中に出せない配列を表示中なら
+     * 同じ種類の導入前の配列へ移す。記録を終えたときは、かなの12キーの面へ戻し、次に開く入力欄でもその面を出す。
+     * 記録の開始と終了のたびにIMEが呼ぶ。
+     */
+    fun setRecording(recording: Boolean) {
+        if (recording == this.recording) return
+        this.recording = recording
+        if (!recording) {
+            val keymap = RecordingKeymapRules.afterRecording(isPasswordField)
+            showKeymap(keymap)
+            // 次の課題の入力欄を開いたときも同じ面から始める（数字の欄・パスワード欄は欄の規則に従う）
+            if (!isPasswordField) lastNormalKeymap = keymap
+            return
+        }
+        val keymap = RecordingKeymapRules.coerce(currentKeymap, isPasswordField)
+        if (keymap != currentKeymap) {
+            cancelPendingInput()
+            currentKeymap = keymap
+        }
+        refreshKeymapKeys()
+        applyAutoCaps()
+        updateModeVisibility()
     }
 
     /**
@@ -176,9 +225,9 @@ class KeyboardPanel(
         applyAutoCaps()
     }
 
-    /** 欄が求める大文字化を、ローマ字の層以外の英字配列へ当てる。ローマ字の層ではGboardと同じく自動大文字化しない。 */
+    /** 欄が求める大文字化を、ローマ字かな入力以外の英字配列へ当てる。ローマ字かな入力ではGboardと同じく自動大文字化しない。 */
     private fun applyAutoCaps() {
-        val capsMode = if (qwertyLayer.isRomaji) 0 else requestedAutoCapsMode
+        val capsMode = if (usesRomaji) 0 else requestedAutoCapsMode
         val changed = shiftState.applyAutoCaps(
             shift = capsMode != 0,
             characters = capsMode and TextUtils.CAP_MODE_CHARACTERS != 0,
@@ -226,72 +275,118 @@ class KeyboardPanel(
         qwertyContainer = buildQwertyLayout()
         numericContainer = buildNumericLayout()
         symbolContainer = buildSymbolLayout()
+        englishTwelveContainer = buildEnglishTwelveLayout()
+        simejiNumberContainer = buildSimejiNumberLayout()
 
         // 表示が切り替わったときにTalkBackが面の名前を読み上げるよう、各面をpaneとして名前を付ける
         kanaContainer.accessibilityPaneTitle = KeySpeech.modeName(KeyboardMode.KANA)
         qwertyContainer.accessibilityPaneTitle = KeySpeech.modeName(KeyboardMode.QWERTY)
         numericContainer.accessibilityPaneTitle = KeySpeech.modeName(KeyboardMode.NUMERIC)
         symbolContainer.accessibilityPaneTitle = KeySpeech.modeName(KeyboardMode.SYMBOL)
+        englishTwelveContainer.accessibilityPaneTitle = KeySpeech.modeName(KeyboardMode.QWERTY)
+        simejiNumberContainer.accessibilityPaneTitle = KeySpeech.modeName(KeyboardMode.NUMERIC)
 
         val lp = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         addView(kanaContainer, lp)
         addView(qwertyContainer, lp)
         addView(numericContainer, lp)
         addView(symbolContainer, lp)
+        addView(englishTwelveContainer, lp)
+        addView(simejiNumberContainer, lp)
     }
 
     /**
-     * 入力モードを切り替える。モード変更時に全キーの押下状態・リピートを確実に破棄する。
+     * キーマップ[keymap]の面を表示する。切り替え時に全キーの押下状態・リピートを確実に破棄する。
      */
-    private fun switchMode(mode: KeyboardMode) {
-        // モード変更で押下状態・リピートを完全に破棄
+    private fun showKeymap(keymap: Keymap) {
+        // 切り替えで押下状態・リピートを完全に破棄
         cancelPendingInput()
-
-        // パスワード入力時は常に英語または数字のみ
-        val resolvedMode = if (isPasswordField && mode == KeyboardMode.KANA) {
-            KeyboardMode.QWERTY
-        } else {
-            mode
-        }
-
-        if (resolvedMode != KeyboardMode.SYMBOL || currentMode != KeyboardMode.SYMBOL) hideEmojiPicker()
-
-        currentMode = resolvedMode
-        updateQwertyLayerKeys()
+        hideEmojiPicker()
+        symbolShown = false
+        currentKeymap = keymap
+        if (KeymapRules.remembers(keymap, isNumericField, isPasswordField)) lastNormalKeymap = keymap
+        refreshKeymapKeys()
         applyAutoCaps()
-        if (!isNumericField && !isPasswordField && (resolvedMode == KeyboardMode.KANA || resolvedMode == KeyboardMode.QWERTY)) {
-            lastNormalMode = resolvedMode
-        }
+        updateModeVisibility()
+    }
+
+    /** 記号面を表示する。記号面を開く前のキーマップは保ち、記号面の中での切り替えでは顔文字・絵文字の一覧を閉じない。 */
+    private fun showSymbols() {
+        cancelPendingInput()
+        if (!symbolShown) hideEmojiPicker()
+        symbolShown = true
+        applyAutoCaps()
         updateModeVisibility()
     }
 
     /**
-     * 現在のパスワード状態等に応じて切替キーの表示ラベルと遷移先を動的に更新する。
+     * 種類を指定する切り替えキー（「123」「記号」、記号面の「あ」「ABC」「123」と、記録中の左下のキー）を押したときに、
+     * その種類の配列か記号面へ移る。どの配列にするかは、記録中は導入前の規則、通常時はキーマップの選択で決める。
+     */
+    private fun switchToCategory(target: KeyboardMode) {
+        if (target == KeyboardMode.SYMBOL) {
+            showSymbols()
+            return
+        }
+        showKeymap(
+            if (recording) {
+                RecordingKeymapRules.keymapFor(target, isPasswordField)
+            } else {
+                KeymapRules.forCategory(keymaps, target, isPasswordField)
+            },
+        )
+    }
+
+    /** 左下の切り替えキーを押したときの動き。通常時は選んだ順の次の配列へ、記録中は導入前と同じく表示中の行き先へ移る。 */
+    private fun onKeymapSwitchKey(target: KeyboardMode) {
+        if (recording) {
+            switchToCategory(target)
+        } else {
+            showKeymap(KeymapRules.next(keymaps, currentKeymap, isPasswordField))
+        }
+    }
+
+    /**
+     * 現在のパスワード状態に応じて、記号面と絵文字一覧のかな配列へ戻るキーの表示を更新する。
      */
     private fun updateSwitchKeys() {
-        if (isPasswordField) {
-            numericSwitchKey?.updateModeSwitch("ABC", KeyboardMode.QWERTY)
-        } else {
-            numericSwitchKey?.updateModeSwitch("あ/A", KeyboardMode.KANA)
-        }
         val kanaKeyVisibility = if (isPasswordField) View.GONE else View.VISIBLE
         kanaSwitchKeyViews.forEach { it.visibility = kanaKeyVisibility }
     }
 
-    /** 英字配列の左下キーの行き先と表示、空白キーの層の表示を、今の層へ合わせる。 */
-    private fun updateQwertyLayerKeys() {
-        qwertyCycleKeyView?.updateModeSwitch(qwertyLayer.cycleLabel, qwertyLayer.cycleTarget)
-        qwertySpaceKeyView?.replaceSpec(KeySpec.Action(KeyboardAction.Space, qwertyLayer.spaceLabel))
+    /** 今のキーマップの面の左下の切り替えキーと、QWERTYの空白キーの表示を、今の状態（記録中か、選択、欄）へ合わせる。 */
+    private fun refreshKeymapKeys() {
+        keymapSwitchKeys[currentKeymap]?.let { key ->
+            val spec = if (recording) {
+                RecordingKeymapRules.switchKey(currentKeymap, isPasswordField)
+            } else {
+                KeymapRules.switchKey(keymaps, currentKeymap, isPasswordField)
+            }
+            key.replaceSpec(spec)
+            val hidden = recording && isPasswordField && RecordingKeymapRules.hidesInPassword(spec)
+            key.visibility = if (hidden) View.GONE else View.VISIBLE
+        }
+        val spaceLabel = if (recording) RecordingKeymapRules.QWERTY_SPACE_LABEL else KeymapRules.qwertySpaceLabel(usesRomaji)
+        qwertySpaceKeyView?.replaceSpec(KeySpec.Action(KeyboardAction.Space, spaceLabel))
     }
 
     /**
-     * 現在のモードに応じてコンテナの表示状態を更新する。
+     * 今のキーマップか記号面に応じてコンテナの表示状態を更新する。
      */
     private fun updateModeVisibility() {
-        kanaContainer.visibility = if (currentMode == KeyboardMode.KANA) View.VISIBLE else View.GONE
-        qwertyContainer.visibility = if (currentMode == KeyboardMode.QWERTY) View.VISIBLE else View.GONE
-        numericContainer.visibility = if (currentMode == KeyboardMode.NUMERIC) View.VISIBLE else View.GONE
-        symbolContainer.visibility = if (currentMode == KeyboardMode.SYMBOL) View.VISIBLE else View.GONE
+        val visible = if (symbolShown) {
+            symbolContainer
+        } else {
+            when (currentKeymap) {
+                Keymap.JA_TWELVE -> kanaContainer
+                Keymap.JA_QWERTY, Keymap.EN_QWERTY -> qwertyContainer
+                Keymap.EN_TWELVE -> englishTwelveContainer
+                Keymap.NUMBER_SIMEJI -> simejiNumberContainer
+                Keymap.NUMBER_CALCULATOR -> numericContainer
+            }
+        }
+        listOf(kanaContainer, qwertyContainer, numericContainer, symbolContainer, englishTwelveContainer, simejiNumberContainer)
+            .forEach { it.visibility = if (it === visible) View.VISIBLE else View.GONE }
     }
 
     /**
@@ -343,7 +438,7 @@ class KeyboardPanel(
 
     /** 機能タイルから一覧を開く。記号面へ切り替えてから、記号面のキーと同じ一覧を出す。 */
     fun openEmojiPickerFromToolbar(recentValues: List<String>) {
-        switchMode(KeyboardMode.SYMBOL)
+        showSymbols()
         showEmojiPicker(recentValues)
     }
 
@@ -450,9 +545,9 @@ class KeyboardPanel(
             addView(spaceKey)
         }
 
-        // Row 3: [あA] [小゛゜] [わ] [、。] [Enter]
+        // Row 3: [左下の切り替え（記録中は「あA」）] [小゛゜] [わ] [、。] [Enter]
         val row3 = createRow(rowHeight).apply {
-            addView(createKey(KeySpec.ModeSwitch("あA", KeyboardMode.QWERTY), 1f))
+            addView(createKeymapSwitchKey(1f, Keymap.JA_TWELVE))
             addView(createKey(KeySpec.Action(KeyboardAction.TransformKana, "小゛゜"), 1f))
             addView(createKey(KeySpec.Kana(KanaKeyType.WA), 1f))
             addView(createKey(KeySpec.Kana(KanaKeyType.PUNCT), 1f))
@@ -504,17 +599,14 @@ class KeyboardPanel(
         row3.addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1.5f))
         container.addView(row3)
 
-        // Row 4: [あ / ローマ字の層ではABC] [Shift] [,] [Space（層の名前）] [.] [←] [→] [Enter]
+        // Row 4: [左下の切り替え（記録中は「あ」）] [Shift] [,] [Space（ローマ字かEnglish）] [.] [←] [→] [Enter]
         val row4 = createRow(rowHeight)
-        val kanaKey = createKey(KeySpec.ModeSwitch(qwertyLayer.cycleLabel, qwertyLayer.cycleTarget), 1.5f)
-        kanaSwitchKeyViews.add(kanaKey)
-        qwertyCycleKeyView = kanaKey
-        row4.addView(kanaKey)
+        row4.addView(createKeymapSwitchKey(1.5f, Keymap.JA_QWERTY, Keymap.EN_QWERTY))
         val shiftKey = createKey(KeySpec.Shift("⇧"), 1f)
         shiftKeyViews.add(shiftKey)
         row4.addView(shiftKey)
         row4.addView(createKey(KeySpec.SimpleText(","), 1f))
-        val spaceKey = createKey(KeySpec.Action(KeyboardAction.Space, qwertyLayer.spaceLabel), 2f)
+        val spaceKey = createKey(KeySpec.Action(KeyboardAction.Space, KeymapRules.qwertySpaceLabel(usesRomaji)), 2f)
         qwertySpaceKeyView = spaceKey
         row4.addView(spaceKey)
         row4.addView(createKey(KeySpec.SimpleText("."), 1f))
@@ -535,7 +627,98 @@ class KeyboardPanel(
     }
 
     /**
-     * 数字・記号テンキーレイアウトを構築する（4行×5列）。
+     * 英字12キーのレイアウトを構築する（5列×4行、5列とも同じ幅）。左右の列の機能キーは日本語12キーと同じ並びにし、
+     * 中央3列は押すたびに文字が変わり、フリックでも選べる英字・記号のキーと「a/A」を置く。
+     */
+    private fun buildEnglishTwelveLayout(): LinearLayout {
+        val container = KanaKeyContainer(context, colors.divider, showDividers = preferences.appearance.keyOpacity == 0).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+        }
+        val rowHeight = rowHeightPx(preferences.rowHeightDp)
+        val (row0Keys, row1Keys, row2Keys) = KeyboardLayoutData.ENGLISH_TWELVE_ROWS
+        val (quoteKey, punctuationKey) = KeyboardLayoutData.ENGLISH_TWELVE_SYMBOL_KEYS
+
+        // Row 0: [記号] [@#/&_] [ABC] [DEF] [削除]
+        container.addView(createRow(rowHeight).apply {
+            addView(createKey(KeySpec.ModeSwitch("記号", KeyboardMode.SYMBOL), 1f))
+            row0Keys.forEach { addView(createKey(KeySpec.Flick(it), 1f)) }
+            addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1f))
+        })
+
+        // Row 1: [←] [GHI] [JKL] [MNO] [→]
+        container.addView(createRow(rowHeight).apply {
+            addView(createArrowKey(-1))
+            row1Keys.forEach { addView(createKey(KeySpec.Flick(it), 1f)) }
+            addView(createArrowKey(1))
+        })
+
+        // Row 2: [123] [PQRS] [TUV] [WXYZ] [空白]
+        container.addView(createRow(rowHeight).apply {
+            addView(createKey(KeySpec.ModeSwitch("123", KeyboardMode.NUMERIC), 1f))
+            row2Keys.forEach { addView(createKey(KeySpec.Flick(it), 1f)) }
+            addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 1f))
+        })
+
+        // Row 3: [左下の切り替え] [a/A] ['"()] [.,?!] [Enter]
+        container.addView(createRow(rowHeight).apply {
+            addView(createKeymapSwitchKey(1f, Keymap.EN_TWELVE))
+            addView(createKey(KeySpec.Action(KeyboardAction.ToggleCase, "a/A"), 1f))
+            addView(createKey(KeySpec.Flick(quoteKey), 1f))
+            addView(createKey(KeySpec.Flick(punctuationKey), 1f))
+            val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1f)
+            enterKeyViews.add(enterKey)
+            addView(enterKey)
+        })
+        return container
+    }
+
+    /**
+     * 数字Simeji型のレイアウトを構築する（5列×4行、5列とも同じ幅）。Pixel 10 ProのSimejiの実測に合わせ、
+     * 左の列に記号・「:」・元に戻す・切り替え、右の列に削除・「-」・空白・改行を置き、下の段の中央3キーだけをフリックにする。
+     */
+    private fun buildSimejiNumberLayout(): LinearLayout {
+        val container = KanaKeyContainer(context, colors.divider, showDividers = preferences.appearance.keyOpacity == 0).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+        }
+        val rowHeight = rowHeightPx(preferences.rowHeightDp)
+        val (digits0, digits1, digits2) = KeyboardLayoutData.SIMEJI_DIGIT_ROWS
+
+        // Row 0: [記号] [1] [2] [3] [削除]
+        container.addView(createRow(rowHeight).apply {
+            addView(createKey(KeySpec.ModeSwitch("記号", KeyboardMode.SYMBOL), 1f))
+            digits0.forEach { addView(createKey(KeySpec.SimpleText(it.toString()), 1f)) }
+            addView(createKey(KeySpec.Action(KeyboardAction.Delete, "⌫"), 1f))
+        })
+
+        // Row 1: [:] [4] [5] [6] [-]
+        container.addView(createRow(rowHeight).apply {
+            addView(createKey(KeySpec.SimpleText(KeyboardLayoutData.SIMEJI_LEFT_SYMBOL, functionStyle = true), 1f))
+            digits1.forEach { addView(createKey(KeySpec.SimpleText(it.toString()), 1f)) }
+            addView(createKey(KeySpec.SimpleText(KeyboardLayoutData.SIMEJI_RIGHT_SYMBOL, functionStyle = true), 1f))
+        })
+
+        // Row 2: [元に戻す] [7] [8] [9] [空白]
+        container.addView(createRow(rowHeight).apply {
+            addView(createKey(KeySpec.Action(KeyboardAction.Undo, "元に戻す"), 1f))
+            digits2.forEach { addView(createKey(KeySpec.SimpleText(it.toString()), 1f)) }
+            addView(createKey(KeySpec.Action(KeyboardAction.Space, "空白"), 1f))
+        })
+
+        // Row 3: [左下の切り替え] [@] [0] [#] [Enter]
+        container.addView(createRow(rowHeight).apply {
+            addView(createKeymapSwitchKey(1f, Keymap.NUMBER_SIMEJI))
+            KeyboardLayoutData.SIMEJI_BOTTOM_KEYS.forEach { addView(createKey(KeySpec.Flick(it), 1f)) }
+            val enterKey = createKey(KeySpec.Action(KeyboardAction.Enter, actionLabel, isAccent = true), 1f)
+            enterKeyViews.add(enterKey)
+            addView(enterKey)
+        })
+        return container
+    }
+
+    /**
+     * 数字・記号テンキーレイアウト（数字 電卓型）を構築する（4行×5列）。
      */
     private fun buildNumericLayout(): LinearLayout {
         val container = LinearLayout(context).apply {
@@ -572,11 +755,9 @@ class KeyboardPanel(
             addView(createKey(KeySpec.SimpleText("+"), 1.0f))
         }
 
-        // Row 3: [かな/英字切替] [記号] [0] [.（長押しで,）] [Enter]
+        // Row 3: [左下の切り替え（記録中は「あ/A」）] [記号] [0] [.（長押しで,）] [Enter]
         val row3 = createRow(rowHeight).apply {
-            val returnKey = createKey(KeySpec.ModeSwitch("あ/A", KeyboardMode.KANA), 1.0f)
-            numericSwitchKey = returnKey
-            addView(returnKey)
+            addView(createKeymapSwitchKey(1.0f, Keymap.NUMBER_CALCULATOR))
 
             addView(createKey(KeySpec.ModeSwitch("記号", KeyboardMode.SYMBOL), 1.0f))
             addView(createKey(KeySpec.SimpleText("0"), 1.0f))
@@ -678,11 +859,22 @@ class KeyboardPanel(
     private fun rowHeightPx(heightDp: Float): Int = (maxOf(heightDp, MIN_TOUCH_DP) * density).toInt()
 
     /**
+     * キーマップ[faceKeymaps]の面の左下に置く切り替えキーを作る。表示と行き先は面を出すたびに[refreshKeymapKeys]で合わせる。
+     */
+    private fun createKeymapSwitchKey(weight: Float, vararg faceKeymaps: Keymap): KeyView {
+        val key = createKey(KeymapRules.switchKey(keymaps, faceKeymaps.first(), isPasswordField), weight, ::onKeymapSwitchKey)
+        faceKeymaps.forEach { keymapSwitchKeys[it] = key }
+        return key
+    }
+
+    /**
      * キー定義（KeySpec）とウェイトからKeyViewを生成し、共通設定とイベントコールバックを結線する。
      * タップ領域（最小高48dp）の確保、アクション中継、パスワード欄での安全なモード切替を集約し、
      * 全キーリスト（allKeyViews）へ登録して一括状態管理を可能にする役割を担う。
+     *
+     * @param onModeSwitch 切り替えキーを押したときの動き。省略すると押したキーの種類の配列か記号面へ移る
      */
-    private fun createKey(spec: KeySpec, weight: Float): KeyView {
+    private fun createKey(spec: KeySpec, weight: Float, onModeSwitch: (KeyboardMode) -> Unit = ::switchToCategory): KeyView {
         val keyView = KeyView(context).apply {
             // 余白を付けず、見た目の隙間はKeyViewが内側へ縮めて描く。隙間を押しても隣のキーが反応する。
             layoutParams = LayoutParams(0, LayoutParams.MATCH_PARENT, weight)
@@ -692,14 +884,8 @@ class KeyboardPanel(
                 onAction = { dispatchAction(it) },
                 onModeSwitch = { targetMode ->
                     onPanelKey()
-                    // 実行時のpassword状態に応じて安全に切り替え
-                    val actualTarget = if (isPasswordField) {
-                        if (targetMode == KeyboardMode.KANA) KeyboardMode.QWERTY else targetMode
-                    } else {
-                        targetMode
-                    }
-                    if (actualTarget == KeyboardMode.QWERTY) qwertyLayer.enterFrom(currentMode)
-                    switchMode(actualTarget)
+                    // password欄でかなを求められた場合の置き換えは、切り替え先を決める規則が行う
+                    onModeSwitch(targetMode)
                 },
                 onShiftToggle = {
                     onPanelKey()
@@ -769,57 +955,6 @@ private class KanaKeyContainer(
 
         /** 区切り線を引く位置（コンテナの幅に対する割合）。 */
         val DIVIDER_COLUMN_FRACTIONS = listOf(0.2f, 0.8f)
-    }
-}
-
-/**
- * 英字配列の層の状態。ローマ字かな入力の欄では英字配列を「ローマ字（かなにする）」と「英字（そのまま）」の二つの層に分け、
- * 切替の順を「かな → ローマ字 → 英字 → かな」にする（Gboardの「かな → 英字」の順に合わせ、ローマ字を間に置く）。
- * Viewから切り離し、設定と欄の組み合わせで切替先が正しいかをJVMテストで守る。
- */
-class QwertyLayerState {
-    // この欄で英字配列のローマ字かな入力を使うか。falseなら英字配列は常に英字で、従来どおり左下キーはかなへ戻る。
-    private var romajiInput = false
-
-    // 設定で、配列切替に英字の層を含めるか。falseならローマ字かな入力の欄の英字配列は常にローマ字の層。
-    private var includesEnglish = true
-
-    // 英字の層を表示中か。ローマ字かな入力の欄でだけ意味を持つ。
-    private var english = false
-
-    /** 英字配列で打った文字をローマ字としてかなにする層か。 */
-    val isRomaji: Boolean
-        get() = romajiInput && !english
-
-    /** 左下キーの行き先。ローマ字の層で英字の層を含むなら英字の層（同じ英字配列）、それ以外はかな。 */
-    val cycleTarget: KeyboardMode
-        get() = if (isRomaji && includesEnglish) KeyboardMode.QWERTY else KeyboardMode.KANA
-
-    /** 左下キーの表示。押すと移る先を示す（他の面の切替キーと同じ表し方）。 */
-    val cycleLabel: String
-        get() = if (cycleTarget == KeyboardMode.QWERTY) "ABC" else "あ"
-
-    /** 空白キーの表示。ローマ字かな入力の欄では今の層の名前を出し、どちらの層かを見分けられるようにする。 */
-    val spaceLabel: String
-        get() = when {
-            !romajiInput -> "space"
-            isRomaji -> "ローマ字"
-            else -> "English"
-        }
-
-    /** 入力欄ごとの可否と設定を反映する。英字の層を含めない設定なら、ローマ字の層へ戻す。 */
-    fun configure(romajiInput: Boolean, includesEnglish: Boolean) {
-        this.romajiInput = romajiInput
-        this.includesEnglish = includesEnglish
-        if (!includesEnglish) english = false
-    }
-
-    /**
-     * 利用者の切替キーで英字配列へ移るときに、どちらの層を出すかを決める。12キーの「あA」からはローマ字の層にし、
-     * 英字配列の左下キーと、記号・数字面の「ABC」からは、英字の層を含めるなら英字の層にする。
-     */
-    fun enterFrom(source: KeyboardMode) {
-        english = source != KeyboardMode.KANA && includesEnglish
     }
 }
 
