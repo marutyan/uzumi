@@ -20,8 +20,9 @@ class SettingsSummaryText(
     /** 「入力」の行。ライブ変換のオン・オフ。 */
     fun input(liveConversion: Boolean): String = inputFormat.format(Locale.ROOT, onOff(liveConversion))
 
-    /** 「キーボード」の行。選んでいるテーマの名前と、キー1段の高さ（dp）。 */
-    fun keyboard(themeName: String, rowHeightDp: Int): String = keyboardFormat.format(Locale.ROOT, themeName, rowHeightDp)
+    /** 「キーボード」の行。選んでいるキーマップの数、テーマの名前、キー1段の高さ（dp）。 */
+    fun keyboard(keymapCount: Int, themeName: String, rowHeightDp: Int): String =
+        keyboardFormat.format(Locale.ROOT, keymapCount, themeName, rowHeightDp)
 
     /** 「キーの操作と音」の行。拡大表示・振動・キー音のオン・オフ。 */
     fun keys(keyPreview: Boolean, vibration: Boolean, keySound: Boolean): String =

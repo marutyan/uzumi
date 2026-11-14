@@ -10,7 +10,7 @@ class SettingsSummaryTextTest {
         on = "オン",
         off = "オフ",
         inputFormat = "ライブ変換 %1\$s",
-        keyboardFormat = "%1\$s・キー%2\$d dp",
+        keyboardFormat = "キーマップ%1\$d個・%2\$s・キー%3\$d dp",
         keysFormat = "拡大表示 %1\$s・振動 %2\$s・キー音 %3\$s",
         clipboardFormat = "履歴 %1\$s",
         developerFormat = "変換エンジン：%1\$s",
@@ -27,8 +27,8 @@ class SettingsSummaryTextTest {
     }
 
     @Test
-    fun keyboardShowsThemeAndKeyHeight() {
-        assertEquals("標準・キー66 dp", text.keyboard("標準", 66))
+    fun keyboardShowsKeymapCountThemeAndKeyHeight() {
+        assertEquals("キーマップ3個・標準・キー66 dp", text.keyboard(3, "標準", 66))
     }
 
     /** 変換エンジンは条件名だけを短く出し、モデルを選んでいなければMozcと出す。 */

@@ -7,12 +7,15 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.util.TypedValue
 import android.view.MotionEvent
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import dev.uzumi.ime.keyboard.Keymap
 import dev.uzumi.ime.keyboard.ThemePalette
 import dev.uzumi.ime.keyboard.ToolbarAction
 import dev.uzumi.ime.keyboard.ToolbarBarViews
@@ -63,14 +66,32 @@ class ScaledPreviewBox(context: Context) : FrameLayout(context) {
 
 /**
  * 見本のキーの面を包み、触れても反応させない入れ物。見本は縮めて描くため、キーの吹き出しなどが正しい位置に出ないことを避ける。
+ * [passThrough]が返すView（見本の左下の切り替えキー）の上で押し始めた操作だけは中へ渡し、選んだ順に配列を切り替えられるようにする。
  */
 class TouchBlockingFrame(context: Context) : FrameLayout(context) {
+    /** 押してよいViewを返す。nullを返す間はすべて受け止める。 */
+    var passThrough: () -> View? = { null }
+
+    // 押し始めた位置が押してよいViewの上で、この一回の操作を中へ渡しているか。
+    private var passing = false
+    private val hit = Rect()
+
     init {
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
     }
 
-    /** 触れた操作をすべてここで受け止め、中のキーへ渡さない。 */
-    override fun dispatchTouchEvent(event: MotionEvent): Boolean = true
+    /** 押してよいViewの上で押し始めた操作だけを中へ渡し、ほかはここで受け止める。 */
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            val target = passThrough()
+            passing = target != null && target.isShown && run {
+                hit.set(0, 0, target.width, target.height)
+                offsetDescendantRectToMyCoords(target, hit)
+                hit.contains(event.x.toInt(), event.y.toInt())
+            }
+        }
+        return if (passing) super.dispatchTouchEvent(event) else true
+    }
 }
 
 /**
@@ -153,6 +174,12 @@ class KeyboardThumbView(context: Context) : View(context) {
     /** 左上に小さく出すアイコン（カスタムのテーマのスポイト）。 */
     var badge: Drawable? = null
 
+    /** キーマップのカードで描く面のキーの並び。nullならテーマのカードと同じ下3段の縮図を描く。 */
+    var keymapRows: List<List<ThumbKey>>? = null
+
+    /** 選んだ順の番号。あれば選択の印を✓の代わりに番号にする（キーマップのカード）。 */
+    var number: Int? = null
+
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val photoPaint = Paint(Paint.FILTER_BITMAP_FLAG)
@@ -163,6 +190,17 @@ class KeyboardThumbView(context: Context) : View(context) {
     private val photoTarget = Rect()
     private val checkIcon: Drawable = requireNotNull(context.getDrawable(R.drawable.ic_check)).mutate()
     private val addIcon: Drawable = requireNotNull(context.getDrawable(R.drawable.ic_add)).mutate()
+    private val numberPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+        textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, NUMBER_TEXT_SP, resources.displayMetrics)
+    }
+
+    /** 高さは、カードの幅に試作の縦横比（140:105）を掛けて決める。 */
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val width = MeasureSpec.getSize(widthMeasureSpec)
+        setMeasuredDimension(width, (width * ASPECT).roundToInt())
+    }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
@@ -189,7 +227,8 @@ class KeyboardThumbView(context: Context) : View(context) {
             } else {
                 canvas.drawColor(colors.background)
             }
-            drawKeys(canvas, colors, if (image != null) PHOTO_KEY_ALPHA else 255)
+            val rows = keymapRows
+            if (rows != null) drawKeymap(canvas, colors, rows) else drawKeys(canvas, colors, if (image != null) PHOTO_KEY_ALPHA else 255)
             badge?.let { drawIcon(canvas, it, colors.text, BADGE_DP, dp(6f) + dp(BADGE_DP) / 2f, dp(6f) + dp(BADGE_DP) / 2f) }
         }
         canvas.restore()
@@ -206,7 +245,14 @@ class KeyboardThumbView(context: Context) : View(context) {
             fill.color = ui.accent
             fill.alpha = 255
             canvas.drawCircle(width / 2f, height / 2f, dp(CHECK_CIRCLE_DP) / 2f, fill)
-            drawIcon(canvas, checkIcon, ui.onAccent, CHECK_ICON_DP, width / 2f, height / 2f)
+            val order = number
+            if (order != null) {
+                numberPaint.color = ui.onAccent
+                val baseline = height / 2f - (numberPaint.descent() + numberPaint.ascent()) / 2f
+                canvas.drawText(order.toString(), width / 2f, baseline, numberPaint)
+            } else {
+                drawIcon(canvas, checkIcon, ui.onAccent, CHECK_ICON_DP, width / 2f, height / 2f)
+            }
         }
     }
 
@@ -237,6 +283,34 @@ class KeyboardThumbView(context: Context) : View(context) {
                 fill.color = colors.accent
                 fill.alpha = alpha
                 canvas.drawCircle(right - keyHeight / 2f, top + keyHeight / 2f, keyHeight / 2f, fill)
+            }
+        }
+    }
+
+    /**
+     * キーマップの面の縮図。左右10%・下12%の余白の中に、面の各段のキーを幅の比のとおりに高さ6dp・間隔2dpで並べる（試作と同じ）。
+     */
+    private fun drawKeymap(canvas: Canvas, colors: ThemePalette, rows: List<List<ThumbKey>>) {
+        val left = width * SIDE_FRACTION
+        val usable = width - 2 * left
+        val bottom = height - width * BOTTOM_FRACTION
+        val gap = dp(KEYMAP_GAP_DP)
+        val keyHeight = dp(KEYMAP_KEY_HEIGHT_DP)
+        val radius = dp(KEY_CORNER_DP)
+        rows.forEachIndexed { rowIndex, keys ->
+            val top = bottom - (rows.size - rowIndex) * keyHeight - (rows.size - 1 - rowIndex) * gap
+            val totalWeight = keys.sumOf { it.weight.toDouble() }.toFloat()
+            val keysWidth = usable - gap * (keys.size - 1)
+            var x = left
+            keys.forEach { key ->
+                val keyWidth = keysWidth * key.weight / totalWeight
+                val color = when (key.kind) {
+                    ThumbKeyKind.KEY -> colors.key
+                    ThumbKeyKind.FUNCTION -> colors.function
+                    ThumbKeyKind.ACCENT -> colors.accent
+                }
+                drawKey(canvas, x, top, x + keyWidth, keyHeight, color, 255, radius)
+                x += keyWidth + gap
             }
         }
     }
@@ -275,7 +349,62 @@ class KeyboardThumbView(context: Context) : View(context) {
         const val SIDE_FRACTION = 0.10f
         const val BOTTOM_FRACTION = 0.12f
 
+        /** 縮図の高さの幅に対する比（試作の140:105）。 */
+        const val ASPECT = 105f / 140f
+
+        /** キーマップの縮図のキーの高さと間隔（dp）、選んだ順の番号の文字の大きさ（sp）。 */
+        const val KEYMAP_KEY_HEIGHT_DP = 6f
+        const val KEYMAP_GAP_DP = 2f
+        const val NUMBER_TEXT_SP = 14f
+
         /** 写真の上のキーの不透明度（0〜255、試作の78%）。 */
         const val PHOTO_KEY_ALPHA = 199
+    }
+}
+
+/** キーマップのカードの縮図に描くキーの種類（文字のキー、機能キー、強調色の改行キー）。 */
+enum class ThumbKeyKind { KEY, FUNCTION, ACCENT }
+
+/** 縮図のキー一つ。[weight]は段の中での幅の比。 */
+data class ThumbKey(val weight: Float, val kind: ThumbKeyKind)
+
+/**
+ * 各キーマップの面のキーの並びを、カードの縮図のために幅の比と種類だけで表す。並びはKeyboardPanelの各面と試作の縮図に合わせた。
+ */
+object KeymapThumbnails {
+    private val K = ThumbKey(1f, ThumbKeyKind.KEY)
+    private val F = ThumbKey(1f, ThumbKeyKind.FUNCTION)
+    private val A = ThumbKey(1f, ThumbKeyKind.ACCENT)
+
+    /** 左右に機能キー、中央に文字のキー3つの12キーの面。最後の段の右は改行キー。 */
+    private val TWELVE = listOf(
+        listOf(F, K, K, K, F),
+        listOf(F, K, K, K, F),
+        listOf(F, K, K, K, F),
+        listOf(F, K, K, K, A),
+    )
+
+    /** QWERTYの面。数字と英字の3段、Shift側の段、空白の段。 */
+    private val QWERTY = listOf(
+        List(10) { K },
+        List(10) { K },
+        List(10) { K },
+        listOf(ThumbKey(1.5f, ThumbKeyKind.FUNCTION)) + List(7) { K } + ThumbKey(1.5f, ThumbKeyKind.FUNCTION),
+        listOf(ThumbKey(1.5f, ThumbKeyKind.FUNCTION), F, K, ThumbKey(2f, ThumbKeyKind.KEY), K, F, F, ThumbKey(1.5f, ThumbKeyKind.ACCENT)),
+    )
+
+    /** 電卓と同じ並びの数字の面。 */
+    private val CALCULATOR = listOf(
+        listOf(K, K, K, K, F),
+        listOf(K, K, K, K, K),
+        listOf(K, K, K, F, K),
+        listOf(F, F, K, K, A),
+    )
+
+    /** [keymap]の面の縮図の並び。 */
+    fun rows(keymap: Keymap): List<List<ThumbKey>> = when (keymap) {
+        Keymap.JA_TWELVE, Keymap.EN_TWELVE, Keymap.NUMBER_SIMEJI -> TWELVE
+        Keymap.JA_QWERTY, Keymap.EN_QWERTY -> QWERTY
+        Keymap.NUMBER_CALCULATOR -> CALCULATOR
     }
 }
