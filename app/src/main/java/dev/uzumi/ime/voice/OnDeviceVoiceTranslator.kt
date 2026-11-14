@@ -171,7 +171,16 @@ class OnDeviceVoiceTranslator(
                 }
             }
             val stats = MicrophoneStats()
-            val request = SpeechTranslatorRequest.builder(microphoneAudio(source, stopSignal, stats)).build()
+            // 翻訳器が音声を受け取らなくなったら、受け渡し側は止まったまま例外を読めないので、ここから失敗として終える。
+            val onStalled = {
+                postToMain {
+                    if (isActiveGeneration(generation)) {
+                        sessionJob?.cancel()
+                        fail(generation, VoiceInputError.AUDIO)
+                    }
+                }
+            }
+            val request = SpeechTranslatorRequest.builder(microphoneAudio(source, stopSignal, stats, onStalled)).build()
             translator.startTranslation(request)
                 // 完了の応答の後に流れが閉じない場合に備え、完了を受け取った時点で読むのをやめる。
                 .transformWhile { response ->
@@ -367,13 +376,14 @@ class OnDeviceVoiceTranslator(
      * マイクの音声を100ミリ秒ずつ翻訳器へ渡す流れ。[stopSignal]が立ったらマイクを閉じ、
      * 最後の文を確定させるための無音を実時間の速さで流してから流れを閉じる。
      * 録音は翻訳器への受け渡しと切り離し、間に上限つきの待ち行列を置く。翻訳器が受け取りを止めても録音のthreadは塞がらず、
-     * 待ち行列があふれた時点でマイクを閉じて失敗として終える（マイクが開いたまま残らないようにするため）。
+     * 待ち行列があふれた時点でマイクを閉じ、[onStalled]で失敗として終える（マイクが開いたまま残らないようにするため）。
      * 録音権限は[start]で確かめた後にだけ呼ばれる。
      */
     private fun microphoneAudio(
         source: Locale,
         stopSignal: AtomicBoolean,
         stats: MicrophoneStats,
+        onStalled: () -> Unit,
     ): Flow<TranslationAudio> = channelFlow {
         val chunks = Channel<ByteArray>(MICROPHONE_QUEUE_CHUNKS)
         launch(Dispatchers.IO) {
@@ -383,6 +393,9 @@ class OnDeviceVoiceTranslator(
                     if (chunks.trySend(chunk).isFailure) throw TranslatorStalledException()
                 }
                 chunks.close()
+            } catch (error: TranslatorStalledException) {
+                chunks.close(error)
+                onStalled()
             } catch (error: Throwable) {
                 chunks.close(error)
             }

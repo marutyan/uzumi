@@ -1528,7 +1528,13 @@ class UzumiInputMethodService : InputMethodService() {
      */
     internal fun commitVoiceText(text: String): Boolean {
         if (text.isEmpty()) return false
-        // 変換中の文字もカーソルの直前に含まれるので、確定前に読んでよい。
+        // 空白の要否は、未確定の入力（ローマ字の途中の「n」など）と変換を確定した後の、実際の挿入位置の直前の文字で決める。
+        // 確定前に読むと、後で「ん」に変わる「n」を英字と見て「ん Hello.」のように余分な空白を足してしまう。
+        val current = session?.takeIf { it.isActive }
+        if (current != null) {
+            if (!current.finishPendingInput()) return false
+            if (current.hasComposition && !current.commitComposition()) return false
+        }
         val previous = currentInputConnection?.getTextBeforeCursor(1, 0)?.lastOrNull()
         return commitVoiceTextAsIs(VoiceTextSpacing.leadingSeparator(previous, text) + text)
     }
