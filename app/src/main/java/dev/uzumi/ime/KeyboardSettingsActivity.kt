@@ -258,23 +258,11 @@ class KeyboardSettingsActivity : Activity() {
     }
 
     /**
-     * 最近コピーした文字の段の見本。キーボードと同じく、先頭の段の左に履歴のボタンを置き、見本の文字を札で並べる。
-     * 履歴がオフなら、キーボードと同じ案内を出す。
+     * 最近コピーした文字の段の見本。キーボードと同じく、先頭の段の左に履歴のボタンを置き、空のときの案内を出す。
+     * 例の文字を札で並べると本物の履歴と見分けにくいため、札は並べない。履歴がオフなら、キーボードと同じオフの案内を出す。
      */
     private fun addClipboardRows(area: LinearLayout, barViews: CandidateBarViews, rows: Int) {
         val historyOn = UzumiSettings.isClipboardHistoryEnabled(this)
-        val chips = if (historyOn) {
-            SAMPLE_CLIPBOARD.map { text ->
-                barViews.chip(text, null, emphasized = false, onClick = null).apply {
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
-                    maxWidth = resources.displayMetrics.widthPixels / 2
-                }
-            }
-        } else {
-            emptyList()
-        }
-        val lines = ToolbarPreferences.splitAcrossRows(chips, rows)
         repeat(rows) { rowIndex ->
             val line = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -288,9 +276,9 @@ class KeyboardSettingsActivity : Activity() {
                     }
                     if (!historyOn) visibility = View.INVISIBLE
                 })
-                if (!historyOn) line.addView(barViews.hint(getString(R.string.clipboard_row_history_off)))
+                val hint = if (historyOn) R.string.clipboard_row_empty else R.string.clipboard_row_history_off
+                line.addView(barViews.hint(getString(hint)))
             }
-            lines.getOrNull(rowIndex).orEmpty().forEach(line::addView)
             area.addView(HorizontalScrollView(this).apply {
                 isHorizontalScrollBarEnabled = false
                 addView(line, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.MATCH_PARENT))
@@ -720,8 +708,6 @@ class KeyboardSettingsActivity : Activity() {
         const val SAMPLE_READING = "へんかん"
         val SAMPLE_CANDIDATES = listOf("変換", "返還", "変換する", "変換候補", "へんかん", "ヘンカン", "返還金", "変換キー", "変換器")
 
-        /** 見本の最近コピーした文字。 */
-        val SAMPLE_CLIPBOARD = listOf("15時から会議室B", "https://example.com/uzumi", "〒150-0002", "よろしくお願いします")
     }
 }
 
