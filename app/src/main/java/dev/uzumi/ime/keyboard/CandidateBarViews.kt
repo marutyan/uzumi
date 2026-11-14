@@ -216,8 +216,8 @@ class CandidateBarViews(private val context: Context) {
 }
 
 /** 候補一つを描くTextView。[dividerColor]があれば、左端に上下14dp内側の縦の区切り線を描く。 */
-// 色を引数に取るプログラム生成専用のViewで、XMLからは生成しない。
-@SuppressLint("ViewConstructor")
+// 色を引数に取るプログラム生成専用のViewで、XMLからは生成しない。キーボードはAppCompatのテーマを使わないため、標準のTextViewを継ぐ。
+@SuppressLint("ViewConstructor", "AppCompatCustomView")
 private class CandidateItemView(context: Context, private val dividerColor: Int?) : TextView(context) {
     private val density = context.resources.displayMetrics.density
     private val dividerPaint = Paint().apply {
