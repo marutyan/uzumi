@@ -56,6 +56,7 @@ object UzumiSettings {
     private const val KEY_CANDIDATE_DIVIDERS = "candidate_dividers"
     private const val KEY_TOOLBAR_ROWS = "toolbar_rows"
     private const val KEY_CANDIDATE_ROWS = "candidate_rows"
+    private const val KEY_TOOLBAR_ON_TOP = "toolbar_on_top"
     // クリップボード履歴の表示・保存を切り替えるキー。
     private const val KEY_CLIPBOARD_HISTORY_ENABLED = "clipboard_history_enabled"
     // 履歴を最後にONへ戻した時刻（ミリ秒）。これより前のコピーは保存しない。
@@ -189,6 +190,12 @@ object UzumiSettings {
             apply = { context, value -> setCandidateRows(context, value.intOrNull()!!) },
         ),
         BackupSettingDescriptor(
+            key = "toolbarOnTop",
+            capture = { BackupJsonValue.BooleanValue(toolbarPreferences(it).toolbarOnTop) },
+            normalize = { value -> value as? BackupJsonValue.BooleanValue },
+            apply = { context, value -> setToolbarOnTop(context, value.booleanValue()!!) },
+        ),
+        BackupSettingDescriptor(
             key = "romajiInput",
             capture = { BackupJsonValue.BooleanValue(isRomajiInputEnabled(it)) },
             normalize = { value -> value as? BackupJsonValue.BooleanValue },
@@ -279,7 +286,7 @@ object UzumiSettings {
         editor.apply()
     }
 
-    /** バーの並び（中央、右端、置き場）と、機能バー・候補バーの段数、候補の区切り線を読む。導入前の保存値は移行して読む。 */
+    /** バーの並び（中央、右端、置き場）と、機能バー・候補バーの段数、候補の区切り線、機能バーの段を読む。導入前の保存値は移行して読む。 */
     fun toolbarPreferences(context: Context): ToolbarPreferences {
         val prefs = preferences(context)
         return ToolbarPreferences.fromStorage(
@@ -290,6 +297,7 @@ object UzumiSettings {
             toolbarRows = prefs.getInt(KEY_TOOLBAR_ROWS, ToolbarPreferences.DEFAULT_ROWS),
             candidateRows = prefs.getInt(KEY_CANDIDATE_ROWS, ToolbarPreferences.DEFAULT_ROWS),
             candidateDividers = prefs.getBoolean(KEY_CANDIDATE_DIVIDERS, true),
+            toolbarOnTop = prefs.getBoolean(KEY_TOOLBAR_ON_TOP, true),
         ).normalized()
     }
 
@@ -357,6 +365,9 @@ object UzumiSettings {
     fun setToolbarRows(context: Context, rows: Int) {
         preferences(context).edit().putInt(KEY_TOOLBAR_ROWS, ToolbarPreferences.normalizeRows(rows)).apply()
     }
+
+    /** 入力していない間の機能バーを上の段に置くか（falseなら下の段）を保存する。 */
+    fun setToolbarOnTop(context: Context, onTop: Boolean) = putBoolean(context, KEY_TOOLBAR_ON_TOP, onTop)
 
     /** 候補バーの段数を保存する。 */
     fun setCandidateRows(context: Context, rows: Int) {

@@ -30,6 +30,7 @@ import android.widget.FrameLayout
 import android.widget.Toast
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.inline.InlineContentView
 import android.widget.inline.InlinePresentationSpec
 import androidx.autofill.inline.UiVersions
@@ -56,6 +57,7 @@ import dev.uzumi.ime.clipboard.ClipboardHistoryStores
 import dev.uzumi.ime.dictionary.UserDictionaries
 import dev.uzumi.ime.dictionary.UserDictionaryCategory
 import dev.uzumi.ime.clipboard.RecentClipboard
+import dev.uzumi.ime.clipboard.RecentClipboardRules
 import dev.uzumi.ime.editor.AndroidInputConnectionPort
 import dev.uzumi.ime.editor.EditorSession
 import dev.uzumi.ime.editor.EditPanelAction
@@ -1065,6 +1067,8 @@ class UzumiInputMethodService : InputMethodService() {
             if (clipboardHistoryPanel?.isShowing == true) {
                 refreshClipboardHistoryPanel()
             }
+            // 最近コピーした文字の段からも、期限の切れた履歴を消す。
+            if (inputViewVisible) refreshCandidates()
             scheduleClipboardHistoryExpiry()
         }
         clipboardHistoryExpiry = expiry
@@ -1123,7 +1127,9 @@ class UzumiInputMethodService : InputMethodService() {
         // 評価の記録中は予測を出さず、操作数を予測導入前と同じ条件で数える。
         val predictionsShown = !evaluation.isRecording
         if (predictionsShown) current?.refreshPredictions()
-        if (current?.hasComposition != true) addClipboardSuggestion(current, leading)
+        val preferences = UzumiSettings.toolbarPreferences(this)
+        // 最近コピーした文字の段があるときは、貼り付けの提案もその段に出し、機能バーを隠さない。
+        if (current?.hasComposition != true && clipboardRowCount(preferences) == 0) addClipboardSuggestion(current, leading)
         if (current?.canUndoDeletion == true) {
             leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.line_delete_undo_description), true) {
                 evaluation.record(OperationKind.CORRECTION)
@@ -1156,7 +1162,6 @@ class UzumiInputMethodService : InputMethodService() {
             inlineCount = inlineSuggestions.size,
         ))
         val grid = candidateGrid
-        val preferences = UzumiSettings.toolbarPreferences(this)
         val availableCandidateWidthDp = (resources.configuration.screenWidthDp - CANDIDATE_FIXED_WIDTH_DP)
             .coerceAtLeast(MIN_CANDIDATE_SLOT_DP)
         val maxItemsPerRow = availableCandidateWidthDp / MIN_CANDIDATE_SLOT_DP
@@ -1332,11 +1337,115 @@ class UzumiInputMethodService : InputMethodService() {
         )
         val right = toolbar.rightButton(preferences.rightAction?.let { toolbarItem(it, current) }) { onToolbarItemTap(it) }
         idle.removeAllViews()
-        idle.addView(toolbar.assemble(left, center, right),
-            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        val toolbarView = toolbar.assemble(left, center, right)
+        val clipRows = clipboardRowCount(preferences)
+        if (clipRows == 0) {
+            idle.addView(toolbarView,
+                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        } else {
+            // 機能バーの段と最近コピーした文字の段を、段数の比で縦に分ける。上下の順は設定で選ぶ。
+            val clipView = clipboardRows(current, clipRows)
+            val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val toolbarParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, rows.toFloat())
+            val clipParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, clipRows.toFloat())
+            if (preferences.toolbarOnTop) {
+                column.addView(toolbarView, toolbarParams)
+                column.addView(clipView, clipParams)
+            } else {
+                column.addView(clipView, clipParams)
+                column.addView(toolbarView, toolbarParams)
+            }
+            idle.addView(column,
+                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }
         candidateBar?.visibility = View.GONE
         idle.visibility = View.VISIBLE
         if (toolbarMode == ToolbarMode.TILES) toolbarPanel?.update(tileItems(current, preferences))
+    }
+
+    /**
+     * 入力していない間に、機能バーの段を除いて最近コピーした文字を並べる段の数。候補の段数が機能バーより多いときだけ1以上になる。
+     * 評価の記録中は、操作の条件を変えないため0にし、これまでどおり機能バーだけを出す。
+     */
+    private fun clipboardRowCount(preferences: ToolbarPreferences): Int {
+        if (evaluation.isRecording) return 0
+        val (toolbarRows, candidateRows) = effectiveBarRows(preferences)
+        return (maxOf(toolbarRows, candidateRows) - toolbarRows).coerceAtLeast(0)
+    }
+
+    /**
+     * 最近コピーした文字を[rows]段に並べる。コピーして間もない文字（貼り付けの提案）を強調して先頭に置き、続けて履歴を新しい順に置く。
+     * 押すとその文字を貼り付ける。履歴を出せない欄（パスワード欄など）では提案だけを出す。先頭の段の左端のボタンで履歴の一覧を開く。
+     */
+    private fun clipboardRows(current: EditorSession?, rows: Int): View {
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val views = barViews ?: return column
+        val suggestion = clipboardSuggestion?.takeIf { hasCurrentClipboardSuggestion(current) }
+        val historyShown = canShowClipboardHistory()
+        val sessionEpoch = current?.sessionEpoch
+        // 提案と同じコピーは履歴にも入っているため、コピーした時刻で見分けて二重に出さない。
+        val history = if (historyShown && sessionEpoch != null) {
+            clipboardHistoryStore.readItems().filter { it.copiedAtMillis != suggestion?.identity?.timestamp }
+        } else {
+            emptyList()
+        }
+        val chips = buildList<View> {
+            if (suggestion != null) {
+                add(views.chip(getString(R.string.clipboard_suggestion_label, suggestion.label),
+                    getString(R.string.clipboard_suggestion_description), true) {
+                    evaluation.record(OperationKind.OTHER)
+                    pasteFromClipboard()
+                }.apply { limitClipboardChipWidth(this) })
+            }
+            history.forEach { item ->
+                val label = RecentClipboardRules.preview(item.text, RecentClipboardRules.DEFAULT_PREVIEW_CODE_POINTS) ?: return@forEach
+                add(views.chip(label, getString(R.string.clipboard_row_item_description, label), false) {
+                    evaluation.record(OperationKind.OTHER)
+                    pasteClipboardHistoryItem(item, sessionEpoch!!)
+                }.apply { limitClipboardChipWidth(this) })
+            }
+        }
+        val emptyHint = when {
+            chips.isNotEmpty() -> null
+            historyShown -> getString(R.string.clipboard_row_empty)
+            !UzumiSettings.isClipboardHistoryEnabled(this) -> getString(R.string.clipboard_row_history_off)
+            else -> null
+        }
+        val lines = ToolbarPreferences.splitAcrossRows(chips, rows).ifEmpty { listOf(emptyList()) }
+        repeat(rows) { rowIndex ->
+            val line = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            if (rowIndex == 0) {
+                line.addView(views.iconButton(R.drawable.ic_content_paste, getString(R.string.toolbar_clipboard_history)) {
+                    handleToolbarAction(ToolbarAction.CLIPBOARD_HISTORY)
+                }.apply {
+                    layoutParams = (layoutParams as? LinearLayout.LayoutParams)?.apply {
+                        gravity = Gravity.CENTER_VERTICAL
+                        marginStart = (UNDO_BUTTON_MARGIN_DP * resources.displayMetrics.density).toInt()
+                    }
+                    if (!historyShown) visibility = View.INVISIBLE
+                })
+                emptyHint?.let { line.addView(views.hint(it)) }
+            }
+            lines.getOrNull(rowIndex).orEmpty().forEach(line::addView)
+            column.addView(HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(line, FrameLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                ))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        }
+        return column
+    }
+
+    /** 長いコピーでも一画面に複数並ぶよう、札の幅を画面幅の半分までに抑えて末尾を省略する。 */
+    private fun limitClipboardChipWidth(chip: TextView) {
+        chip.maxLines = 1
+        chip.ellipsize = TextUtils.TruncateAt.END
+        chip.maxWidth = resources.displayMetrics.widthPixels / 2
     }
 
     /** バーの領域を設定した段数の高さで表示する。候補や機能が少なくても高さを変えず、キーボードの上下動を防ぐ。 */

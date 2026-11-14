@@ -101,6 +101,9 @@
     <string name="toolbar_templates">定型文</string>
     <string name="clipboard_suggestion_label">%1$s</string>
     <string name="clipboard_suggestion_description">コピーした文字を貼り付け</string>
+    <string name="clipboard_row_item_description">%1$sを貼り付け</string>
+    <string name="clipboard_row_empty">コピーした文字がここに出ます</string>
+    <string name="clipboard_row_history_off">クリップボードの履歴はオフです</string>
     <string name="clipboard_suggestion_dismiss">貼り付けの提案を閉じる</string>
     <string name="toolbar_tile_label">%1$s\n%2$s</string>
     <string name="toolbar_undo">元に戻す</string>
@@ -143,6 +146,8 @@
     <string name="settings_toolbar_rows">機能バーの段数</string>
     <string name="settings_candidate_rows">候補バーの段数</string>
     <string name="settings_candidate_dividers">候補の区切り線</string>
+    <string name="settings_toolbar_on_top">機能バーを上の段に置く</string>
+    <string name="settings_toolbar_on_top_description">候補の段数が機能バーより多いとき、入力していない間は残りの段に最近コピーした文字を並べます。オフにすると機能バーを下の段に置きます。</string>
     <string name="settings_candidate_dividers_description">候補の間に縦の区切り線を引きます。オフでも候補の幅と余白は変わりません。</string>
     <string name="settings_clipboard_history">クリップボード履歴</string>
     <string name="settings_clipboard_history_description">コピーした文字をこの端末に保存します。キーボードを閉じている間にほかのアプリでコピーした文字も、次にキーボードを開いたときに保存します（機密の印が付いたコピーは除きます）。固定していない履歴は1時間後に削除します。オフにすると固定したものを含めて履歴を消します。パスワード欄など個人の学習を禁じた欄では保存しません。</string>

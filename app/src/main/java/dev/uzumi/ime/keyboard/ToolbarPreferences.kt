@@ -3,7 +3,7 @@ package dev.uzumi.ime.keyboard
 import dev.uzumi.ime.R
 
 /**
- * 機能バーの並びと、機能バー・候補バーの表示段数、候補の区切り線の有無を表す。
+ * 機能バーの並びと、機能バー・候補バーの表示段数、候補の区切り線の有無、機能バーを置く段を表す。
  * 機能は「バーの中央」「バーの右端」「機能タイルの置き場」のどれか一か所に必ず置き、保存値から読むたびに矛盾を直す。
  */
 data class ToolbarPreferences(
@@ -17,6 +17,11 @@ data class ToolbarPreferences(
     val candidateRows: Int = DEFAULT_ROWS,
     /** 候補の間に縦の区切り線を引くか。 */
     val candidateDividers: Boolean = true,
+    /**
+     * 候補の段数が機能バーより多いとき、入力していない間の機能バーを上の段に置くか。
+     * 機能バーでない段には、最近コピーした文字を並べる。
+     */
+    val toolbarOnTop: Boolean = true,
 ) {
     /** 三か所の並びをまとめた値。ドラッグでの並べ替えはこちらで行う。 */
     val layout: ToolbarLayout
@@ -155,8 +160,8 @@ data class ToolbarPreferences(
         /** 機能の並びを保存する文字列にする。 */
         fun encodeActions(actions: List<ToolbarAction>): String = actions.joinToString(",") { it.name }
 
-        /** 値を[requestedRows]の段数へ、空段を作らず先頭から均等に分ける。 */
-        private fun <T> splitAcrossRows(values: List<T>, requestedRows: Int): List<List<T>> {
+        /** 値を[requestedRows]の段数へ、空段を作らず先頭から均等に分ける。候補・機能・最近コピーした文字の段分けに使う。 */
+        fun <T> splitAcrossRows(values: List<T>, requestedRows: Int): List<List<T>> {
             if (values.isEmpty()) return emptyList()
             val rowCount = normalizeRows(requestedRows).coerceAtMost(values.size)
             val baseSize = values.size / rowCount

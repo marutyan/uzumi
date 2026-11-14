@@ -100,6 +100,8 @@ class SettingsActivity : Activity() {
         ))
         content.addView(switchRow(R.string.settings_candidate_dividers, R.string.settings_candidate_dividers_description,
             UzumiSettings.toolbarPreferences(this).candidateDividers) { UzumiSettings.setCandidateDividers(this, it) })
+        content.addView(switchRow(R.string.settings_toolbar_on_top, R.string.settings_toolbar_on_top_description,
+            UzumiSettings.toolbarPreferences(this).toolbarOnTop) { UzumiSettings.setToolbarOnTop(this, it) })
         content.addView(switchRow(
             R.string.settings_clipboard_history,
             R.string.settings_clipboard_history_description,
