@@ -1035,6 +1035,7 @@ class UzumiInputMethodService : InputMethodService() {
         if (!canShowClipboardHistory() || session?.sessionEpoch != sessionEpoch) return
         clipboardHistoryStore.setPinned(item.text, pinned)
         refreshClipboardHistoryPanel()
+        refreshCandidates()
     }
 
     /** 選んだ履歴を削除し、現在clipの処理済み識別情報を維持する。 */
@@ -1042,6 +1043,8 @@ class UzumiInputMethodService : InputMethodService() {
         if (!canShowClipboardHistory() || session?.sessionEpoch != sessionEpoch) return
         clipboardHistoryStore.delete(item.text)
         refreshClipboardHistoryPanel()
+        // 消した履歴を、最近コピーした文字の段からも消す。
+        refreshCandidates()
     }
 
     /** 全削除前に確認し、同じ現在clipが次回表示時に再追加されないよう識別情報を残す。 */
@@ -1052,6 +1055,7 @@ class UzumiInputMethodService : InputMethodService() {
                 clipboardHistoryStore.clearAll(recentClipboard?.currentHistoryIdentity())
                 refreshClipboardHistoryPanel()
                 scheduleClipboardHistoryExpiry()
+                refreshCandidates()
             }
         }
     }
@@ -1129,6 +1133,7 @@ class UzumiInputMethodService : InputMethodService() {
         if (predictionsShown) current?.refreshPredictions()
         val preferences = UzumiSettings.toolbarPreferences(this)
         // 最近コピーした文字の段があるときは、貼り付けの提案もその段に出し、機能バーを隠さない。
+        // 段を出さずに候補バーを出す場合は、showCandidateBarで候補バーへ提案を足す。
         if (current?.hasComposition != true && clipboardRowCount(preferences) == 0) addClipboardSuggestion(current, leading)
         if (current?.canUndoDeletion == true) {
             leading.addView(views.chip(getString(R.string.line_delete_undo), getString(R.string.line_delete_undo_description), true) {
@@ -1299,6 +1304,8 @@ class UzumiInputMethodService : InputMethodService() {
             }
             if (undo != null) leading.addView(undo, 0)
         }
+        // 最近コピーした文字の段を使う設定でも、候補バーを出す間はその段が見えないため、貼り付けの提案を候補バーの左に置く。
+        if (!composing && clipboardRowCount(preferences) > 0) addClipboardSuggestion(current, leading, index = 0)
         if (!composing) {
             leading.addView(toolbar.leftButton(ToolbarMode.NONE, ::openToolbarTiles), 0,
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT))
@@ -1441,7 +1448,7 @@ class UzumiInputMethodService : InputMethodService() {
         return column
     }
 
-    /** 長いコピーでも一画面に複数並ぶよう、札の幅を画面幅の半分までに抑えて末尾を省略する。 */
+    /** 長いコピーでもInline候補やほかの札の幅を残すよう、札の幅を画面幅の半分までに抑えて末尾を省略する。 */
     private fun limitClipboardChipWidth(chip: TextView) {
         chip.maxLines = 1
         chip.ellipsize = TextUtils.TruncateAt.END
@@ -1882,23 +1889,18 @@ class UzumiInputMethodService : InputMethodService() {
         current.selectPrediction(result.request, candidate)
     }
 
-    /** 待機中のクリップボード提案を予測候補より左へ置き、本文貼付と提案解除を別々に押せるようにする。 */
-    private fun addClipboardSuggestion(current: EditorSession?, leading: LinearLayout) {
+    /** 待機中のクリップボード提案を予測候補より左（[index]の位置）へ置き、本文貼付と提案解除を別々に押せるようにする。 */
+    private fun addClipboardSuggestion(current: EditorSession?, leading: LinearLayout, index: Int = leading.childCount) {
         val views = barViews ?: return
         val suggestion = clipboardSuggestion?.takeIf { hasCurrentClipboardSuggestion(current) } ?: return
         leading.addView(views.chip(getString(R.string.clipboard_suggestion_label, suggestion.label),
             getString(R.string.clipboard_suggestion_description), true) {
             evaluation.record(OperationKind.OTHER)
             pasteFromClipboard()
-        }.apply {
-            // 長い本文でもInline候補の幅を残すため、提案は画面幅の半分までに抑えて末尾を省略する。
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            maxWidth = resources.displayMetrics.widthPixels / 2
-        })
+        }.apply { limitClipboardChipWidth(this) }, index)
         leading.addView(views.iconButton(R.drawable.ic_close, getString(R.string.clipboard_suggestion_dismiss)) {
             dismissClipboardSuggestion()
-        })
+        }, index + 1)
     }
 
     /** [index]番目の候補を選ぶ。表示したときと別の編集セッションになっていれば何もしない。 */
