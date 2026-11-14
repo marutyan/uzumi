@@ -1,5 +1,6 @@
 package dev.uzumi.ime
 
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.ClipboardManager
 import android.graphics.drawable.Icon
@@ -104,12 +105,15 @@ import dev.uzumi.ime.neural.NeuralRuntimeConnection
 import dev.uzumi.ime.neural.NeuralSelection
 import dev.uzumi.ime.neural.shouldRecreateNeuralConnection
 import dev.uzumi.ime.voice.OnDeviceVoiceRecognizer
+import dev.uzumi.ime.voice.OnDeviceVoiceTranslator
 import dev.uzumi.ime.voice.VoiceInputError
 import dev.uzumi.ime.voice.VoiceInputListener
 import dev.uzumi.ime.voice.VoiceInputServiceBridge
 import dev.uzumi.ime.voice.VoiceInputState
+import dev.uzumi.ime.voice.VoiceModelDownloadState
 import dev.uzumi.ime.voice.VoicePermissionActivity
 import dev.uzumi.ime.voice.VoiceStartStatus
+import dev.uzumi.ime.voice.VoiceTranslationDirection
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -198,8 +202,10 @@ class UzumiInputMethodService : InputMethodService() {
     // 入力先の欄がUzumi自身の画面か、とその欄のview id。評価用の状態の確認口が、試験欄への入力かを確かめるために読む。
     private var editorInOwnApp = false
     private var editorFieldId = View.NO_ID
-    // 端末内音声入力の認識器と現在の途中経過・状態。UI担当が後から接続できるようlistenerでも通知する。
+    // 端末内音声入力の認識器・音声翻訳器と現在の途中経過・状態。UI担当が後から接続できるようlistenerでも通知する。
+    // 認識器と翻訳器は同時に動かさないため、状態と途中経過は一つずつだけ持つ。
     private var voiceRecognizer: OnDeviceVoiceRecognizer? = null
+    private var voiceTranslator: OnDeviceVoiceTranslator? = null
     internal var voiceInputState: VoiceInputState = VoiceInputState.IDLE
         private set
     internal var voicePartialText: String = ""
@@ -262,40 +268,48 @@ class UzumiInputMethodService : InputMethodService() {
         worker.start()
         EvaluationStatusSource.provider = ::evaluationStatus
         EvaluationStatusSource.neuralMemoryRequester = { neuralConnection?.requestMemory() }
-        voiceRecognizer = OnDeviceVoiceRecognizer(
-            context = this,
-            listener = object : VoiceInputListener {
-                override fun onStateChanged(state: VoiceInputState) {
-                    voiceInputState = state
-                    if (state != VoiceInputState.LISTENING && state != VoiceInputState.STOPPING) {
-                        voicePartialText = ""
-                    }
-                    voiceInputObserver?.onStateChanged(state)
-                }
-
-                override fun onPartialResult(text: String) {
-                    voicePartialText = text
-                    voiceInputObserver?.onPartialResult(text)
-                }
-
-                override fun onFinalResult(text: String) {
+        // 音声入力と音声翻訳は、確定した文を入れる処理とUIへの通知を共有する。
+        val voiceListener = object : VoiceInputListener {
+            override fun onStateChanged(state: VoiceInputState) {
+                voiceInputState = state
+                if (state != VoiceInputState.LISTENING && state != VoiceInputState.STOPPING) {
                     voicePartialText = ""
-                    if (text.isNotEmpty()) commitVoiceText(text)
-                    voiceInputObserver?.onFinalResult(text)
                 }
+                voiceInputObserver?.onStateChanged(state)
+            }
 
-                override fun onError(error: VoiceInputError) {
-                    voicePartialText = ""
-                    voiceInputObserver?.onError(error)
-                }
+            override fun onPartialResult(text: String) {
+                voicePartialText = text
+                voiceInputObserver?.onPartialResult(text)
+            }
 
-                override fun onCancelled() {
-                    voicePartialText = ""
-                    voiceInputObserver?.onCancelled()
-                }
-            },
-        )
+            override fun onFinalResult(text: String) {
+                voicePartialText = ""
+                if (text.isNotEmpty()) commitVoiceText(text)
+                voiceInputObserver?.onFinalResult(text)
+            }
+
+            override fun onError(error: VoiceInputError) {
+                voicePartialText = ""
+                voiceInputObserver?.onError(error)
+            }
+
+            override fun onCancelled() {
+                voicePartialText = ""
+                voiceInputObserver?.onCancelled()
+            }
+
+            override fun onModelDownloadStateChanged(
+                direction: VoiceTranslationDirection,
+                state: VoiceModelDownloadState,
+            ) {
+                voiceInputObserver?.onModelDownloadStateChanged(direction, state)
+            }
+        }
+        voiceRecognizer = OnDeviceVoiceRecognizer(context = this, listener = voiceListener)
+        voiceTranslator = OnDeviceVoiceTranslator(context = this, listener = voiceListener)
         VoiceInputServiceBridge.starter = ::startVoiceInput
+        VoiceInputServiceBridge.translationStarter = ::startVoiceTranslation
         VoiceInputServiceBridge.stopper = ::stopVoiceInput
         VoiceInputServiceBridge.canceller = ::cancelVoiceInput
         scheduleClipboardHistoryExpiry()
@@ -306,10 +320,13 @@ class UzumiInputMethodService : InputMethodService() {
         EvaluationStatusSource.provider = null
         EvaluationStatusSource.neuralMemoryRequester = null
         VoiceInputServiceBridge.starter = null
+        VoiceInputServiceBridge.translationStarter = null
         VoiceInputServiceBridge.stopper = null
         VoiceInputServiceBridge.canceller = null
         voiceRecognizer?.destroy()
         voiceRecognizer = null
+        voiceTranslator?.destroy()
+        voiceTranslator = null
         stopClipboardObservation()
         clipboardHistoryExpiry?.let(mainHandler::removeCallbacks)
         clipboardHistoryExpiry = null
@@ -645,7 +662,11 @@ class UzumiInputMethodService : InputMethodService() {
     /**
      * Autofill serviceへ渡すInline候補の要求を作る。札の配色はキーボードのライト／ダークに合わせ、高さは候補バーに収める。
      * OSの描画側がv1の見た目に対応しない場合はnullを返し、従来のAutofill表示に任せる。
+     * `ViewStyle.Builder`の`setBackground`・`setPadding`は公開APIだが、継承元の`BaseBuilder`が
+     * ライブラリ内専用と注記されているため、音声翻訳のML Kitが連れてくる新しい`androidx.annotation`の下で
+     * lintが誤って使用禁止と判定する。その判定だけを抑える。
      */
+    @SuppressLint("RestrictedApi")
     override fun onCreateInlineSuggestionsRequest(uiExtras: Bundle): InlineSuggestionsRequest? {
         if (UiVersions.INLINE_UI_VERSION_1 !in UiVersions.getVersions(uiExtras)) return null
         val colors = KeyboardColors.from(this)
@@ -1455,10 +1476,30 @@ class UzumiInputMethodService : InputMethodService() {
 
     /**
      * 端末内の音声入力を開始する。録音権限が無い場合は許可を求めるだけの画面を開く。
+     * 音声翻訳が動いている間は、マイクを取り合わないよう開始しない。
      */
     internal fun startVoiceInput(): VoiceStartStatus {
         val recognizer = voiceRecognizer ?: return VoiceStartStatus.DESTROYED
-        val status = recognizer.start()
+        if (voiceTranslator?.state.let { it == VoiceInputState.LISTENING || it == VoiceInputState.STOPPING }) {
+            return VoiceStartStatus.ALREADY_ACTIVE
+        }
+        return requestPermissionIfDenied(recognizer.start())
+    }
+
+    /**
+     * 話した音声を[direction]の向きに端末内で翻訳して入れる処理を開始する。停止の後に訳文全体を入力欄へ入れる。
+     * 録音権限が無い場合は許可を求めるだけの画面を開く。音声入力が動いている間は開始しない。
+     */
+    internal fun startVoiceTranslation(direction: VoiceTranslationDirection): VoiceStartStatus {
+        val translator = voiceTranslator ?: return VoiceStartStatus.DESTROYED
+        if (voiceRecognizer?.state.let { it == VoiceInputState.LISTENING || it == VoiceInputState.STOPPING }) {
+            return VoiceStartStatus.ALREADY_ACTIVE
+        }
+        return requestPermissionIfDenied(translator.start(direction))
+    }
+
+    /** 開始の結果が録音権限の不足なら、許可を求めるだけの画面を開く。結果はそのまま返す。 */
+    private fun requestPermissionIfDenied(status: VoiceStartStatus): VoiceStartStatus {
         if (status == VoiceStartStatus.PERMISSION_DENIED) {
             startActivity(
                 Intent(this, VoicePermissionActivity::class.java)
@@ -1468,13 +1509,15 @@ class UzumiInputMethodService : InputMethodService() {
         return status
     }
 
-    /** 実行中の音声入力へ発話の終了を伝え、確定結果の到着を待つ。 */
-    internal fun stopVoiceInput(): Boolean = voiceRecognizer?.stop() == true
+    /** 実行中の音声入力または音声翻訳へ発話の終了を伝え、確定結果の到着を待つ。 */
+    internal fun stopVoiceInput(): Boolean = voiceRecognizer?.stop() == true || voiceTranslator?.stop() == true
 
-    /** 実行中の音声入力を取り消し、途中経過と認識器を破棄する。 */
+    /** 実行中の音声入力と音声翻訳を取り消し、途中経過と認識器・翻訳器の処理を捨てる。 */
     internal fun cancelVoiceInput(): Boolean {
         voicePartialText = ""
-        return voiceRecognizer?.cancel() == true
+        val recognizerCancelled = voiceRecognizer?.cancel() == true
+        val translatorCancelled = voiceTranslator?.cancel() == true
+        return recognizerCancelled || translatorCancelled
     }
 
     /**
